@@ -79,6 +79,25 @@ All endpoints require `X-API-Key` header for authentication.
 - `GET /api/v1/enrollment/pending` - Get pending enrollments
 - `POST /api/v1/enrollment/result` - Submit fingerprint template
 
+### Site Settings
+
+- `GET /api/v1/sites/settings` - Current settings and version
+- `PUT /api/v1/sites/settings` - Replace settings; queues a SETTINGS job for
+  every device at the site
+
+### Device Synchronization
+
+- `GET /api/v1/devices/jobs` - Fetch this device's pending sync jobs
+- `POST /api/v1/devices/jobs/:id/complete` - Acknowledge a job as applied or failed
+
+Device requests additionally require an `X-Device-Serial` header, and may send
+`X-Protocol-Version`. See [docs/sync-protocol.md](docs/sync-protocol.md) for the
+full contract.
+
+Deletions are delivered **only** as `DELETE` sync jobs. `GET /members/changes`
+cannot express a deletion — a removed row simply stops appearing in it — so a
+terminal relying on that feed would keep a revoked credential forever.
+
 ### Health
 
 - `GET /health` - Health check (no auth required)

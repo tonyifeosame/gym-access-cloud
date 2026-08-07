@@ -1,0 +1,198 @@
+# Device Synchronization Protocol v1
+
+The contract between an Access Terminal (ESP32) and the cloud API. Firmware and
+server are built by different people in different repos, so this document — not
+either codebase — is the source of truth for the seam between them.
+
+**Current version: 1** (`models.SyncProtocolVersion`)
+
+---
+
+## Why jobs and not a changes feed
+
+`GET /members/changes?since=...` can only describe rows that still exist. When a
+person is deleted their row stops appearing in the feed, so a terminal that
+cached their fingerprint never learns to remove it and keeps opening the door —
+indefinitely, and silently.
+
+Deletions are therefore pushed as durable, individually acknowledged jobs. A
+change is not "done" when the server writes it; it is done when the device says
+it applied it.
+
+**The changes feed must never be used to communicate deletions.**
+
+## Guarantees
+
+| Property | How it is achieved |
+|---|---|
+| No lost changes | Jobs are enqueued in the same transaction as the write. A person cannot be created without its jobs. |
+| At-least-once delivery | Fetching takes a 60s lease and leaves the job `PENDING`. Only an acknowledgement retires it. |
+| Idempotent apply | `CREATE` and `UPDATE` are both **upserts** on the device. Redelivery is harmless. |
+| Idempotent ack | Acknowledging an already-acknowledged job returns `200`, so a lost ack response can be safely retried. |
+| Eventual convergence | Jobs accumulate while a device is offline and are delivered in `id` order when it returns. |
+| Ordering | Jobs are delivered oldest-first by `id`. |
+
+Delivery is **at-least-once, not exactly-once**. The device must tolerate seeing
+the same job twice. That is why every operation is an upsert or a delete-if-present.
+
+## Headers
+
+| Header | Required | Meaning |
+|---|---|---|
+| `X-API-Key` | yes | Site API key; authenticates the site |
+| `X-Device-Serial` | yes | Identifies the device within that site |
+| `X-Protocol-Version` | no | Protocol the firmware speaks. Omitted means v1. |
+
+If the device declares a version **higher** than the server supports, the server
+returns `400` rather than sending a payload the firmware would misparse:
+
+```json
+{ "error": "Unsupported protocol version",
+  "server_protocol_version": 1, "device_protocol_version": 2 }
+```
+
+This is what lets a newer server keep serving older firmware mid-rollout.
+
+## `GET /api/v1/devices/jobs?limit=50`
+
+Returns due work, oldest first, and takes a delivery lease on each job returned.
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "AT-0001",
+  "server_time": "2026-08-07T18:27:36Z",
+  "count": 2,
+  "jobs": [
+    {
+      "id": 7,
+      "public_id": "…uuid…",
+      "protocol_version": 1,
+      "job_type": "DELETE",
+      "entity_type": "PERSON",
+      "entity_external_id": "MEM001",
+      "payload": {
+        "member_id": "MEM001",
+        "full_name": "Ada L. Byron",
+        "membership_type": "ANNUAL",
+        "active": true,
+        "deleted": true,
+        "updated_at": "2026-08-07T18:27:37Z"
+      },
+      "attempts": 0,
+      "created_at": "2026-08-07T18:27:37Z"
+    }
+  ]
+}
+```
+
+`limit` defaults to 50, capped at 200.
+
+### Job types
+
+| `job_type` | Device action |
+|---|---|
+| `CREATE` | Upsert the person from `payload` |
+| `UPDATE` | Upsert the person from `payload` (identical handling to `CREATE`) |
+| `DELETE` | Remove the person identified by `payload.member_id`. Succeed if already absent. |
+| `SETTINGS` | Apply `payload` as device settings |
+
+`payload.deleted` is `true` only on `DELETE`. A terminal that trusts `job_type`
+alone is correct; `deleted` is a redundant safety check.
+
+### SETTINGS payload
+
+Settings live at the site; every device at that site receives the same push.
+
+```json
+{
+  "job_type": "SETTINGS",
+  "entity_type": "SETTINGS",
+  "payload": {
+    "settings_version": 2,
+    "settings": {
+      "unlock_duration_seconds": 8,
+      "sync_interval_seconds": 30,
+      "offline_grace_minutes": 120,
+      "tamper_alarm": true
+    }
+  }
+}
+```
+
+`settings_version` increases by one on every change. **A device must ignore a
+SETTINGS job whose `settings_version` is lower than the one it already holds**,
+which is what keeps settings idempotent under redelivery and reordering.
+
+`settings` is an opaque JSON object to the transport — adding a key does not
+change the protocol version. Firmware must ignore keys it does not recognise.
+
+Settings are managed by an operator through:
+
+- `GET /api/v1/sites/settings` — read current settings and version
+- `PUT /api/v1/sites/settings` — replace settings; bumps the version and fans
+  a SETTINGS job out to every device at the site in the same transaction
+
+## `POST /api/v1/devices/jobs/{id}/complete`
+
+```json
+{ "status": "COMPLETED" }
+```
+
+or, on failure:
+
+```json
+{ "status": "FAILED", "error": "fingerprint sensor busy" }
+```
+
+An empty body means `COMPLETED`. Response:
+
+```json
+{ "protocol_version": 1, "job_id": 7, "status": "COMPLETED", "pending_jobs": 3 }
+```
+
+`pending_jobs` is the device's remaining unacknowledged backlog — useful as a
+"keep polling" signal.
+
+| Outcome | Result |
+|---|---|
+| `COMPLETED` | Job retired. Re-acking returns `200`. |
+| `FAILED` | `attempts++`, job stays `PENDING`, retried with exponential backoff (1s → 15m cap). After `max_attempts` (default 10) it is parked in `FAILED`. |
+| Another device's job | `404` |
+
+## Expected device loop
+
+1. Poll `GET /devices/jobs`.
+2. Apply each job **in the order received**.
+3. Acknowledge each job individually as it is applied.
+4. If `pending_jobs > 0`, poll again immediately; otherwise back off.
+5. On restart, just poll — anything unacknowledged is still queued.
+
+A device must **not** consider a job done because it received it. If it applies a
+job and then loses power before acknowledging, it will receive that job again.
+That is correct and safe, because applies are idempotent.
+
+## Not yet in v1
+
+These are known gaps, not oversights:
+
+- **Per-device authentication.** Auth is currently a site-level API key plus a
+  serial header. Any device holding a site key can poll another device's jobs at
+  that same site. Per-device credentials are Sprint 5.
+- **Bootstrap on registration.** `EnqueueBootstrapJobs` exists in the server but
+  is not yet wired to a registration endpoint (Sprint 5). Until it is, a device
+  added after members already exist receives only *subsequent* changes.
+- **Backlog collapse.** A device offline for a very long time accumulates one job
+  per change. There is no compaction into a single full sync yet.
+- **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync today. Doors,
+  schedules, and permissions arrive with the permission engine (Sprint 6).
+
+## Changing this protocol
+
+Additive changes (a new optional payload field, a new `job_type` older firmware
+can ignore) do **not** require a version bump.
+
+Bump `SyncProtocolVersion` for anything that would make old firmware misbehave:
+renamed or removed fields, changed semantics of an existing `job_type`, or a
+different envelope shape. Old firmware keeps declaring the old version, and the
+server is expected to keep serving it until the fleet is upgraded.

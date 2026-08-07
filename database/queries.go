@@ -106,36 +106,91 @@ func GetMembersChangedSince(companyID int64, since string) ([]models.Member, err
 	return scanMembers(rows)
 }
 
-// CreateMember creates a new member within a company
+// CreateMember creates a new member within a company and queues a CREATE sync
+// job for every device that must learn about them.
 func CreateMember(companyID int64, member *models.Member) error {
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	query := `INSERT INTO people (company_id, external_id, full_name, membership_type, active, fingerprint_template)
 	          VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
 	          RETURNING id, public_id, created_at, updated_at`
 
-	return DB.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
+	err = tx.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
 		member.Active, member.FingerprintTemplate).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobCreate, member, false); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// UpdateMember updates an existing member
+// UpdateMember updates an existing member and queues an UPDATE sync job
 func UpdateMember(companyID int64, member *models.Member) error {
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	query := `UPDATE people SET full_name = $1, membership_type = $2, active = $3,
 	          fingerprint_template = NULLIF($4, '')
 	          WHERE external_id = $5 AND company_id = $6 AND deleted_at IS NULL
 	          RETURNING id, public_id, created_at, updated_at`
 
-	return DB.QueryRow(query, member.FullName, member.MembershipType, member.Active,
+	err = tx.QueryRow(query, member.FullName, member.MembershipType, member.Active,
 		member.FingerprintTemplate, member.MemberID, companyID).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
+	if err != nil {
+		return err
+	}
+
+	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, member, false); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// DeleteMember soft-deletes a member. The row is retained for audit purposes
-// and its external ID becomes available for reuse.
+// DeleteMember soft-deletes a member and queues a DELETE sync job.
+//
+// The DELETE job is the only way a terminal ever learns about a removal --
+// GET /members/changes cannot express one, because a deleted row simply stops
+// appearing in it. Deleting an already-deleted member is a no-op and queues
+// nothing, which keeps repeated deletes idempotent.
 func DeleteMember(companyID int64, memberID string) error {
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var member models.Member
 	query := `UPDATE people SET deleted_at = CURRENT_TIMESTAMP
-	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
-	_, err := DB.Exec(query, memberID, companyID)
-	return err
+	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
+	          RETURNING id, public_id, external_id, full_name, membership_type, active, updated_at`
+
+	err = tx.QueryRow(query, memberID, companyID).Scan(
+		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
+		&member.MembershipType, &member.Active, &member.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Enrollment Queries
@@ -209,9 +264,15 @@ func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) e
 	defer tx.Rollback()
 
 	// Update fingerprint template and set active to true
-	_, err = tx.Exec(`UPDATE people SET fingerprint_template = $1, active = true
-	                  WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL`,
-		fingerprintTemplate, memberID, companyID)
+	var member models.Member
+	err = tx.QueryRow(`UPDATE people SET fingerprint_template = $1, active = true
+	                   WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
+	                   RETURNING id, public_id, external_id, full_name, membership_type,
+	                             active, COALESCE(fingerprint_template, ''), updated_at`,
+		fingerprintTemplate, memberID, companyID).Scan(
+		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
+		&member.MembershipType, &member.Active, &member.FingerprintTemplate, &member.UpdatedAt,
+	)
 	if err != nil {
 		return err
 	}
@@ -224,6 +285,11 @@ func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) e
 	                      WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
 	                  )`, now, memberID, companyID)
 	if err != nil {
+		return err
+	}
+
+	// A new fingerprint template is a change the terminals must receive
+	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, &member, false); err != nil {
 		return err
 	}
 

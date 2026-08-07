@@ -1,6 +1,31 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// SyncProtocolVersion is the version of the device synchronization protocol
+// this server speaks. It is stamped on every job at enqueue time and echoed in
+// every device-facing envelope, so a newer server can keep serving older
+// firmware while a fleet is upgraded.
+//
+// Bump this only for a breaking change to the job or envelope format.
+const SyncProtocolVersion = 1
+
+// Sync job types
+const (
+	SyncJobCreate   = "CREATE"
+	SyncJobUpdate   = "UPDATE"
+	SyncJobDelete   = "DELETE"
+	SyncJobSettings = "SETTINGS"
+)
+
+// Sync job entity types
+const (
+	SyncEntityPerson   = "PERSON"
+	SyncEntitySettings = "SETTINGS"
+)
 
 // Site represents a physical location running an access terminal
 type Site struct {
@@ -85,4 +110,72 @@ type AccessLogRequest struct {
 // MemberChangesRequest is the request for member changes
 type MemberChangesRequest struct {
 	Since string `json:"since" binding:"required"` // ISO 8601 timestamp
+}
+
+// Device represents a terminal installed at a site
+type Device struct {
+	ID           int64  `json:"id"`
+	PublicID     string `json:"public_id"`
+	SiteID       int64  `json:"site_id"`
+	SerialNumber string `json:"serial_number"`
+	DeviceName   string `json:"device_name"`
+	DeviceType   string `json:"device_type"`
+	Status       string `json:"status"`
+	Active       bool   `json:"active"`
+}
+
+// SyncJob is one unit of change a device must apply. CREATE and UPDATE are both
+// upserts on the device, which is what makes redelivery safe.
+type SyncJob struct {
+	ID               int64           `json:"id"`
+	PublicID         string          `json:"public_id"`
+	ProtocolVersion  int             `json:"protocol_version"`
+	JobType          string          `json:"job_type"`
+	EntityType       string          `json:"entity_type,omitempty"`
+	EntityExternalID string          `json:"entity_external_id,omitempty"`
+	Payload          json.RawMessage `json:"payload,omitempty"`
+	Attempts         int             `json:"attempts"`
+	CreatedAt        time.Time       `json:"created_at"`
+}
+
+// SyncJobBatch is the envelope returned to a device. The protocol version is at
+// the envelope level so firmware can check compatibility before parsing jobs.
+type SyncJobBatch struct {
+	ProtocolVersion int       `json:"protocol_version"`
+	DeviceID        string    `json:"device_id"`
+	ServerTime      time.Time `json:"server_time"`
+	Count           int       `json:"count"`
+	Jobs            []SyncJob `json:"jobs"`
+}
+
+// SyncJobResult is a device's acknowledgement of a job it attempted
+type SyncJobResult struct {
+	Status string `json:"status" binding:"required"` // COMPLETED or FAILED
+	Error  string `json:"error,omitempty"`
+}
+
+// SiteSettings is a site's device configuration and its monotonic version
+type SiteSettings struct {
+	Settings json.RawMessage `json:"settings"`
+	Version  int             `json:"settings_version"`
+}
+
+// SettingsSyncPayload is the snapshot a device applies for a SETTINGS job. The
+// version lets a device discard a stale push it receives after a newer one.
+type SettingsSyncPayload struct {
+	SettingsVersion int             `json:"settings_version"`
+	Settings        json.RawMessage `json:"settings"`
+}
+
+// PersonSyncPayload is the snapshot a device applies for a PERSON job. For a
+// DELETE the identifying fields are still present and Deleted is true, so the
+// terminal can remove the record without ever having seen it created.
+type PersonSyncPayload struct {
+	MemberID            string    `json:"member_id"`
+	FullName            string    `json:"full_name,omitempty"`
+	MembershipType      string    `json:"membership_type,omitempty"`
+	Active              bool      `json:"active"`
+	FingerprintTemplate string    `json:"fingerprint_template,omitempty"`
+	Deleted             bool      `json:"deleted"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }

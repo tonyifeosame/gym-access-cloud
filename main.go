@@ -78,6 +78,20 @@ func main() {
 			enrollment.GET("/pending", handlers.GetPendingEnrollments)
 			enrollment.POST("/result", handlers.SubmitEnrollmentResult)
 		}
+
+		// Site settings endpoints
+		sites := v1.Group("/sites")
+		{
+			sites.GET("/settings", handlers.GetSiteSettings)
+			sites.PUT("/settings", handlers.UpdateSiteSettings)
+		}
+
+		// Device synchronization endpoints
+		devices := v1.Group("/devices")
+		{
+			devices.GET("/jobs", handlers.GetDeviceJobs)
+			devices.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
+		}
 	}
 
 	// Start server
