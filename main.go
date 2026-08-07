@@ -86,12 +86,19 @@ func main() {
 			sites.PUT("/settings", handlers.UpdateSiteSettings)
 		}
 
-		// Device synchronization endpoints
-		devices := v1.Group("/devices")
-		{
-			devices.GET("/jobs", handlers.GetDeviceJobs)
-			devices.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
-		}
+		// Device registration: authenticated with the site API key, because the
+		// device does not have a credential of its own yet.
+		v1.POST("/devices/register", handlers.RegisterDevice)
+	}
+
+	// Device endpoints authenticate as the device itself, not as the site
+	deviceAPI := r.Group("/api/v1/devices")
+	deviceAPI.Use(middleware.DeviceAuthMiddleware())
+	{
+		deviceAPI.POST("/heartbeat", handlers.DeviceHeartbeat)
+		deviceAPI.GET("/settings", handlers.GetDeviceSettings)
+		deviceAPI.GET("/jobs", handlers.GetDeviceJobs)
+		deviceAPI.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
 	}
 
 	// Start server

@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -112,6 +113,11 @@ type MemberChangesRequest struct {
 	Since string `json:"since" binding:"required"` // ISO 8601 timestamp
 }
 
+// ErrDeviceSiteMismatch is returned when a serial number is already registered
+// to a different site. Reassignment is a provisioning decision, not something a
+// registration call should do silently.
+var ErrDeviceSiteMismatch = errors.New("device serial is registered to another site")
+
 // Device represents a terminal installed at a site
 type Device struct {
 	ID           int64  `json:"id"`
@@ -122,6 +128,52 @@ type Device struct {
 	DeviceType   string `json:"device_type"`
 	Status       string `json:"status"`
 	Active       bool   `json:"active"`
+	APIKeyPrefix string `json:"api_key_prefix,omitempty"`
+}
+
+// DeviceIdentity is the authenticated caller behind a device request
+type DeviceIdentity struct {
+	ID           int64
+	PublicID     string
+	SerialNumber string
+	SiteID       int64
+	CompanyID    int64
+	Status       string
+	Active       bool
+}
+
+// DeviceRegistrationRequest is the body of POST /devices/register
+type DeviceRegistrationRequest struct {
+	SerialNumber    string `json:"serial_number" binding:"required"`
+	DeviceName      string `json:"device_name,omitempty"`
+	DeviceType      string `json:"device_type,omitempty"`
+	FirmwareVersion string `json:"firmware_version,omitempty"`
+	IPAddress       string `json:"ip_address,omitempty"`
+}
+
+// DeviceRegistrationResponse carries the issued credential. The plaintext key is
+// returned exactly once and is not recoverable afterwards.
+type DeviceRegistrationResponse struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	DeviceID        string `json:"device_id"`
+	SerialNumber    string `json:"serial_number"`
+	APIKey          string `json:"api_key"`
+	BootstrapJobs   int    `json:"bootstrap_jobs"`
+	Warning         string `json:"warning"`
+}
+
+// DeviceHeartbeatRequest is the body of POST /devices/heartbeat
+type DeviceHeartbeatRequest struct {
+	FirmwareVersion string `json:"firmware_version,omitempty"`
+	IPAddress       string `json:"ip_address,omitempty"`
+}
+
+// DeviceHeartbeatResponse tells a device whether it has work waiting
+type DeviceHeartbeatResponse struct {
+	ProtocolVersion int       `json:"protocol_version"`
+	DeviceID        string    `json:"device_id"`
+	ServerTime      time.Time `json:"server_time"`
+	PendingJobs     int       `json:"pending_jobs"`
 }
 
 // SyncJob is one unit of change a device must apply. CREATE and UPDATE are both

@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,19 +12,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Device-facing synchronization endpoints.
+// Device-facing endpoints.
 //
-// Protocol versioning: a device may declare the protocol it speaks with the
-// X-Protocol-Version header. The server refuses a version it does not
-// understand rather than sending a payload the firmware will misparse, and
-// echoes the negotiated version in every envelope.
+// Identity comes from DeviceAuthMiddleware, which resolves either a per-device
+// credential or the deprecated site-key-plus-serial pair, and puts device_id,
+// device_serial, site_id and company_id in the context. Handlers here never
+// re-derive identity from headers.
 //
-// Device identity is currently the X-Device-Serial header, checked against the
-// site the API key authenticated. That authenticates the *site*, not the
-// device -- per-device credentials are Sprint 5. Until then, a device at a
-// given site could poll for another device at that same site.
+// Registration is the exception: a device has no credential yet, so that route
+// sits behind the site API key instead.
 
-const deviceSerialHeader = "X-Device-Serial"
 const protocolVersionHeader = "X-Protocol-Version"
 
 const (
@@ -57,30 +54,91 @@ func negotiateProtocol(c *gin.Context) bool {
 	return true
 }
 
-// resolveDevice identifies the calling device within the authenticated site
-func resolveDevice(c *gin.Context) (*models.Device, bool) {
-	serial := c.GetHeader(deviceSerialHeader)
-	if serial == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": deviceSerialHeader + " header required"})
-		return nil, false
+// RegisterDevice handles POST /devices/register
+//
+// Authenticated with the site API key, which is the provisioning secret: anyone
+// holding it can enrol a terminal at that site. The response contains the
+// device's credential in plaintext and is the only time it is ever available.
+//
+// Registering an existing serial rotates its credential rather than failing, so
+// a factory-reset terminal can recover. It is also re-seeded with the current
+// member list, because a reset device has lost its local copy.
+func RegisterDevice(c *gin.Context) {
+	if !negotiateProtocol(c) {
+		return
 	}
 
-	device, err := database.GetDeviceBySerial(c.GetInt64("site_id"), serial)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Device not registered for this site"})
-		return nil, false
+	var req models.DeviceRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.IPAddress == "" {
+		req.IPAddress = c.ClientIP()
+	}
+
+	device, apiKey, err := database.RegisterDevice(c.GetInt64("site_id"), req)
+	if errors.Is(err, models.ErrDeviceSiteMismatch) {
+		c.JSON(http.StatusConflict, gin.H{"error": "Serial number is registered to another site"})
+		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve device"})
-		return nil, false
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register device"})
+		return
 	}
 
-	if !device.Active || device.Status == "RETIRED" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Device is inactive"})
-		return nil, false
+	// Seed the device with current state. Bootstrap jobs are ordinary CREATE
+	// jobs queued after anything already pending, so they land last and reflect
+	// the newest state.
+	bootstrapped, err := database.EnqueueBootstrapJobs(device.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to seed device state"})
+		return
 	}
 
-	return device, true
+	c.JSON(http.StatusCreated, models.DeviceRegistrationResponse{
+		ProtocolVersion: models.SyncProtocolVersion,
+		DeviceID:        device.PublicID,
+		SerialNumber:    device.SerialNumber,
+		APIKey:          apiKey,
+		BootstrapJobs:   bootstrapped,
+		Warning:         "Store this api_key now. It cannot be retrieved again.",
+	})
+}
+
+// DeviceHeartbeat handles POST /devices/heartbeat
+//
+// Records liveness and what the device is running, and tells it whether work is
+// waiting so it can skip polling when there is nothing to do.
+func DeviceHeartbeat(c *gin.Context) {
+	if !negotiateProtocol(c) {
+		return
+	}
+
+	var req models.DeviceHeartbeatRequest
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if req.IPAddress == "" {
+		req.IPAddress = c.ClientIP()
+	}
+
+	pending, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record heartbeat"})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.DeviceHeartbeatResponse{
+		ProtocolVersion: models.SyncProtocolVersion,
+		DeviceID:        c.GetString("device_serial"),
+		ServerTime:      time.Now().UTC(),
+		PendingJobs:     pending,
+	})
 }
 
 // GetDeviceJobs handles GET /devices/jobs
@@ -90,11 +148,6 @@ func resolveDevice(c *gin.Context) (*models.Device, bool) {
 // same jobs being offered again once the delivery lease expires.
 func GetDeviceJobs(c *gin.Context) {
 	if !negotiateProtocol(c) {
-		return
-	}
-
-	device, ok := resolveDevice(c)
-	if !ok {
 		return
 	}
 
@@ -108,7 +161,7 @@ func GetDeviceJobs(c *gin.Context) {
 		limit = maxJobBatch
 	}
 
-	jobs, err := database.GetPendingJobsForDevice(device.ID, limit)
+	jobs, err := database.GetPendingJobsForDevice(c.GetInt64("device_id"), limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sync jobs"})
 		return
@@ -119,10 +172,34 @@ func GetDeviceJobs(c *gin.Context) {
 
 	c.JSON(http.StatusOK, models.SyncJobBatch{
 		ProtocolVersion: models.SyncProtocolVersion,
-		DeviceID:        device.SerialNumber,
+		DeviceID:        c.GetString("device_serial"),
 		ServerTime:      time.Now().UTC(),
 		Count:           len(jobs),
 		Jobs:            jobs,
+	})
+}
+
+// GetDeviceSettings handles GET /devices/settings
+//
+// The device's effective settings, inherited from its site. Devices normally
+// receive settings as SETTINGS sync jobs; this is the pull equivalent, for a
+// device that wants to confirm its configuration after a restart.
+func GetDeviceSettings(c *gin.Context) {
+	if !negotiateProtocol(c) {
+		return
+	}
+
+	settings, err := database.GetSiteSettings(c.GetInt64("site_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve settings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"protocol_version": models.SyncProtocolVersion,
+		"device_id":        c.GetString("device_serial"),
+		"settings_version": settings.Version,
+		"settings":         settings.Settings,
 	})
 }
 
@@ -136,10 +213,7 @@ func CompleteDeviceJob(c *gin.Context) {
 		return
 	}
 
-	device, ok := resolveDevice(c)
-	if !ok {
-		return
-	}
+	deviceID := c.GetInt64("device_id")
 
 	jobID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -162,9 +236,9 @@ func CompleteDeviceJob(c *gin.Context) {
 	var found bool
 	switch result.Status {
 	case "COMPLETED":
-		found, err = database.AckJobCompleted(device.ID, jobID)
+		found, err = database.AckJobCompleted(deviceID, jobID)
 	case "FAILED":
-		found, err = database.AckJobFailed(device.ID, jobID, result.Error)
+		found, err = database.AckJobFailed(deviceID, jobID, result.Error)
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be COMPLETED or FAILED"})
 		return
@@ -179,7 +253,7 @@ func CompleteDeviceJob(c *gin.Context) {
 		return
 	}
 
-	pending, err := database.GetDeviceSyncBacklog(device.ID)
+	pending, err := database.GetDeviceSyncBacklog(deviceID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read sync backlog"})
 		return

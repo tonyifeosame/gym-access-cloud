@@ -85,14 +85,22 @@ All endpoints require `X-API-Key` header for authentication.
 - `PUT /api/v1/sites/settings` - Replace settings; queues a SETTINGS job for
   every device at the site
 
-### Device Synchronization
+### Devices
 
+- `POST /api/v1/devices/register` - Provision a device and issue its credential
+  (authenticated with the **site** API key)
+
+The following authenticate as the device itself, with `X-Device-Key`:
+
+- `POST /api/v1/devices/heartbeat` - Report liveness and firmware
+- `GET /api/v1/devices/settings` - Effective settings for this device
 - `GET /api/v1/devices/jobs` - Fetch this device's pending sync jobs
 - `POST /api/v1/devices/jobs/:id/complete` - Acknowledge a job as applied or failed
 
-Device requests additionally require an `X-Device-Serial` header, and may send
-`X-Protocol-Version`. See [docs/sync-protocol.md](docs/sync-protocol.md) for the
-full contract.
+Device credentials are stored as SHA-256 hashes and returned in plaintext only
+once, at registration. `X-API-Key` plus `X-Device-Serial` is still accepted as a
+deprecated fallback while firmware migrates. See
+[docs/sync-protocol.md](docs/sync-protocol.md) for the full contract.
 
 Deletions are delivered **only** as `DELETE` sync jobs. `GET /members/changes`
 cannot express a deletion — a removed row simply stops appearing in it — so a

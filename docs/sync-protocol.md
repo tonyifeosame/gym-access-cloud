@@ -35,13 +35,80 @@ it applied it.
 Delivery is **at-least-once, not exactly-once**. The device must tolerate seeing
 the same job twice. That is why every operation is an upsert or a delete-if-present.
 
-## Headers
+## Authentication
 
-| Header | Required | Meaning |
-|---|---|---|
-| `X-API-Key` | yes | Site API key; authenticates the site |
-| `X-Device-Serial` | yes | Identifies the device within that site |
-| `X-Protocol-Version` | no | Protocol the firmware speaks. Omitted means v1. |
+A device authenticates with **its own credential**, issued at registration:
+
+| Header | Meaning |
+|---|---|
+| `X-Device-Key` | The device's credential. Preferred. |
+| `X-Protocol-Version` | Protocol the firmware speaks. Omitted means v1. |
+
+The credential is stored server-side as a SHA-256 hash and is returned in
+plaintext exactly once, at registration. It cannot be recovered — a device that
+loses it re-registers and is issued a new one.
+
+### Deprecated fallback
+
+`X-API-Key` (site key) plus `X-Device-Serial` is still accepted so firmware built
+against the Sprint 4 protocol keeps working during a rollout. It is weaker by
+construction: the site key is shared by every terminal at the site, so it cannot
+distinguish one device from another beyond the serial the caller claims. **Move
+to `X-Device-Key` and expect this path to be removed.**
+
+## `POST /api/v1/devices/register`
+
+Authenticated with the **site** API key, which acts as the provisioning secret.
+
+```json
+{ "serial_number": "AT-0001", "device_name": "Front Door", "firmware_version": "1.0.0" }
+```
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "0ff07b95-…",
+  "serial_number": "AT-0001",
+  "api_key": "atd_e6653a26…",
+  "bootstrap_jobs": 2,
+  "warning": "Store this api_key now. It cannot be retrieved again."
+}
+```
+
+Registration is idempotent by serial: registering an existing serial **rotates**
+its credential rather than failing, so a factory-reset terminal can recover. The
+previous credential stops working immediately.
+
+Registration also seeds the device with the current member list as `CREATE`
+jobs (`bootstrap_jobs` reports how many). Re-registration re-seeds, on the
+assumption that a device re-registering has lost its local state. Because those
+are ordinary upserts queued after anything already pending, a re-seed is
+harmless to a device that was actually fine.
+
+A serial already registered to a **different** site returns `409` and changes
+nothing — reassignment is a provisioning decision, not something registration
+does silently.
+
+## `POST /api/v1/devices/heartbeat`
+
+```json
+{ "firmware_version": "1.0.1" }
+```
+
+```json
+{ "protocol_version": 1, "device_id": "AT-0001",
+  "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4 }
+```
+
+Records liveness and reported firmware. `pending_jobs` lets a device skip
+polling when there is nothing waiting. A device that stops heartbeating is
+eventually marked `OFFLINE` by a sweep.
+
+## `GET /api/v1/devices/settings`
+
+The device's effective settings, inherited from its site. Devices normally
+receive settings as `SETTINGS` jobs; this is the pull equivalent, for confirming
+configuration after a restart.
 
 If the device declares a version **higher** than the server supports, the server
 returns `400` rather than sending a payload the firmware would misparse:
@@ -176,14 +243,14 @@ That is correct and safe, because applies are idempotent.
 
 These are known gaps, not oversights:
 
-- **Per-device authentication.** Auth is currently a site-level API key plus a
-  serial header. Any device holding a site key can poll another device's jobs at
-  that same site. Per-device credentials are Sprint 5.
-- **Bootstrap on registration.** `EnqueueBootstrapJobs` exists in the server but
-  is not yet wired to a registration endpoint (Sprint 5). Until it is, a device
-  added after members already exist receives only *subsequent* changes.
-- **Backlog collapse.** A device offline for a very long time accumulates one job
-  per change. There is no compaction into a single full sync yet.
+- **Backlog compaction.** A device offline for a very long time accumulates one
+  job per change; there is no collapse into a single full sync yet (Sprint 6).
+- **Site API keys are still stored in plaintext.** Device credentials are
+  hashed, but `sites.api_key` predates that and was left alone deliberately —
+  hashing it needs its own migration and a rotation window.
+- **The offline sweep is not scheduled.** `MarkDevicesOffline` exists but nothing
+  calls it periodically yet, so `status` only advances to `OFFLINE` when
+  something invokes the sweep.
 - **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync today. Doors,
   schedules, and permissions arrive with the permission engine (Sprint 6).
 
