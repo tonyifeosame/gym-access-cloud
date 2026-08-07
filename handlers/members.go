@@ -16,6 +16,11 @@ func GetMembers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve members"})
 		return
 	}
+	// A nil slice marshals to `null`, which a strict client parser will reject
+	// where it expects an array. Empty results must still be an empty array.
+	if members == nil {
+		members = []models.Member{}
+	}
 	c.JSON(http.StatusOK, members)
 }
 
@@ -49,14 +54,20 @@ func CreateMember(c *gin.Context) {
 // UpdateMember handles PUT /members/:id
 func UpdateMember(c *gin.Context) {
 	memberID := c.Param("id")
-	
-	var member models.Member
-	if err := c.ShouldBindJSON(&member); err != nil {
+
+	var req models.MemberUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	member.MemberID = memberID
+	member := models.Member{
+		MemberID:            memberID,
+		FullName:            req.FullName,
+		MembershipType:      req.MembershipType,
+		Active:              req.Active,
+		FingerprintTemplate: req.FingerprintTemplate,
+	}
 	if err := database.UpdateMember(c.GetInt64("company_id"), &member); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
 		return
@@ -68,7 +79,7 @@ func UpdateMember(c *gin.Context) {
 // DeleteMember handles DELETE /members/:id
 func DeleteMember(c *gin.Context) {
 	memberID := c.Param("id")
-	
+
 	if err := database.DeleteMember(c.GetInt64("company_id"), memberID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete member"})
 		return
@@ -89,6 +100,9 @@ func GetMemberChanges(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member changes"})
 		return
+	}
+	if members == nil {
+		members = []models.Member{}
 	}
 
 	c.JSON(http.StatusOK, members)

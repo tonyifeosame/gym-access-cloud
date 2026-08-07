@@ -13,7 +13,7 @@ import (
 // CheckAccess handles GET /access/:member_id
 func CheckAccess(c *gin.Context) {
 	memberID := c.Param("member_id")
-	
+
 	response, err := database.CheckMemberAccess(c.GetInt64("company_id"), memberID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check access"})
@@ -37,12 +37,19 @@ func LogAccess(c *gin.Context) {
 		siteName = req.SiteName
 	}
 
+	// An unrecognised credential is logged with no member reference rather than
+	// an empty string, so it is stored as NULL and never matches a real person.
+	var memberID *string
+	if req.MemberID != "" {
+		memberID = &req.MemberID
+	}
+
 	log := models.AccessLog{
-		MemberID: &req.MemberID,
-		Granted:   req.Granted,
-		Source:    req.Source,
-		SiteName:  siteName.(string),
-		Message:   req.Message,
+		MemberID: memberID,
+		Granted:  req.Granted,
+		Source:   req.Source,
+		SiteName: siteName.(string),
+		Message:  req.Message,
 	}
 
 	if err := database.CreateAccessLog(c.GetInt64("company_id"), c.GetInt64("site_id"), &log); err != nil {
@@ -53,16 +60,33 @@ func LogAccess(c *gin.Context) {
 	c.JSON(http.StatusCreated, log)
 }
 
-// GetAccessLogs handles GET /access/logs
-func GetAccessLogs(c *gin.Context) {
-	limit := 100
-	offset := 0
+// Access logs grow with every door scan, so an unbounded `limit` would let one
+// request pull the entire audit history into memory. Mirrors the cap the device
+// job endpoint already applies.
+const (
+	defaultLogLimit = 100
+	maxLogLimit     = 1000
+)
 
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+// clampLogLimit parses a limit query parameter, falling back to the default and
+// capping it rather than rejecting an over-large value.
+func clampLogLimit(raw string) int {
+	limit := defaultLogLimit
+	if raw != "" {
+		if l, err := strconv.Atoi(raw); err == nil && l > 0 {
 			limit = l
 		}
 	}
+	if limit > maxLogLimit {
+		limit = maxLogLimit
+	}
+	return limit
+}
+
+// GetAccessLogs handles GET /access/logs
+func GetAccessLogs(c *gin.Context) {
+	offset := 0
+	limit := clampLogLimit(c.Query("limit"))
 
 	if offsetStr := c.Query("offset"); offsetStr != "" {
 		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
@@ -75,6 +99,10 @@ func GetAccessLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
 	}
+	// Empty must be `[]`, not `null`, so a client can iterate unconditionally
+	if logs == nil {
+		logs = []models.AccessLog{}
+	}
 
 	c.JSON(http.StatusOK, logs)
 }
@@ -82,18 +110,15 @@ func GetAccessLogs(c *gin.Context) {
 // GetMemberAccessLogs handles GET /access/logs/:member_id
 func GetMemberAccessLogs(c *gin.Context) {
 	memberID := c.Param("member_id")
-	limit := 100
-
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
-		}
-	}
+	limit := clampLogLimit(c.Query("limit"))
 
 	logs, err := database.GetAccessLogsByMember(c.GetInt64("company_id"), memberID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
+	}
+	if logs == nil {
+		logs = []models.AccessLog{}
 	}
 
 	c.JSON(http.StatusOK, logs)

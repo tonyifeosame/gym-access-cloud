@@ -47,6 +47,10 @@ func GetPendingEnrollments(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve pending enrollments"})
 		return
 	}
+	// Empty must be `[]`, not `null`, so a client can iterate unconditionally
+	if requests == nil {
+		requests = []models.EnrollmentRequest{}
+	}
 
 	c.JSON(http.StatusOK, requests)
 }
@@ -66,7 +70,7 @@ func SubmitEnrollmentResult(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Enrollment completed successfully",
+		"message":   "Enrollment completed successfully",
 		"member_id": req.MemberID,
 	})
 }

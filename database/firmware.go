@@ -116,7 +116,7 @@ func GetFleetSummary(companyID int64) (*models.FleetSummary, error) {
 func ListFirmwareVersions() ([]models.FirmwareVersion, error) {
 	rows, err := DB.Query(`
 		SELECT id, public_id, version, device_type, release_channel,
-		       COALESCE(download_url, ''), COALESCE(checksum_sha256, ''), size_bytes,
+		       COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		       COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at
 		  FROM firmware_versions
 		 WHERE deleted_at IS NULL
@@ -159,7 +159,7 @@ func CreateFirmwareVersion(req models.CreateFirmwareRequest) (*models.FirmwareVe
 		     size_bytes, release_notes, is_mandatory, published_at)
 		VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''), $6, NULLIF($7,''), $8, CURRENT_TIMESTAMP)
 		RETURNING id, public_id, version, device_type, release_channel,
-		          COALESCE(download_url, ''), COALESCE(checksum_sha256, ''), size_bytes,
+		          COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		          COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at`,
 		req.Version, deviceType, channel, req.DownloadURL, req.ChecksumSHA256,
 		req.SizeBytes, req.ReleaseNotes, req.IsMandatory).
@@ -205,7 +205,7 @@ func SetCurrentFirmware(firmwareID int64) (*models.FirmwareVersion, error) {
 	err = tx.QueryRow(`
 		UPDATE firmware_versions SET is_current = TRUE WHERE id = $1
 		RETURNING id, public_id, version, device_type, release_channel,
-		          COALESCE(download_url, ''), COALESCE(checksum_sha256, ''), size_bytes,
+		          COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		          COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at`,
 		firmwareID).
 		Scan(&f.ID, &f.PublicID, &f.Version, &f.DeviceType, &f.ReleaseChannel,

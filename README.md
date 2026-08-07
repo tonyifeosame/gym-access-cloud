@@ -55,7 +55,12 @@ The API will start on port 8080 (configurable via `SERVER_PORT` env var).
 
 ## API Endpoints
 
-All endpoints require `X-API-Key` header for authentication.
+**[API_SPEC.md](API_SPEC.md) is the authoritative contract** for the ESP32
+firmware and the React dashboard — every endpoint with request/response bodies,
+error cases, and worked examples. The summary below is a quick index.
+
+Most endpoints require an `X-API-Key` header; device endpoints authenticate with
+`X-Device-Key`.
 
 ### Members
 

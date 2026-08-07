@@ -43,24 +43,24 @@ type Site struct {
 // Member represents an enrolled member. It maps to the `people` table, where
 // Member.MemberID is stored as people.external_id.
 type Member struct {
-	ID                    int64      `json:"id"`
-	PublicID              string     `json:"public_id"`
-	MemberID              string     `json:"member_id" binding:"required"`
-	FullName              string     `json:"full_name" binding:"required"`
-	MembershipType        string     `json:"membership_type" binding:"required"`
-	Active                bool       `json:"active"`
-	FingerprintTemplate   string     `json:"fingerprint_template,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	ID                  int64     `json:"id"`
+	PublicID            string    `json:"public_id"`
+	MemberID            string    `json:"member_id" binding:"required"`
+	FullName            string    `json:"full_name" binding:"required"`
+	MembershipType      string    `json:"membership_type" binding:"required"`
+	Active              bool      `json:"active"`
+	FingerprintTemplate string    `json:"fingerprint_template,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 // EnrollmentRequest represents a fingerprint enrollment request
 type EnrollmentRequest struct {
-	ID          int64     `json:"id"`
-	PublicID    string    `json:"public_id"`
-	MemberID    string    `json:"member_id" binding:"required"`
-	Status      string    `json:"status" binding:"required"` // PENDING, IN_PROGRESS, COMPLETED, FAILED
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64      `json:"id"`
+	PublicID    string     `json:"public_id"`
+	MemberID    string     `json:"member_id" binding:"required"`
+	Status      string     `json:"status" binding:"required"` // PENDING, IN_PROGRESS, COMPLETED, FAILED
+	CreatedAt   time.Time  `json:"created_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
@@ -99,13 +99,35 @@ type EnrollmentResultRequest struct {
 	FingerprintTemplate string `json:"fingerprint_template" binding:"required"`
 }
 
-// AccessLogRequest is the request to log an access attempt
+// AccessLogRequest is the request to log an access attempt.
+//
+// Note what is NOT required here, and why:
+//
+//   - Granted must not be `binding:"required"`. In go-playground/validator
+//     "required" means non-zero, so on a bool it rejects `false` -- which would
+//     make it impossible to log a denied entry. An audit trail that can only
+//     record successes is worse than none.
+//   - MemberID is optional so an unrecognised credential can still be logged.
+//     The schema stores person_external_id as nullable precisely for this.
+//   - SiteName is optional because the server derives it from the authenticated
+//     site and ignores whatever the client sends.
 type AccessLogRequest struct {
-	MemberID string `json:"member_id" binding:"required"`
-	Granted  bool   `json:"granted" binding:"required"`
+	MemberID string `json:"member_id,omitempty"`
+	Granted  bool   `json:"granted"`
 	Source   string `json:"source" binding:"required"`
-	SiteName string `json:"site_name" binding:"required"`
+	SiteName string `json:"site_name,omitempty"`
 	Message  string `json:"message,omitempty"`
+}
+
+// MemberUpdateRequest is the body of PUT /members/:id.
+//
+// Separate from Member because the member id comes from the URL; requiring it in
+// the body as well made a correct-looking update fail validation.
+type MemberUpdateRequest struct {
+	FullName            string `json:"full_name" binding:"required"`
+	MembershipType      string `json:"membership_type" binding:"required"`
+	Active              bool   `json:"active"`
+	FingerprintTemplate string `json:"fingerprint_template,omitempty"`
 }
 
 // MemberChangesRequest is the request for member changes
@@ -294,9 +316,12 @@ type SyncJobBatch struct {
 	Jobs            []SyncJob `json:"jobs"`
 }
 
-// SyncJobResult is a device's acknowledgement of a job it attempted
+// SyncJobResult is a device's acknowledgement of a job it attempted.
+//
+// Status is not required: an empty body and `{}` both mean COMPLETED, so a
+// minimal acknowledgement from constrained firmware is always valid.
 type SyncJobResult struct {
-	Status string `json:"status" binding:"required"` // COMPLETED or FAILED
+	Status string `json:"status,omitempty"` // COMPLETED (default) or FAILED
 	Error  string `json:"error,omitempty"`
 }
 
