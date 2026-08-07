@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/handlers"
+	"access-terminal-cloud-api/maintenance"
 	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -46,6 +52,12 @@ func main() {
 			"service": "Access Terminal Cloud API",
 		})
 	})
+
+	// Monitoring endpoints (no auth required; /metrics honours METRICS_TOKEN)
+	r.GET("/health/live", handlers.HealthLive)
+	r.GET("/health/ready", handlers.HealthReady)
+	r.GET("/health/maintenance", handlers.HealthMaintenance)
+	r.GET("/metrics", handlers.Metrics)
 
 	// API v1 routes with authentication
 	v1 := r.Group("/api/v1")
@@ -114,14 +126,53 @@ func main() {
 		deviceAPI.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
 	}
 
+	// Background maintenance
+	maintCfg := maintenance.LoadConfig()
+	maintCfg.Describe()
+
+	var scheduler *maintenance.Scheduler
+	if maintCfg.Enabled {
+		scheduler = maintenance.NewScheduler(maintCfg.Tasks()...)
+		scheduler.Start(context.Background())
+		handlers.SetScheduler(scheduler)
+	}
+
 	// Start server
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
 		port = "8080"
 	}
-	
-	log.Printf("Starting Access Terminal Cloud API server on port %s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+
+	srv := &http.Server{Addr: ":" + port, Handler: r}
+
+	// Serve in the background so the main goroutine can wait for a signal.
+	go func() {
+		log.Printf("Starting Access Terminal Cloud API server on port %s", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Shut down in dependency order: stop accepting requests, then stop the
+	// background tasks, then close the database. Draining in-flight requests
+	// first matters because a device may be mid-acknowledgement, and dropping
+	// that connection would have it retry a job it had already applied.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutdown signal received, draining connections...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown timed out: %v", err)
 	}
+
+	if scheduler != nil {
+		if !scheduler.Stop(maintCfg.ShutdownTimeout) {
+			log.Println("Maintenance tasks did not stop cleanly")
+		}
+	}
+
+	log.Println("Shutdown complete")
 }

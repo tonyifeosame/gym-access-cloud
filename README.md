@@ -116,9 +116,23 @@ Deletions are delivered **only** as `DELETE` sync jobs. `GET /members/changes`
 cannot express a deletion — a removed row simply stops appearing in it — so a
 terminal relying on that feed would keep a revoked credential forever.
 
-### Health
+### Health and Monitoring
 
-- `GET /health` - Health check (no auth required)
+No auth required. See [docs/operations.md](docs/operations.md) for details.
+
+- `GET /health` - Health check
+- `GET /health/live` - Liveness: is the process able to serve?
+- `GET /health/ready` - Readiness: `503` when the database is unreachable
+- `GET /health/maintenance` - Background task run history
+- `GET /metrics` - Prometheus metrics (set `METRICS_TOKEN` to require a credential)
+
+Liveness deliberately does not check the database: a dependency outage must fail
+readiness so traffic is routed away, without triggering a restart loop across
+every instance.
+
+Background maintenance marks unresponsive devices `OFFLINE` and prunes delivered
+sync jobs. Without the sweep, a terminal that loses power would stay `ONLINE`
+forever.
 
 ## Authentication
 
