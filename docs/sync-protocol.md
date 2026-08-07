@@ -92,7 +92,9 @@ does silently.
 ## `POST /api/v1/devices/heartbeat`
 
 ```json
-{ "firmware_version": "1.0.1" }
+{ "firmware_version": "1.0.1", "hardware_revision": "rev-C",
+  "build_number": "2481", "boot_count": 42,
+  "status": "ONLINE", "error": "" }
 ```
 
 ```json
@@ -100,9 +102,28 @@ does silently.
   "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4 }
 ```
 
-Records liveness and reported firmware. `pending_jobs` lets a device skip
-polling when there is nothing waiting. A device that stops heartbeating is
-eventually marked `OFFLINE` by a sweep.
+Records liveness and inventory. `pending_jobs` lets a device skip polling when
+there is nothing waiting.
+
+### Device states
+
+| State | Meaning | Set by |
+|---|---|---|
+| `PROVISIONING` | Row exists, never registered | server |
+| `ONLINE` | Heartbeating normally | device |
+| `OFFLINE` | Missed its heartbeat window | server (sweep) |
+| `UPDATING` | Applying firmware | device |
+| `ERROR` | Reported a fault; see `last_error` | device |
+| `DISABLED` | Administratively out of service | operator |
+
+A device may only report `ONLINE`, `UPDATING` or `ERROR` for itself. `OFFLINE`
+is inferred by the server, and `DISABLED` is an administrative decision — a
+heartbeat from a disabled device records liveness without returning it to
+service. Anything else a device sends is treated as `ONLINE`.
+
+A device in `ERROR` still receives sync jobs; only `DISABLED` devices are
+excluded from fan-out. An errored terminal is expected to converge once it
+recovers.
 
 ## `GET /api/v1/devices/settings`
 
@@ -163,6 +184,36 @@ Returns due work, oldest first, and takes a delivery lease on each job returned.
 | `UPDATE` | Upsert the person from `payload` (identical handling to `CREATE`) |
 | `DELETE` | Remove the person identified by `payload.member_id`. Succeed if already absent. |
 | `SETTINGS` | Apply `payload` as device settings |
+| `FULL_SYNC` | Reconcile the local roster against `payload.member_ids` — delete any local member not in the list |
+
+### FULL_SYNC and backlog compaction
+
+A device that has been offline a long time accumulates one job per change.
+Rather than making it replay history, the server collapses its queue into a
+snapshot once the backlog passes `SYNC_COMPACTION_THRESHOLD` (default 500).
+The response sets `"snapshot_taken": true` and the queue becomes:
+
+1. one `FULL_SYNC` carrying the authoritative roster,
+2. one `CREATE` per live member (with templates),
+3. one `SETTINGS`.
+
+```json
+{ "job_type": "FULL_SYNC",
+  "payload": { "snapshot": true, "count": 5,
+               "member_ids": ["MEM001","MEM002","MEM003","MEM004","MEM005"] } }
+```
+
+`FULL_SYNC` is a **set reconciliation, not a wipe**: delete local members absent
+from `member_ids`, and leave the rest alone. That distinction is load-bearing.
+A wipe-then-repopulate design loses data — if the wipe's acknowledgement were
+lost after the following `CREATE`s had already been applied and acked,
+redelivery would clear the device with nothing left to repopulate it. Framed as
+a set difference, redelivery is a no-op once converged.
+
+It carries IDs only, no templates, so a thousand members is roughly ten
+kilobytes. The `CREATE` jobs that follow supply anything the device is missing.
+
+An operator can force this with `POST /api/v1/devices/{serial}/resync`.
 
 `payload.deleted` is `true` only on `DELETE`. A terminal that trusts `job_type`
 alone is correct; `deleted` is a redundant safety check.
@@ -243,8 +294,9 @@ That is correct and safe, because applies are idempotent.
 
 These are known gaps, not oversights:
 
-- **Backlog compaction.** A device offline for a very long time accumulates one
-  job per change; there is no collapse into a single full sync yet (Sprint 6).
+- **OTA.** Firmware is inventory only. Marking a build current changes what
+  "outdated" means; nothing downloads, schedules, or applies firmware, and no
+  `FIRMWARE_UPDATE` job is ever dispatched.
 - **Site API keys are still stored in plaintext.** Device credentials are
   hashed, but `sites.api_key` predates that and was left alone deliberately —
   hashing it needs its own migration and a rotation window.

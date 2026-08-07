@@ -85,10 +85,20 @@ All endpoints require `X-API-Key` header for authentication.
 - `PUT /api/v1/sites/settings` - Replace settings; queues a SETTINGS job for
   every device at the site
 
-### Devices
+### Devices and Firmware
 
 - `POST /api/v1/devices/register` - Provision a device and issue its credential
   (authenticated with the **site** API key)
+- `GET /api/v1/devices` - Fleet inventory; `?outdated=true` filters to devices
+  behind the current build for their release channel
+- `GET /api/v1/devices/summary` - Device counts by state, plus outdated count
+- `POST /api/v1/devices/:serial/resync` - Force a full-sync snapshot for a device
+- `GET /api/v1/firmware` - Firmware catalog
+- `POST /api/v1/firmware` - Publish a build to the catalog
+- `PUT /api/v1/firmware/:id/current` - Make a build the deployment target
+
+Firmware handling is **inventory only** — marking a build current changes what
+"outdated" means and pushes nothing. OTA is not implemented.
 
 The following authenticate as the device itself, with `X-Device-Key`:
 

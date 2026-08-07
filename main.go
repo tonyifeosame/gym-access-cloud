@@ -89,6 +89,19 @@ func main() {
 		// Device registration: authenticated with the site API key, because the
 		// device does not have a credential of its own yet.
 		v1.POST("/devices/register", handlers.RegisterDevice)
+
+		// Fleet inventory and operator actions
+		v1.GET("/devices", handlers.ListDevices)
+		v1.GET("/devices/summary", handlers.GetFleetSummary)
+		v1.POST("/devices/:serial/resync", handlers.ResyncDevice)
+
+		// Firmware catalog (inventory only -- no OTA)
+		firmware := v1.Group("/firmware")
+		{
+			firmware.GET("", handlers.ListFirmwareVersions)
+			firmware.POST("", handlers.CreateFirmwareVersion)
+			firmware.PUT("/:id/current", handlers.SetCurrentFirmware)
+		}
 	}
 
 	// Device endpoints authenticate as the device itself, not as the site

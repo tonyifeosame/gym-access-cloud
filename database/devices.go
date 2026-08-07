@@ -74,26 +74,38 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 	// Re-registration must not resurrect a device that was deliberately
 	// retired, so the conflict target excludes soft-deleted rows via the
 	// partial unique index on serial_number.
+	channel := req.ReleaseChannel
+	if channel == "" {
+		channel = "STABLE"
+	}
+
 	var device models.Device
 	var wasRegistered sql.NullTime
 	err = tx.QueryRow(`
 		INSERT INTO devices (site_id, serial_number, device_name, device_type,
 		                     status, api_key_hash, api_key_prefix, registered_at,
-		                     reported_firmware, ip_address, active)
-		VALUES ($1, $2, $3, $4, 'ONLINE', $5, $6, CURRENT_TIMESTAMP, NULLIF($7,''), NULLIF($8,''), TRUE)
+		                     firmware_version, hardware_revision, build_number,
+		                     release_channel, ip_address, active)
+		VALUES ($1, $2, $3, $4, 'ONLINE', $5, $6, CURRENT_TIMESTAMP,
+		        NULLIF($7,''), NULLIF($8,''), NULLIF($9,''), $10, NULLIF($11,''), TRUE)
 		ON CONFLICT (serial_number) WHERE deleted_at IS NULL
 		DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash,
 		              api_key_prefix = EXCLUDED.api_key_prefix,
 		              device_name = EXCLUDED.device_name,
 		              device_type = EXCLUDED.device_type,
-		              reported_firmware = COALESCE(EXCLUDED.reported_firmware, devices.reported_firmware),
+		              firmware_version = COALESCE(EXCLUDED.firmware_version, devices.firmware_version),
+		              hardware_revision = COALESCE(EXCLUDED.hardware_revision, devices.hardware_revision),
+		              build_number = COALESCE(EXCLUDED.build_number, devices.build_number),
+		              release_channel = EXCLUDED.release_channel,
 		              ip_address = COALESCE(EXCLUDED.ip_address, devices.ip_address),
 		              status = 'ONLINE',
+		              last_error = NULL,
+		              last_error_at = NULL,
 		              registered_at = CURRENT_TIMESTAMP
 		RETURNING id, public_id, site_id, serial_number, device_name, device_type,
 		          status, active, api_key_prefix, registered_at`,
 		siteID, req.SerialNumber, deviceName, deviceType, hash, prefix,
-		req.FirmwareVersion, req.IPAddress).
+		req.FirmwareVersion, req.HardwareRevision, req.BuildNumber, channel, req.IPAddress).
 		Scan(&device.ID, &device.PublicID, &device.SiteID, &device.SerialNumber,
 			&device.DeviceName, &device.DeviceType, &device.Status, &device.Active,
 			&device.APIKeyPrefix, &wasRegistered)
@@ -154,16 +166,32 @@ func AuthenticateDevice(key string) (*models.DeviceIdentity, error) {
 // RecordHeartbeat marks a device as alive and records what it is running.
 // Returns the device's unacknowledged job backlog so the response can tell the
 // device whether it needs to poll.
+//
+// A device may report ONLINE, UPDATING or ERROR for itself. It cannot claim
+// OFFLINE (inferred by the server from missed heartbeats) or DISABLED (an
+// administrative decision) -- a heartbeat from a DISABLED device records
+// liveness without silently putting it back into service.
 func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, error) {
+	reported := req.Status
+	if !models.DeviceReportableStates[reported] {
+		reported = models.DeviceOnline
+	}
+
 	_, err := DB.Exec(`
 		UPDATE devices
 		   SET last_heartbeat_at = CURRENT_TIMESTAMP,
 		       last_seen_at = CURRENT_TIMESTAMP,
-		       status = CASE WHEN status = 'RETIRED' THEN status ELSE 'ONLINE' END,
-		       reported_firmware = COALESCE(NULLIF($1,''), reported_firmware),
-		       ip_address = COALESCE(NULLIF($2,''), ip_address)
-		 WHERE id = $3 AND deleted_at IS NULL`,
-		req.FirmwareVersion, req.IPAddress, deviceID)
+		       status = CASE WHEN status = 'DISABLED' THEN status ELSE $1 END,
+		       firmware_version = COALESCE(NULLIF($2,''), firmware_version),
+		       hardware_revision = COALESCE(NULLIF($3,''), hardware_revision),
+		       build_number = COALESCE(NULLIF($4,''), build_number),
+		       boot_count = COALESCE($5, boot_count),
+		       ip_address = COALESCE(NULLIF($6,''), ip_address),
+		       last_error = CASE WHEN $1 = 'ERROR' THEN NULLIF($7,'') ELSE NULL END,
+		       last_error_at = CASE WHEN $1 = 'ERROR' THEN CURRENT_TIMESTAMP ELSE NULL END
+		 WHERE id = $8 AND deleted_at IS NULL`,
+		reported, req.FirmwareVersion, req.HardwareRevision, req.BuildNumber,
+		req.BootCount, req.IPAddress, req.Error, deviceID)
 	if err != nil {
 		return 0, err
 	}

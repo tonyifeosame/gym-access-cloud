@@ -142,13 +142,36 @@ type DeviceIdentity struct {
 	Active       bool
 }
 
+// Device states. PROVISIONING is not device-reportable: it is the state of a
+// row created before the device ever registered.
+const (
+	DeviceProvisioning = "PROVISIONING"
+	DeviceOnline       = "ONLINE"
+	DeviceOffline      = "OFFLINE"
+	DeviceUpdating     = "UPDATING"
+	DeviceError        = "ERROR"
+	DeviceDisabled     = "DISABLED"
+)
+
+// DeviceReportableStates are the states a device may claim for itself. OFFLINE
+// is inferred by the server from missed heartbeats, and DISABLED/PROVISIONING
+// are administrative, so a device cannot assert any of them.
+var DeviceReportableStates = map[string]bool{
+	DeviceOnline:   true,
+	DeviceUpdating: true,
+	DeviceError:    true,
+}
+
 // DeviceRegistrationRequest is the body of POST /devices/register
 type DeviceRegistrationRequest struct {
-	SerialNumber    string `json:"serial_number" binding:"required"`
-	DeviceName      string `json:"device_name,omitempty"`
-	DeviceType      string `json:"device_type,omitempty"`
-	FirmwareVersion string `json:"firmware_version,omitempty"`
-	IPAddress       string `json:"ip_address,omitempty"`
+	SerialNumber     string `json:"serial_number" binding:"required"`
+	DeviceName       string `json:"device_name,omitempty"`
+	DeviceType       string `json:"device_type,omitempty"`
+	FirmwareVersion  string `json:"firmware_version,omitempty"`
+	HardwareRevision string `json:"hardware_revision,omitempty"`
+	BuildNumber      string `json:"build_number,omitempty"`
+	ReleaseChannel   string `json:"release_channel,omitempty"`
+	IPAddress        string `json:"ip_address,omitempty"`
 }
 
 // DeviceRegistrationResponse carries the issued credential. The plaintext key is
@@ -164,8 +187,78 @@ type DeviceRegistrationResponse struct {
 
 // DeviceHeartbeatRequest is the body of POST /devices/heartbeat
 type DeviceHeartbeatRequest struct {
-	FirmwareVersion string `json:"firmware_version,omitempty"`
-	IPAddress       string `json:"ip_address,omitempty"`
+	FirmwareVersion  string `json:"firmware_version,omitempty"`
+	HardwareRevision string `json:"hardware_revision,omitempty"`
+	BuildNumber      string `json:"build_number,omitempty"`
+	BootCount        *int   `json:"boot_count,omitempty"`
+	Status           string `json:"status,omitempty"` // ONLINE, UPDATING or ERROR
+	Error            string `json:"error,omitempty"`
+	IPAddress        string `json:"ip_address,omitempty"`
+}
+
+// DeviceInventory is a device as the dashboard sees it, including whether it is
+// behind the current build for its release channel.
+type DeviceInventory struct {
+	ID                     int64      `json:"id"`
+	PublicID               string     `json:"public_id"`
+	SiteID                 int64      `json:"site_id"`
+	SiteName               string     `json:"site_name"`
+	SerialNumber           string     `json:"serial_number"`
+	DeviceName             string     `json:"device_name"`
+	DeviceType             string     `json:"device_type"`
+	Status                 string     `json:"status"`
+	Active                 bool       `json:"active"`
+	ReleaseChannel         string     `json:"release_channel"`
+	FirmwareVersion        string     `json:"firmware_version"`
+	HardwareRevision       string     `json:"hardware_revision"`
+	BuildNumber            string     `json:"build_number"`
+	BootCount              *int       `json:"boot_count,omitempty"`
+	LastSeenAt             *time.Time `json:"last_seen_at,omitempty"`
+	LastSyncAt             *time.Time `json:"last_sync_at,omitempty"`
+	LastHeartbeatAt        *time.Time `json:"last_heartbeat_at,omitempty"`
+	CurrentFirmwareVersion string     `json:"current_firmware_version"`
+	FirmwareOutdated       bool       `json:"firmware_outdated"`
+}
+
+// FleetSummary is the device-count rollup a dashboard header shows
+type FleetSummary struct {
+	Total            int `json:"total"`
+	Online           int `json:"online"`
+	Offline          int `json:"offline"`
+	Updating         int `json:"updating"`
+	Error            int `json:"error"`
+	Disabled         int `json:"disabled"`
+	Provisioning     int `json:"provisioning"`
+	FirmwareOutdated int `json:"firmware_outdated"`
+}
+
+// FirmwareVersion is a build in the catalog
+type FirmwareVersion struct {
+	ID             int64      `json:"id"`
+	PublicID       string     `json:"public_id"`
+	Version        string     `json:"version"`
+	DeviceType     string     `json:"device_type"`
+	ReleaseChannel string     `json:"release_channel"`
+	DownloadURL    string     `json:"download_url,omitempty"`
+	ChecksumSHA256 string     `json:"checksum_sha256,omitempty"`
+	SizeBytes      *int64     `json:"size_bytes,omitempty"`
+	ReleaseNotes   string     `json:"release_notes,omitempty"`
+	IsMandatory    bool       `json:"is_mandatory"`
+	IsCurrent      bool       `json:"is_current"`
+	PublishedAt    *time.Time `json:"published_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// CreateFirmwareRequest is the body of POST /firmware
+type CreateFirmwareRequest struct {
+	Version        string `json:"version" binding:"required"`
+	DeviceType     string `json:"device_type,omitempty"`
+	ReleaseChannel string `json:"release_channel,omitempty"`
+	DownloadURL    string `json:"download_url,omitempty"`
+	ChecksumSHA256 string `json:"checksum_sha256,omitempty"`
+	SizeBytes      *int64 `json:"size_bytes,omitempty"`
+	ReleaseNotes   string `json:"release_notes,omitempty"`
+	IsMandatory    bool   `json:"is_mandatory,omitempty"`
 }
 
 // DeviceHeartbeatResponse tells a device whether it has work waiting
@@ -197,6 +290,7 @@ type SyncJobBatch struct {
 	DeviceID        string    `json:"device_id"`
 	ServerTime      time.Time `json:"server_time"`
 	Count           int       `json:"count"`
+	SnapshotTaken   bool      `json:"snapshot_taken"`
 	Jobs            []SyncJob `json:"jobs"`
 }
 

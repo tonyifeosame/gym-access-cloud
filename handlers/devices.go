@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -161,7 +162,9 @@ func GetDeviceJobs(c *gin.Context) {
 		limit = maxJobBatch
 	}
 
-	jobs, err := database.GetPendingJobsForDevice(c.GetInt64("device_id"), limit)
+	// A device far enough behind has its queue collapsed into a snapshot before
+	// anything is handed out, so recovery does not mean replaying history.
+	jobs, compacted, err := database.FetchDeviceWork(c.GetInt64("device_id"), limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sync jobs"})
 		return
@@ -175,7 +178,43 @@ func GetDeviceJobs(c *gin.Context) {
 		DeviceID:        c.GetString("device_serial"),
 		ServerTime:      time.Now().UTC(),
 		Count:           len(jobs),
+		SnapshotTaken:   compacted,
 		Jobs:            jobs,
+	})
+}
+
+// ResyncDevice handles POST /devices/:serial/resync
+//
+// Forces a device's queue to be replaced with a snapshot of current state.
+// Authenticated with the site API key -- this is an operator action, used when
+// a terminal is believed to have drifted.
+func ResyncDevice(c *gin.Context) {
+	device, err := database.GetDeviceBySerial(c.GetInt64("site_id"), c.Param("serial"))
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Device not registered for this site"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve device"})
+		return
+	}
+
+	superseded, err := database.CompactDeviceBacklog(device.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue full sync"})
+		return
+	}
+
+	pending, err := database.GetDeviceSyncBacklog(device.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read sync backlog"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"serial_number":   device.SerialNumber,
+		"superseded_jobs": superseded,
+		"pending_jobs":    pending,
 	})
 }
 

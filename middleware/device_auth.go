@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -34,7 +35,7 @@ func DeviceAuthMiddleware() gin.HandlerFunc {
 				c.Abort()
 				return
 			}
-			if !identity.Active || identity.Status == "RETIRED" {
+			if !identity.Active || identity.Status == models.DeviceDisabled {
 				c.JSON(http.StatusForbidden, gin.H{"error": "Device is inactive"})
 				c.Abort()
 				return
@@ -73,7 +74,7 @@ func DeviceAuthMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if !device.Active || device.Status == "RETIRED" {
+		if !device.Active || device.Status == models.DeviceDisabled {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Device is inactive"})
 			c.Abort()
 			return

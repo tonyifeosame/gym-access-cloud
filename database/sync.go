@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"access-terminal-cloud-api/models"
@@ -75,7 +77,7 @@ func enqueuePersonChangeTx(tx *sql.Tx, companyID int64, jobType string, member *
 	           WHERE s.company_id = $6
 	             AND d.active = TRUE
 	             AND d.deleted_at IS NULL
-	             AND d.status <> 'RETIRED'
+	             AND d.status <> 'DISABLED'
 	             AND s.deleted_at IS NULL`
 
 	_, err = tx.Exec(query, jobType, member.ID, member.MemberID, payload,
@@ -113,7 +115,7 @@ func enqueueSettingsFanoutTx(tx *sql.Tx, siteID int64, payload []byte) error {
 	           WHERE d.site_id = $3
 	             AND d.active = TRUE
 	             AND d.deleted_at IS NULL
-	             AND d.status <> 'RETIRED'`
+	             AND d.status <> 'DISABLED'`
 
 	if _, err := tx.Exec(query, payload, models.SyncProtocolVersion, siteID); err != nil {
 		return fmt.Errorf("enqueueing SETTINGS job: %w", err)
@@ -309,6 +311,13 @@ func AckJobCompleted(deviceID, jobID int64) (bool, error) {
 		return false, err
 	}
 	if affected > 0 {
+		// A completed job means sync made forward progress, which is what
+		// last_sync_at reports on the dashboard.
+		if _, err := DB.Exec(
+			`UPDATE devices SET last_sync_at = CURRENT_TIMESTAMP WHERE id = $1`,
+			deviceID); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 
@@ -356,12 +365,175 @@ func AckJobFailed(deviceID, jobID int64, reason string) (bool, error) {
 	return true, nil
 }
 
-// GetDeviceSyncBacklog reports how many jobs a device has not yet acknowledged.
-// Useful for spotting terminals that have drifted out of sync.
+// Backlog compaction (Sprint 6)
+//
+// A device offline for a long time accumulates one job per change. Replaying
+// ten thousand edits to reach a state describable in two hundred rows is waste,
+// and on a constrained terminal it is a very long recovery.
+//
+// Compaction cancels the outstanding queue and replaces it with a snapshot.
+//
+// The snapshot is deliberately a *reconciliation*, not a wipe. A FULL_SYNC job
+// carries the authoritative roster of member IDs and means "your local set
+// should be exactly this; remove anything else". It does not carry templates,
+// so it stays small -- a thousand members is roughly ten kilobytes.
+//
+// This matters for correctness, not just size. The obvious design -- a "wipe"
+// marker followed by CREATE jobs -- loses data: if the wipe's acknowledgement
+// is lost after the CREATEs were already applied and acked, redelivery wipes the
+// device and nothing repopulates it, because those CREATEs are gone. Framing the
+// job as a set-difference makes redelivery a no-op once converged.
+
+// defaultCompactionThreshold is the unacknowledged backlog at which a device's
+// queue is collapsed into a snapshot.
+const defaultCompactionThreshold = 500
+
+// compactionThreshold reads the threshold from the environment, falling back to
+// the default. Configurable so it can be tuned per deployment.
+func compactionThreshold() int {
+	if raw := os.Getenv("SYNC_COMPACTION_THRESHOLD"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultCompactionThreshold
+}
+
+// CompactDeviceBacklog replaces a device's outstanding queue with a snapshot of
+// current state. Returns how many queued jobs were superseded.
+func CompactDeviceBacklog(deviceID int64) (int, error) {
+	tx, err := DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	// Retire whatever was queued. These are superseded, not applied, so they
+	// are CANCELLED rather than COMPLETED -- acknowledged_at stays null and the
+	// "only acked jobs are complete" invariant holds.
+	result, err := tx.Exec(`
+		UPDATE sync_jobs
+		   SET status = 'CANCELLED',
+		       error_message = 'superseded by full sync'
+		 WHERE device_id = $1
+		   AND acknowledged_at IS NULL
+		   AND status IN ('PENDING', 'FAILED')`, deviceID)
+	if err != nil {
+		return 0, err
+	}
+	superseded, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	// The authoritative roster: IDs only, so this stays small.
+	_, err = tx.Exec(`
+		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
+		                       payload, protocol_version, status)
+		SELECT d.site_id, d.id, 'FULL_SYNC', 'ROSTER',
+		       jsonb_build_object(
+		           'snapshot', TRUE,
+		           'count', COALESCE(roster.n, 0),
+		           'member_ids', COALESCE(roster.ids, '[]'::jsonb)
+		       ),
+		       $2, 'PENDING'
+		  FROM devices d
+		  JOIN sites s ON s.id = d.site_id
+		  LEFT JOIN LATERAL (
+		       SELECT count(*) AS n,
+		              jsonb_agg(p.external_id ORDER BY p.external_id) AS ids
+		         FROM people p
+		        WHERE p.company_id = s.company_id AND p.deleted_at IS NULL
+		  ) roster ON TRUE
+		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
+		deviceID, models.SyncProtocolVersion)
+	if err != nil {
+		return 0, fmt.Errorf("enqueueing roster snapshot: %w", err)
+	}
+
+	// Then the full records, so the device can fill in anything it is missing.
+	_, err = tx.Exec(`
+		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type, entity_id,
+		                       entity_external_id, payload, protocol_version, status)
+		SELECT d.site_id, d.id, 'CREATE', 'PERSON', p.id, p.external_id,
+		       jsonb_build_object(
+		           'member_id', p.external_id,
+		           'full_name', p.full_name,
+		           'membership_type', p.membership_type,
+		           'active', p.active,
+		           'fingerprint_template', COALESCE(p.fingerprint_template, ''),
+		           'deleted', FALSE,
+		           'updated_at', to_char(p.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		       ),
+		       $2, 'PENDING'
+		  FROM devices d
+		  JOIN sites s ON s.id = d.site_id
+		  JOIN people p ON p.company_id = s.company_id
+		 WHERE d.id = $1 AND d.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		deviceID, models.SyncProtocolVersion)
+	if err != nil {
+		return 0, fmt.Errorf("enqueueing snapshot records: %w", err)
+	}
+
+	// Current settings, since the queued SETTINGS job was just cancelled
+	_, err = tx.Exec(`
+		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
+		                       payload, protocol_version, status)
+		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
+		       jsonb_build_object('settings_version', s.settings_version, 'settings', s.settings),
+		       $2, 'PENDING'
+		  FROM devices d JOIN sites s ON s.id = d.site_id
+		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
+		deviceID, models.SyncProtocolVersion)
+	if err != nil {
+		return 0, fmt.Errorf("enqueueing snapshot settings: %w", err)
+	}
+
+	if _, err = tx.Exec(
+		`UPDATE devices SET last_compacted_at = CURRENT_TIMESTAMP WHERE id = $1`,
+		deviceID); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(superseded), nil
+}
+
+// FetchDeviceWork returns a device's due jobs, compacting its backlog first if
+// it has fallen too far behind. Reports whether a snapshot was taken so the
+// device can be told its queue was replaced.
+func FetchDeviceWork(deviceID int64, limit int) ([]models.SyncJob, bool, error) {
+	backlog, err := GetDeviceSyncBacklog(deviceID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	compacted := false
+	if backlog > compactionThreshold() {
+		if _, err := CompactDeviceBacklog(deviceID); err != nil {
+			return nil, false, err
+		}
+		compacted = true
+	}
+
+	jobs, err := GetPendingJobsForDevice(deviceID, limit)
+	return jobs, compacted, err
+}
+
+// GetDeviceSyncBacklog reports how much work a device still owes.
+//
+// Only PENDING and FAILED count. CANCELLED jobs are unacknowledged but were
+// superseded by a snapshot, so counting them would both overstate the backlog to
+// the device and -- because compaction itself creates cancelled rows -- let a
+// compacted device immediately re-cross the compaction threshold, compacting
+// forever.
 func GetDeviceSyncBacklog(deviceID int64) (int, error) {
 	var pending int
 	err := DB.QueryRow(
-		`SELECT count(*) FROM sync_jobs WHERE device_id = $1 AND acknowledged_at IS NULL`,
+		`SELECT count(*) FROM sync_jobs
+		  WHERE device_id = $1 AND status IN ('PENDING', 'FAILED')`,
 		deviceID).Scan(&pending)
 	return pending, err
 }
