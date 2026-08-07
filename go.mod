@@ -1,4 +1,4 @@
-module gym-access-api
+module access-terminal-cloud-api
 
 go 1.21
 

@@ -1,6 +1,6 @@
-# Gym Access Cloud API
+# Access Terminal Cloud API
 
-Go-based REST API for the Gym Access System. This is the cloud backend that serves as the source of truth for member data, enrollment requests, and access logs.
+Go-based REST API for the Access Terminal system. This is the cloud backend that serves as the source of truth for member data, enrollment requests, and access logs.
 
 ## Architecture
 
@@ -10,12 +10,12 @@ Admin Portal → Go API → PostgreSQL → Terminal (C++) → Hardware
 
 ## Features
 
-- **Member Management**: CRUD operations for gym members
+- **Member Management**: CRUD operations for members
 - **Access Control**: Real-time access verification
 - **Enrollment System**: Fingerprint enrollment workflow
 - **Sync Engine**: Incremental member synchronization
 - **Access Logging**: Complete audit trail
-- **Multi-Site Support**: Multiple gym locations with API key authentication
+- **Multi-Site Support**: Multiple site locations with API key authentication
 - **Offline-Ready**: Designed to work with terminal's SQLite cache
 
 ## Prerequisites
@@ -27,7 +27,7 @@ Admin Portal → Go API → PostgreSQL → Terminal (C++) → Hardware
 
 1. **Install dependencies**:
 ```bash
-cd cloud-api
+cd access-terminal-cloud-api
 go mod download
 ```
 
@@ -39,8 +39,12 @@ cp .env.example .env
 
 3. **Run migrations**:
 ```bash
-psql -U gym_admin -d gym_access -f migrations/001_init_schema.sql
+psql -U at_admin -d access_terminal -f migrations/001_init_schema.sql
+psql -U at_admin -d access_terminal -f migrations/002_core_schema.sql
 ```
+
+Migrations are versioned and applied in filename order. They are additive:
+later migrations never edit or replace earlier ones.
 
 4. **Run the server**:
 ```bash
@@ -92,19 +96,49 @@ API keys are configured in the `sites` table in PostgreSQL.
 
 ### Tables
 
-- **sites**: Gym locations and API keys
-- **members**: Member information and fingerprint templates
-- **enrollment_requests**: Fingerprint enrollment workflow
+- **companies**: Tenant that owns sites and people
+- **sites**: Site locations and API keys
+- **doors**: Physical openings at a site
+- **devices**: Terminals/readers installed at a door
+- **people**: Person records and fingerprint templates
+- **permissions**: Which people may open which door or site, and when
 - **access_logs**: Access attempt history
+- **sync_jobs**: Queued/completed work pushed out to devices
+- **firmware_versions**: Available firmware builds per device type
+- **enrollment_requests**: Fingerprint enrollment workflow
 
-See `migrations/001_init_schema.sql` for complete schema.
+```
+companies ─┬─ sites ─┬─ doors ── devices ── firmware_versions
+           │         └─ sync_jobs
+           └─ people ─┬─ permissions
+                      ├─ enrollment_requests
+                      └─ access_logs
+```
+
+Permission schedules use a day-of-week bitmask: `Mon=1, Tue=2, Wed=4, Thu=8,
+Fri=16, Sat=32, Sun=64`, so `127` means every day.
+
+### Conventions
+
+- `id` is an internal `BIGSERIAL` and is never used as a public identifier.
+- `public_id` is a UUID and is the stable identifier for API/URL use.
+- Every table carries `created_at` and `updated_at` (trigger-maintained).
+- Entity tables carry `deleted_at` for soft deletes; all reads filter
+  `deleted_at IS NULL`, and unique keys are partial indexes scoped the same way
+  so a deleted name/serial/API key becomes reusable.
+- `access_logs` and `sync_jobs` intentionally have no `deleted_at`: an audit
+  trail must not be erasable, and jobs have their own terminal states.
+- Every query is scoped by `company_id`, resolved from the API key's site.
+
+See `migrations/001_init_schema.sql` and `migrations/002_core_schema.sql` for
+the complete schema.
 
 ## Example Requests
 
 ### Check Access
 ```bash
 curl -X GET http://localhost:8080/api/v1/access/MEM001 \
-  -H "X-API-Key: main-gym-api-key-123"
+  -H "X-API-Key: main-site-api-key-123"
 ```
 
 Response:
@@ -119,19 +153,19 @@ Response:
 ### Get Member Changes (for sync)
 ```bash
 curl -X GET "http://localhost:8080/api/v1/members/changes?since=2024-01-01T00:00:00Z" \
-  -H "X-API-Key: main-gym-api-key-123"
+  -H "X-API-Key: main-site-api-key-123"
 ```
 
 ### Log Access
 ```bash
 curl -X POST http://localhost:8080/api/v1/access/log \
-  -H "X-API-Key: main-gym-api-key-123" \
+  -H "X-API-Key: main-site-api-key-123" \
   -H "Content-Type: application/json" \
   -d '{
     "member_id": "MEM001",
     "granted": true,
     "source": "fingerprint",
-    "site_name": "Main Gym",
+    "site_name": "Main Site",
     "message": "Access granted via fingerprint"
   }'
 ```

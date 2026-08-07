@@ -3,7 +3,7 @@ package middleware
 import (
 	"net/http"
 
-	"gym-access-api/database"
+	"access-terminal-cloud-api/database"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,9 +32,11 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Store site information in context
+		// Store site information in context. company_id scopes every query the
+		// handlers make, so a key issued to one tenant cannot reach another's data.
 		c.Set("site_name", site.SiteName)
 		c.Set("site_id", site.ID)
+		c.Set("company_id", site.CompanyID)
 		c.Next()
 	}
 }

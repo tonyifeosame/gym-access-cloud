@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gym-access-api .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o access-terminal-cloud-api .
 
 # Final stage
 FROM alpine:latest
@@ -24,10 +24,10 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 
 # Copy the binary from builder
-COPY --from=builder /app/gym-access-api .
+COPY --from=builder /app/access-terminal-cloud-api .
 
 # Expose port
 EXPOSE 8080
 
 # Run the application
-CMD ["./gym-access-api"]
+CMD ["./access-terminal-cloud-api"]

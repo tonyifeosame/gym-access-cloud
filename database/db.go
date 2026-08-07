@@ -51,9 +51,9 @@ func GetConfigFromEnv() Config {
 	return Config{
 		Host:     getEnv("DB_HOST", "localhost"),
 		Port:     getEnv("DB_PORT", "5432"),
-		User:     getEnv("DB_USER", "gym_admin"),
+		User:     getEnv("DB_USER", "at_admin"),
 		Password: getEnv("DB_PASSWORD", ""),
-		DBName:   getEnv("DB_NAME", "gym_access"),
+		DBName:   getEnv("DB_NAME", "access_terminal"),
 	}
 }
 

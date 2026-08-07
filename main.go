@@ -4,9 +4,9 @@ import (
 	"log"
 	"os"
 
-	"gym-access-api/database"
-	"gym-access-api/handlers"
-	"gym-access-api/middleware"
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/handlers"
+	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -43,7 +43,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "healthy",
-			"service": "Gym Access API",
+			"service": "Access Terminal Cloud API",
 		})
 	})
 
@@ -86,7 +86,7 @@ func main() {
 		port = "8080"
 	}
 	
-	log.Printf("Starting Gym Access API server on port %s", port)
+	log.Printf("Starting Access Terminal Cloud API server on port %s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}

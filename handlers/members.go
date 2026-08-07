@@ -3,15 +3,15 @@ package handlers
 import (
 	"net/http"
 
-	"gym-access-api/database"
-	"gym-access-api/models"
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
 
 // GetMembers handles GET /members
 func GetMembers(c *gin.Context) {
-	members, err := database.GetAllMembers()
+	members, err := database.GetAllMembers(c.GetInt64("company_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve members"})
 		return
@@ -22,7 +22,7 @@ func GetMembers(c *gin.Context) {
 // GetMember handles GET /members/:id
 func GetMember(c *gin.Context) {
 	memberID := c.Param("id")
-	member, err := database.GetMemberByID(memberID)
+	member, err := database.GetMemberByID(c.GetInt64("company_id"), memberID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
 		return
@@ -38,7 +38,7 @@ func CreateMember(c *gin.Context) {
 		return
 	}
 
-	if err := database.CreateMember(&member); err != nil {
+	if err := database.CreateMember(c.GetInt64("company_id"), &member); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create member"})
 		return
 	}
@@ -57,7 +57,7 @@ func UpdateMember(c *gin.Context) {
 	}
 
 	member.MemberID = memberID
-	if err := database.UpdateMember(&member); err != nil {
+	if err := database.UpdateMember(c.GetInt64("company_id"), &member); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
 		return
 	}
@@ -69,7 +69,7 @@ func UpdateMember(c *gin.Context) {
 func DeleteMember(c *gin.Context) {
 	memberID := c.Param("id")
 	
-	if err := database.DeleteMember(memberID); err != nil {
+	if err := database.DeleteMember(c.GetInt64("company_id"), memberID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete member"})
 		return
 	}
@@ -85,7 +85,7 @@ func GetMemberChanges(c *gin.Context) {
 		return
 	}
 
-	members, err := database.GetMembersChangedSince(since)
+	members, err := database.GetMembersChangedSince(c.GetInt64("company_id"), since)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member changes"})
 		return

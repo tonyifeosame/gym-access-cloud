@@ -4,20 +4,33 @@ import (
 	"database/sql"
 	"time"
 
-	"gym-access-api/models"
+	"access-terminal-cloud-api/models"
 )
+
+// Queries target the Sprint 2 schema (migrations/002_core_schema.sql).
+//
+// Two things are true of every query below:
+//
+//   * Entity reads filter `deleted_at IS NULL`. Soft-deleted rows are retained
+//     in the table but are invisible to the API.
+//   * Reads and writes are scoped by company_id, which the auth middleware
+//     derives from the API key's site. Nothing crosses a tenant boundary.
+//
+// The `members` table became `people` and `member_id` became `external_id`.
+// The queries alias external_id back to member_id so the JSON contract the
+// terminals already speak is unchanged.
 
 // Site Queries
 
 // GetSiteByAPIKey retrieves a site by its API key
 func GetSiteByAPIKey(apiKey string) (*models.Site, error) {
 	var site models.Site
-	query := `SELECT id, site_name, api_key, active, created_at, updated_at 
-	          FROM sites WHERE api_key = $1 AND active = true`
-	
+	query := `SELECT id, public_id, company_id, site_name, api_key, active, created_at, updated_at
+	          FROM sites WHERE api_key = $1 AND active = true AND deleted_at IS NULL`
+
 	err := DB.QueryRow(query, apiKey).Scan(
-		&site.ID, &site.SiteName, &site.APIKey, &site.Active, 
-		&site.CreatedAt, &site.UpdatedAt,
+		&site.ID, &site.PublicID, &site.CompanyID, &site.SiteName, &site.APIKey,
+		&site.Active, &site.CreatedAt, &site.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -25,25 +38,22 @@ func GetSiteByAPIKey(apiKey string) (*models.Site, error) {
 	return &site, nil
 }
 
-// Member Queries
+// Member Queries (backed by the `people` table)
 
-// GetAllMembers retrieves all members
-func GetAllMembers() ([]models.Member, error) {
-	query := `SELECT id, member_id, full_name, membership_type, active, 
-	          fingerprint_template, created_at, updated_at 
-	          FROM members ORDER BY created_at DESC`
-	
-	rows, err := DB.Query(query)
-	if err != nil {
-		return nil, err
-	}
+// memberColumns is the shared projection for member reads. fingerprint_template
+// is nullable, so it is coalesced rather than scanned into a string directly.
+const memberColumns = `id, public_id, external_id, full_name, membership_type, active,
+	          COALESCE(fingerprint_template, '') AS fingerprint_template, created_at, updated_at`
+
+// scanMembers reads a member result set built from memberColumns
+func scanMembers(rows *sql.Rows) ([]models.Member, error) {
 	defer rows.Close()
 
 	var members []models.Member
 	for rows.Next() {
 		var m models.Member
 		err := rows.Scan(
-			&m.ID, &m.MemberID, &m.FullName, &m.MembershipType, &m.Active,
+			&m.ID, &m.PublicID, &m.MemberID, &m.FullName, &m.MembershipType, &m.Active,
 			&m.FingerprintTemplate, &m.CreatedAt, &m.UpdatedAt,
 		)
 		if err != nil {
@@ -51,18 +61,30 @@ func GetAllMembers() ([]models.Member, error) {
 		}
 		members = append(members, m)
 	}
-	return members, nil
+	return members, rows.Err()
 }
 
-// GetMemberByID retrieves a member by member_id
-func GetMemberByID(memberID string) (*models.Member, error) {
+// GetAllMembers retrieves all members for a company
+func GetAllMembers(companyID int64) ([]models.Member, error) {
+	query := `SELECT ` + memberColumns + `
+	          FROM people WHERE company_id = $1 AND deleted_at IS NULL
+	          ORDER BY created_at DESC`
+
+	rows, err := DB.Query(query, companyID)
+	if err != nil {
+		return nil, err
+	}
+	return scanMembers(rows)
+}
+
+// GetMemberByID retrieves a member by their external member ID
+func GetMemberByID(companyID int64, memberID string) (*models.Member, error) {
 	var m models.Member
-	query := `SELECT id, member_id, full_name, membership_type, active, 
-	          fingerprint_template, created_at, updated_at 
-	          FROM members WHERE member_id = $1`
-	
-	err := DB.QueryRow(query, memberID).Scan(
-		&m.ID, &m.MemberID, &m.FullName, &m.MembershipType, &m.Active,
+	query := `SELECT ` + memberColumns + `
+	          FROM people WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
+
+	err := DB.QueryRow(query, memberID, companyID).Scan(
+		&m.ID, &m.PublicID, &m.MemberID, &m.FullName, &m.MembershipType, &m.Active,
 		&m.FingerprintTemplate, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
@@ -72,91 +94,79 @@ func GetMemberByID(memberID string) (*models.Member, error) {
 }
 
 // GetMembersChangedSince retrieves members changed since a given timestamp
-func GetMembersChangedSince(since string) ([]models.Member, error) {
-	query := `SELECT id, member_id, full_name, membership_type, active, 
-	          fingerprint_template, created_at, updated_at 
-	          FROM members WHERE updated_at > $1 ORDER BY updated_at ASC`
-	
-	rows, err := DB.Query(query, since)
+func GetMembersChangedSince(companyID int64, since string) ([]models.Member, error) {
+	query := `SELECT ` + memberColumns + `
+	          FROM people WHERE company_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+	          ORDER BY updated_at ASC`
+
+	rows, err := DB.Query(query, companyID, since)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var members []models.Member
-	for rows.Next() {
-		var m models.Member
-		err := rows.Scan(
-			&m.ID, &m.MemberID, &m.FullName, &m.MembershipType, &m.Active,
-			&m.FingerprintTemplate, &m.CreatedAt, &m.UpdatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		members = append(members, m)
-	}
-	return members, nil
+	return scanMembers(rows)
 }
 
-// CreateMember creates a new member
-func CreateMember(member *models.Member) error {
-	query := `INSERT INTO members (member_id, full_name, membership_type, active, fingerprint_template) 
-	          VALUES ($1, $2, $3, $4, $5) 
-	          RETURNING id, created_at, updated_at`
-	
-	err := DB.QueryRow(query, member.MemberID, member.FullName, member.MembershipType, 
-		member.Active, member.FingerprintTemplate).Scan(&member.ID, &member.CreatedAt, &member.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	return nil
+// CreateMember creates a new member within a company
+func CreateMember(companyID int64, member *models.Member) error {
+	query := `INSERT INTO people (company_id, external_id, full_name, membership_type, active, fingerprint_template)
+	          VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
+	          RETURNING id, public_id, created_at, updated_at`
+
+	return DB.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
+		member.Active, member.FingerprintTemplate).
+		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 }
 
 // UpdateMember updates an existing member
-func UpdateMember(member *models.Member) error {
-	query := `UPDATE members SET full_name = $1, membership_type = $2, active = $3, 
-	          fingerprint_template = $4 WHERE member_id = $5 
-	          RETURNING updated_at`
-	
-	err := DB.QueryRow(query, member.FullName, member.MembershipType, member.Active,
-		member.FingerprintTemplate, member.MemberID).Scan(&member.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	return nil
+func UpdateMember(companyID int64, member *models.Member) error {
+	query := `UPDATE people SET full_name = $1, membership_type = $2, active = $3,
+	          fingerprint_template = NULLIF($4, '')
+	          WHERE external_id = $5 AND company_id = $6 AND deleted_at IS NULL
+	          RETURNING id, public_id, created_at, updated_at`
+
+	return DB.QueryRow(query, member.FullName, member.MembershipType, member.Active,
+		member.FingerprintTemplate, member.MemberID, companyID).
+		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 }
 
-// DeleteMember deletes a member by member_id
-func DeleteMember(memberID string) error {
-	query := `DELETE FROM members WHERE member_id = $1`
-	_, err := DB.Exec(query, memberID)
+// DeleteMember soft-deletes a member. The row is retained for audit purposes
+// and its external ID becomes available for reuse.
+func DeleteMember(companyID int64, memberID string) error {
+	query := `UPDATE people SET deleted_at = CURRENT_TIMESTAMP
+	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
+	_, err := DB.Exec(query, memberID, companyID)
 	return err
 }
 
 // Enrollment Queries
 
-// CreateEnrollmentRequest creates a new enrollment request
-func CreateEnrollmentRequest(memberID string) (*models.EnrollmentRequest, error) {
-	query := `INSERT INTO enrollment_requests (member_id, status) 
-	          VALUES ($1, 'PENDING') 
-	          RETURNING id, member_id, status, created_at, completed_at`
-	
+// CreateEnrollmentRequest creates a new enrollment request for a member
+func CreateEnrollmentRequest(companyID int64, memberID string) (*models.EnrollmentRequest, error) {
+	query := `INSERT INTO enrollment_requests (person_id, status)
+	          SELECT p.id, 'PENDING' FROM people p
+	          WHERE p.external_id = $1 AND p.company_id = $2 AND p.deleted_at IS NULL
+	          RETURNING id, public_id, status, created_at, completed_at`
+
 	var req models.EnrollmentRequest
-	err := DB.QueryRow(query, memberID).Scan(
-		&req.ID, &req.MemberID, &req.Status, &req.CreatedAt, &req.CompletedAt,
+	err := DB.QueryRow(query, memberID, companyID).Scan(
+		&req.ID, &req.PublicID, &req.Status, &req.CreatedAt, &req.CompletedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
+	req.MemberID = memberID
 	return &req, nil
 }
 
-// GetPendingEnrollmentRequests retrieves all pending enrollment requests
-func GetPendingEnrollmentRequests() ([]models.EnrollmentRequest, error) {
-	query := `SELECT id, member_id, status, created_at, completed_at 
-	          FROM enrollment_requests WHERE status = 'PENDING' ORDER BY created_at ASC`
-	
-	rows, err := DB.Query(query)
+// GetPendingEnrollmentRequests retrieves all pending enrollment requests for a company
+func GetPendingEnrollmentRequests(companyID int64) ([]models.EnrollmentRequest, error) {
+	query := `SELECT er.id, er.public_id, p.external_id, er.status, er.created_at, er.completed_at
+	          FROM enrollment_requests er
+	          JOIN people p ON p.id = er.person_id
+	          WHERE p.company_id = $1 AND er.status = 'PENDING' AND p.deleted_at IS NULL
+	          ORDER BY er.created_at ASC`
+
+	rows, err := DB.Query(query, companyID)
 	if err != nil {
 		return nil, err
 	}
@@ -166,48 +176,53 @@ func GetPendingEnrollmentRequests() ([]models.EnrollmentRequest, error) {
 	for rows.Next() {
 		var req models.EnrollmentRequest
 		err := rows.Scan(
-			&req.ID, &req.MemberID, &req.Status, &req.CreatedAt, &req.CompletedAt,
+			&req.ID, &req.PublicID, &req.MemberID, &req.Status, &req.CreatedAt, &req.CompletedAt,
 		)
 		if err != nil {
 			return nil, err
 		}
 		requests = append(requests, req)
 	}
-	return requests, nil
+	return requests, rows.Err()
 }
 
 // UpdateEnrollmentRequestStatus updates the status of an enrollment request
-func UpdateEnrollmentRequestStatus(id int, status string) error {
+func UpdateEnrollmentRequestStatus(id int64, status string) error {
 	var completedAt sql.NullTime
 	if status == "COMPLETED" || status == "FAILED" {
 		now := time.Now()
 		completedAt = sql.NullTime{Time: now, Valid: true}
 	}
-	
+
 	query := `UPDATE enrollment_requests SET status = $1, completed_at = $2 WHERE id = $3`
 	_, err := DB.Exec(query, status, completedAt, id)
 	return err
 }
 
-// CompleteEnrollment completes enrollment by updating member fingerprint and request status
-func CompleteEnrollment(memberID, fingerprintTemplate string) error {
+// CompleteEnrollment completes enrollment by updating the person's fingerprint
+// template and closing out their pending request
+func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) error {
 	tx, err := DB.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Update member fingerprint template and set active to true
-	_, err = tx.Exec(`UPDATE members SET fingerprint_template = $1, active = true WHERE member_id = $2`, 
-		fingerprintTemplate, memberID)
+	// Update fingerprint template and set active to true
+	_, err = tx.Exec(`UPDATE people SET fingerprint_template = $1, active = true
+	                  WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL`,
+		fingerprintTemplate, memberID, companyID)
 	if err != nil {
 		return err
 	}
 
 	// Update enrollment request status
 	now := time.Now()
-	_, err = tx.Exec(`UPDATE enrollment_requests SET status = 'COMPLETED', completed_at = $1 
-	                  WHERE member_id = $2 AND status = 'PENDING'`, now, memberID)
+	_, err = tx.Exec(`UPDATE enrollment_requests SET status = 'COMPLETED', completed_at = $1
+	                  WHERE status = 'PENDING' AND person_id = (
+	                      SELECT id FROM people
+	                      WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
+	                  )`, now, memberID, companyID)
 	if err != nil {
 		return err
 	}
@@ -217,36 +232,19 @@ func CompleteEnrollment(memberID, fingerprintTemplate string) error {
 
 // Access Log Queries
 
-// CreateAccessLog creates a new access log entry
-func CreateAccessLog(log *models.AccessLog) error {
-	query := `INSERT INTO access_logs (member_id, granted, source, site_name, message) 
-	          VALUES ($1, $2, $3, $4, $5) 
-	          RETURNING id, created_at`
-	
-	err := DB.QueryRow(query, log.MemberID, log.Granted, log.Source, log.SiteName, log.Message).
-		Scan(&log.ID, &log.CreatedAt)
-	if err != nil {
-		return err
-	}
-	return nil
-}
+// accessLogColumns is the shared projection for access log reads
+const accessLogColumns = `id, public_id, person_external_id, granted, source, site_name,
+	          COALESCE(message, '') AS message, created_at`
 
-// GetAccessLogs retrieves access logs with optional filtering
-func GetAccessLogs(limit int, offset int) ([]models.AccessLog, error) {
-	query := `SELECT id, member_id, granted, source, site_name, message, created_at 
-	          FROM access_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2`
-	
-	rows, err := DB.Query(query, limit, offset)
-	if err != nil {
-		return nil, err
-	}
+// scanAccessLogs reads a log result set built from accessLogColumns
+func scanAccessLogs(rows *sql.Rows) ([]models.AccessLog, error) {
 	defer rows.Close()
 
 	var logs []models.AccessLog
 	for rows.Next() {
 		var log models.AccessLog
 		err := rows.Scan(
-			&log.ID, &log.MemberID, &log.Granted, &log.Source, 
+			&log.ID, &log.PublicID, &log.MemberID, &log.Granted, &log.Source,
 			&log.SiteName, &log.Message, &log.CreatedAt,
 		)
 		if err != nil {
@@ -254,43 +252,65 @@ func GetAccessLogs(limit int, offset int) ([]models.AccessLog, error) {
 		}
 		logs = append(logs, log)
 	}
-	return logs, nil
+	return logs, rows.Err()
+}
+
+// CreateAccessLog records an access attempt. The person is resolved from their
+// external ID where possible; unmatched attempts are still logged with the raw
+// identifier so denied unknown credentials leave a trail.
+func CreateAccessLog(companyID, siteID int64, log *models.AccessLog) error {
+	query := `INSERT INTO access_logs
+	          (company_id, site_id, person_id, person_external_id, granted, source, site_name, message, occurred_at)
+	          VALUES ($1, $2,
+	                  (SELECT id FROM people
+	                    WHERE external_id = $3 AND company_id = $1 AND deleted_at IS NULL),
+	                  $3, $4, $5, $6, NULLIF($7, ''), CURRENT_TIMESTAMP)
+	          RETURNING id, public_id, created_at`
+
+	return DB.QueryRow(query, companyID, siteID, log.MemberID, log.Granted,
+		log.Source, log.SiteName, log.Message).
+		Scan(&log.ID, &log.PublicID, &log.CreatedAt)
+}
+
+// GetAccessLogs retrieves access logs for a company
+func GetAccessLogs(companyID int64, limit int, offset int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs WHERE company_id = $1
+	          ORDER BY occurred_at DESC LIMIT $2 OFFSET $3`
+
+	rows, err := DB.Query(query, companyID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return scanAccessLogs(rows)
 }
 
 // GetAccessLogsByMember retrieves access logs for a specific member
-func GetAccessLogsByMember(memberID string, limit int) ([]models.AccessLog, error) {
-	query := `SELECT id, member_id, granted, source, site_name, message, created_at 
-	          FROM access_logs WHERE member_id = $1 ORDER BY created_at DESC LIMIT $2`
-	
-	rows, err := DB.Query(query, memberID, limit)
+func GetAccessLogsByMember(companyID int64, memberID string, limit int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs WHERE company_id = $1 AND person_external_id = $2
+	          ORDER BY occurred_at DESC LIMIT $3`
+
+	rows, err := DB.Query(query, companyID, memberID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var logs []models.AccessLog
-	for rows.Next() {
-		var log models.AccessLog
-		err := rows.Scan(
-			&log.ID, &log.MemberID, &log.Granted, &log.Source, 
-			&log.SiteName, &log.Message, &log.CreatedAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		logs = append(logs, log)
-	}
-	return logs, nil
+	return scanAccessLogs(rows)
 }
 
-// CheckMemberAccess checks if a member has access
-func CheckMemberAccess(memberID string) (*models.AccessCheckResponse, error) {
+// CheckMemberAccess checks if a member has access.
+//
+// This deliberately still checks only membership status. Evaluating the
+// `permissions` table (door/site scope, schedules, validity windows) is
+// business logic held back for a later sprint.
+func CheckMemberAccess(companyID int64, memberID string) (*models.AccessCheckResponse, error) {
 	var active bool
 	var membershipType string
-	
-	query := `SELECT active, membership_type FROM members WHERE member_id = $1`
-	err := DB.QueryRow(query, memberID).Scan(&active, &membershipType)
-	
+
+	query := `SELECT active, membership_type FROM people
+	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
+	err := DB.QueryRow(query, memberID, companyID).Scan(&active, &membershipType)
+
 	if err == sql.ErrNoRows {
 		return &models.AccessCheckResponse{
 			Granted: false,

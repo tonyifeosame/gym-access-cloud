@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"gym-access-api/database"
-	"gym-access-api/models"
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,15 +17,17 @@ func StartEnrollment(c *gin.Context) {
 		return
 	}
 
+	companyID := c.GetInt64("company_id")
+
 	// Check if member exists
-	member, err := database.GetMemberByID(req.MemberID)
+	member, err := database.GetMemberByID(companyID, req.MemberID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
 		return
 	}
 
 	// Create enrollment request
-	enrollment, err := database.CreateEnrollmentRequest(req.MemberID)
+	enrollment, err := database.CreateEnrollmentRequest(companyID, req.MemberID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create enrollment request"})
 		return
@@ -40,7 +42,7 @@ func StartEnrollment(c *gin.Context) {
 
 // GetPendingEnrollments handles GET /enrollment/pending
 func GetPendingEnrollments(c *gin.Context) {
-	requests, err := database.GetPendingEnrollmentRequests()
+	requests, err := database.GetPendingEnrollmentRequests(c.GetInt64("company_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve pending enrollments"})
 		return
@@ -58,7 +60,7 @@ func SubmitEnrollmentResult(c *gin.Context) {
 	}
 
 	// Complete enrollment (updates member fingerprint and request status)
-	if err := database.CompleteEnrollment(req.MemberID, req.FingerprintTemplate); err != nil {
+	if err := database.CompleteEnrollment(c.GetInt64("company_id"), req.MemberID, req.FingerprintTemplate); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete enrollment"})
 		return
 	}

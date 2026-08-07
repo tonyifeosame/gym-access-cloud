@@ -2,9 +2,11 @@ package models
 
 import "time"
 
-// Site represents a gym location
+// Site represents a physical location running an access terminal
 type Site struct {
-	ID        int       `json:"id"`
+	ID        int64     `json:"id"`
+	PublicID  string    `json:"public_id"`
+	CompanyID int64     `json:"company_id"`
 	SiteName  string    `json:"site_name" binding:"required"`
 	APIKey    string    `json:"api_key" binding:"required"`
 	Active    bool      `json:"active"`
@@ -12,9 +14,11 @@ type Site struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Member represents a gym member
+// Member represents an enrolled member. It maps to the `people` table, where
+// Member.MemberID is stored as people.external_id.
 type Member struct {
-	ID                    int        `json:"id"`
+	ID                    int64      `json:"id"`
+	PublicID              string     `json:"public_id"`
 	MemberID              string     `json:"member_id" binding:"required"`
 	FullName              string     `json:"full_name" binding:"required"`
 	MembershipType        string     `json:"membership_type" binding:"required"`
@@ -26,7 +30,8 @@ type Member struct {
 
 // EnrollmentRequest represents a fingerprint enrollment request
 type EnrollmentRequest struct {
-	ID          int       `json:"id"`
+	ID          int64     `json:"id"`
+	PublicID    string    `json:"public_id"`
 	MemberID    string    `json:"member_id" binding:"required"`
 	Status      string    `json:"status" binding:"required"` // PENDING, IN_PROGRESS, COMPLETED, FAILED
 	CreatedAt   time.Time `json:"created_at"`
@@ -35,7 +40,8 @@ type EnrollmentRequest struct {
 
 // AccessLog represents an access attempt log
 type AccessLog struct {
-	ID        int       `json:"id"`
+	ID        int64     `json:"id"`
+	PublicID  string    `json:"public_id"`
 	MemberID  *string   `json:"member_id,omitempty"`
 	Granted   bool      `json:"granted"`
 	Source    string    `json:"source" binding:"required"`

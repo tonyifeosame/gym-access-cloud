@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"gym-access-api/database"
-	"gym-access-api/models"
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,7 +14,7 @@ import (
 func CheckAccess(c *gin.Context) {
 	memberID := c.Param("member_id")
 	
-	response, err := database.CheckMemberAccess(memberID)
+	response, err := database.CheckMemberAccess(c.GetInt64("company_id"), memberID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check access"})
 		return
@@ -45,7 +45,7 @@ func LogAccess(c *gin.Context) {
 		Message:   req.Message,
 	}
 
-	if err := database.CreateAccessLog(&log); err != nil {
+	if err := database.CreateAccessLog(c.GetInt64("company_id"), c.GetInt64("site_id"), &log); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log access"})
 		return
 	}
@@ -70,7 +70,7 @@ func GetAccessLogs(c *gin.Context) {
 		}
 	}
 
-	logs, err := database.GetAccessLogs(limit, offset)
+	logs, err := database.GetAccessLogs(c.GetInt64("company_id"), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
@@ -90,7 +90,7 @@ func GetMemberAccessLogs(c *gin.Context) {
 		}
 	}
 
-	logs, err := database.GetAccessLogsByMember(memberID, limit)
+	logs, err := database.GetAccessLogsByMember(c.GetInt64("company_id"), memberID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
