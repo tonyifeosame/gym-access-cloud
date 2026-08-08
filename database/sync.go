@@ -332,11 +332,28 @@ func AckJobCompleted(deviceID, jobID int64) (bool, error) {
 // AckJobFailed records a failed apply and schedules a retry. The job stays
 // PENDING so it is redelivered; once max_attempts is spent it is parked in
 // FAILED rather than retried forever.
+//
+// Only a job that is still in flight is retried. A job that has already been
+// retired is left exactly as it is, because a late failure report for one is a
+// stale retransmission rather than new information:
+//
+//   - COMPLETED means the device already told us it applied the job. Reopening
+//     it would undo an acknowledgement, and because the schema enforces
+//     `(status = 'COMPLETED') = (acknowledged_at IS NOT NULL)`, the write would
+//     fail the constraint and surface to the device as a 500 it retries forever.
+//   - CANCELLED means a snapshot superseded the job. Reopening it puts work the
+//     snapshot deliberately replaced back into the queue, so a device that was
+//     compacted mid-batch would re-apply pre-snapshot state -- including
+//     recreating people who were deleted before the snapshot was taken.
+//
+// Both cases report success: the device has nothing useful to do with an error,
+// and its report has been received and correctly ignored.
 func AckJobFailed(deviceID, jobID int64, reason string) (bool, error) {
+	var status string
 	var attempts, maxAttempts int
 	err := DB.QueryRow(
-		`SELECT attempts, max_attempts FROM sync_jobs WHERE id = $1 AND device_id = $2`,
-		jobID, deviceID).Scan(&attempts, &maxAttempts)
+		`SELECT status, attempts, max_attempts FROM sync_jobs WHERE id = $1 AND device_id = $2`,
+		jobID, deviceID).Scan(&status, &attempts, &maxAttempts)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -344,12 +361,18 @@ func AckJobFailed(deviceID, jobID int64, reason string) (bool, error) {
 		return false, err
 	}
 
-	attempts++
-	status := "PENDING"
-	if attempts >= maxAttempts {
-		status = "FAILED"
+	if status != "PENDING" && status != "FAILED" {
+		return true, nil
 	}
 
+	attempts++
+	next := "PENDING"
+	if attempts >= maxAttempts {
+		next = "FAILED"
+	}
+
+	// The status guard is repeated in the UPDATE so a job retired between the
+	// read above and this write is still not reopened.
 	backoff := fmt.Sprintf("%d seconds", int(backoffFor(attempts).Seconds()))
 	_, err = DB.Exec(`UPDATE sync_jobs
 	                     SET attempts = $1,
@@ -357,8 +380,9 @@ func AckJobFailed(deviceID, jobID int64, reason string) (bool, error) {
 	                         error_message = $3,
 	                         last_attempt_at = CURRENT_TIMESTAMP,
 	                         next_attempt_at = CURRENT_TIMESTAMP + $4::interval
-	                   WHERE id = $5 AND device_id = $6`,
-		attempts, status, reason, backoff, jobID, deviceID)
+	                   WHERE id = $5 AND device_id = $6
+	                     AND status IN ('PENDING', 'FAILED')`,
+		attempts, next, reason, backoff, jobID, deviceID)
 	if err != nil {
 		return false, err
 	}

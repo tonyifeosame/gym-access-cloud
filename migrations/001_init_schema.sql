@@ -55,12 +55,22 @@ CREATE INDEX IF NOT EXISTS idx_access_logs_member_id ON access_logs(member_id);
 CREATE INDEX IF NOT EXISTS idx_access_logs_created_at ON access_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_access_logs_site_name ON access_logs(site_name);
 
--- Insert default sites (these should be changed in production)
-INSERT INTO sites (site_name, api_key, active) VALUES
-    ('Main Gym', 'main-gym-api-key-123', TRUE),
-    ('Lekki Branch', 'lekki-branch-api-key-456', TRUE),
-    ('Abuja Branch', 'abuja-branch-api-key-789', TRUE)
-ON CONFLICT (site_name) DO NOTHING;
+-- No seed data.
+--
+-- This migration used to insert three sites with fixed API keys
+-- ('main-gym-api-key-123' and friends). Those keys are in the git history of
+-- every checkout, so any database built from these migrations shipped with
+-- publicly known credentials that grant full access to a tenant's members,
+-- access logs and device provisioning -- and the site API key is also the
+-- secret that enrols new terminals.
+--
+-- The seed now lives in seeds/dev_seed.sql and has to be loaded deliberately.
+-- A database created from the migrations alone has no sites and therefore no
+-- usable credentials until an operator creates one.
+--
+-- Databases that already ran this migration still contain the old rows. See
+-- "Rotating seeded credentials" in README.md for the statement that replaces
+-- them.
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()

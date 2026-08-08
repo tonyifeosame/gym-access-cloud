@@ -49,15 +49,25 @@ operator tooling. Every query is scoped to that site's company — a key issued 
 one tenant cannot reach another's data.
 
 The site key is also the **provisioning secret**: it is what authorises
-`POST /devices/register`, which mints device credentials.
+`POST /devices/register`, which mints device credentials. Treat it accordingly —
+anyone holding it can enrol a terminal at that site.
+
+> The key shown above is the development seed from `seeds/dev_seed.sql`. It is
+> committed to the repository and therefore public. It is **not** created by the
+> migrations: a database built from `migrations/` alone has no sites and no
+> credentials until an operator creates one.
 
 Failure responses:
 
 | Condition | Status | Body |
 |---|---|---|
 | Header absent | `401` | `{"error":"API key required"}` |
-| Key unknown or site inactive | `401` | `{"error":"Invalid API key"}` |
-| Site marked inactive | `403` | `{"error":"Site is inactive"}` |
+| Key unknown | `401` | `{"error":"Invalid API key"}` |
+| Site marked inactive | `401` | `{"error":"Invalid API key"}` |
+| Database unreachable | `500` | `{"error":"Authentication unavailable"}` |
+
+An outage is reported as `500`, never as `401`. A client told its credential is
+invalid may discard a key that was fine.
 
 ### Device key
 
@@ -150,9 +160,24 @@ HTTP status code.
 | `401` | Missing or invalid credential |
 | `403` | Valid credential, but the site or device is inactive |
 | `404` | Resource not found, or not owned by the caller |
-| `409` | Conflict (serial registered to another site) |
+| `409` | Conflict — serial registered to another site, duplicate `member_id`, duplicate firmware version |
 | `500` | Server or database error |
 | `503` | Dependency unavailable (readiness / metrics only) |
+
+A resource owned by another tenant is reported as `404`, not `403`, so the API
+does not confirm that an id exists in someone else's account.
+
+### Request correlation
+
+Every response carries `X-Request-ID`. Send your own to have it echoed back:
+
+```
+X-Request-ID: 9f2c1ab4de77c051
+```
+
+The same id appears on the server's request line and on any error logged while
+serving it, so a device that reports a failing request id gives an operator an
+exact place to look. Anything longer than 64 characters is replaced.
 
 ### Response envelopes
 
@@ -208,7 +233,10 @@ Returns a single member object as above → `200`.
 |---|---|---|
 | Not found | `404` | `{"error":"Member not found"}` |
 
-> Any retrieval error, including a database failure, currently reports `404`.
+| Error | Status | Body |
+|---|---|---|
+| No such member in this company | `404` | `{"error":"Member not found"}` |
+| Database failure | `500` | `{"error":"Failed to retrieve member"}` |
 
 ### `POST /api/v1/members`
 
@@ -243,10 +271,10 @@ curl -X POST http://localhost:8080/api/v1/members \
 **Side effect:** queues a `CREATE` sync job for every device in the company, in
 the same transaction as the insert.
 
-| Error | Status |
-|---|---|
-| Missing required field | `400` |
-| `member_id` already exists in this company | `500` |
+| Error | Status | Body |
+|---|---|---|
+| Missing required field | `400` | validator message |
+| `member_id` already exists in this company | `409` | `{"error":"Member ID already exists"}` |
 
 ### `PUT /api/v1/members/{member_id}`
 
@@ -275,7 +303,7 @@ Returns the updated member → `200`.
 | Error | Status | Body |
 |---|---|---|
 | Missing `full_name`/`membership_type` | `400` | validator message |
-| Member not found | `500` | `{"error":"Failed to update member"}` |
+| Member not found | `404` | `{"error":"Member not found"}` |
 
 ### `DELETE /api/v1/members/{member_id}`
 
@@ -459,6 +487,11 @@ Array of pending requests, oldest first → `200`. Empty: `[]`.
 Stores the template, sets the member active, closes the pending request, and
 queues an `UPDATE` sync job to every device — all in one transaction.
 
+| Error | Status | Body |
+|---|---|---|
+| Missing field | `400` | validator message |
+| No such member in this company | `404` | `{"error":"Member not found"}` |
+
 ---
 
 ## 6. Site settings
@@ -621,7 +654,8 @@ when a terminal is believed to have drifted.
 **Auth: site API key.** Catalog and inventory only — **nothing here downloads,
 schedules, or applies firmware.** OTA is not implemented.
 
-The catalog is currently **global**, not company-scoped.
+The catalog is **scoped to the caller's company**. A tenant sees, publishes and
+promotes only its own builds; another tenant's firmware id reads as `404`.
 
 ### `GET /api/v1/firmware`
 
@@ -661,10 +695,15 @@ The catalog is currently **global**, not company-scoped.
 Returns the created record with `is_current: false` → `201`. A new build does
 **not** become the target until explicitly promoted.
 
+| Error | Status | Body |
+|---|---|---|
+| Version already published for that device type | `409` | `{"error":"That version already exists for this device type"}` |
+
 ### `PUT /api/v1/firmware/{id}/current`
 
-Makes a build the deployment target for its `(device_type, release_channel)`,
-demoting whatever held that slot. Exactly one current build per pair.
+Makes a build the deployment target for its
+`(company, device_type, release_channel)`, demoting whatever held that slot.
+Exactly one current build per triple.
 
 Returns the record with `is_current: true` → `200`.
 
@@ -672,7 +711,7 @@ Returns the record with `is_current: true` → `200`.
 
 | Error | Status | Body |
 |---|---|---|
-| Unknown id | `404` | `{"error":"Firmware version not found"}` |
+| Unknown id, or owned by another company | `404` | `{"error":"Firmware version not found"}` |
 
 ---
 
@@ -825,7 +864,22 @@ job is parked in `FAILED`.
 |---|---|---|
 | Non-numeric id | `400` | `{"error":"Invalid job id"}` |
 | `status` not `COMPLETED`/`FAILED` | `400` | `{"error":"status must be COMPLETED or FAILED"}` |
-| Job belongs to another device | `404` | `{"error":"Job not found for this device"}` |
+| Job belongs to another device, or does not exist | `404` | `{"error":"Job not found for this device"}` |
+
+**Acknowledging a job that is already retired is a no-op that returns `200`.**
+A device may safely retransmit an acknowledgement whose response it never
+received. Specifically:
+
+| Job's current state | `COMPLETED` ack | `FAILED` ack |
+|---|---|---|
+| `PENDING` / `FAILED` | retired as completed | attempt recorded, retry scheduled |
+| `COMPLETED` | no change, `200` | **no change**, `200` |
+| `CANCELLED` (superseded by a snapshot) | no change, `200` | **no change**, `200` |
+
+The two bold cases matter for a terminal that fetched a batch and was then
+resynced, or whose acknowledgement was lost: a late failure report must not
+reopen work that a snapshot already replaced, or undo an acknowledgement the
+server has already accepted.
 
 ### Recommended device loop
 
@@ -949,12 +1003,23 @@ Behaviour a client must design around today:
 1. **Access checks ignore permissions.** `GET /access/{member_id}` tests
    membership status only — no door scope, schedule, or validity window.
 2. **`GET /members` is unpaginated.**
-3. **CORS is `Allow-Origin: *` with `Allow-Credentials: true`** — an invalid
-   combination that browsers reject. The dashboard will need this fixed before
-   it can send credentials cross-origin.
-4. **No rate limiting** on any endpoint, including authentication.
-5. **Site API keys are stored in plaintext.** Device keys are hashed.
-6. **The deprecated site-key + serial device auth is still accepted.**
-7. **Response envelopes are inconsistent** — bare arrays for members, access
+3. **No rate limiting** on any endpoint, including authentication. A leaked site
+   key can be brute-forced against `/devices/register` without resistance, and
+   nothing bounds how many terminals one key may enrol.
+4. **Site API keys are stored in plaintext**, and are compared with a plain SQL
+   equality. Device keys are hashed with SHA-256 and never stored in the clear.
+   Fixing this needs a way to re-issue a site key, which no endpoint offers yet —
+   see the note in README.md.
+5. **The deprecated site-key + serial device auth is still accepted.** It cannot
+   distinguish one terminal at a site from another beyond the serial the caller
+   claims.
+6. **People are tenant-wide, not site-scoped.** Every terminal in a company
+   receives every person in that company, including terminals at other sites.
+   Site settings, by contrast, reach only that site's devices. This is by
+   design; door-level scoping belongs to the permission engine.
+7. **`/metrics` is fleet-wide and unauthenticated unless `METRICS_TOKEN` is
+   set.** It exposes counts across all tenants. Keep it off the public network
+   or set the token.
+8. **Response envelopes are inconsistent** — bare arrays for members, access
    logs, and enrollment; `{count, ...}` objects for devices and firmware.
-8. **Error message strings are not stable.** Branch on status codes.
+9. **Error message strings are not stable.** Branch on status codes.

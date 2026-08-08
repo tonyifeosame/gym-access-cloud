@@ -85,6 +85,7 @@ func RegisterDevice(c *gin.Context) {
 		return
 	}
 	if err != nil {
+		logError(c, "register device", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register device"})
 		return
 	}
@@ -94,6 +95,7 @@ func RegisterDevice(c *gin.Context) {
 	// the newest state.
 	bootstrapped, err := database.EnqueueBootstrapJobs(device.ID)
 	if err != nil {
+		logError(c, "seed device state", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to seed device state"})
 		return
 	}
@@ -130,6 +132,7 @@ func DeviceHeartbeat(c *gin.Context) {
 
 	pending, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
 	if err != nil {
+		logError(c, "record heartbeat", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record heartbeat"})
 		return
 	}
@@ -166,6 +169,7 @@ func GetDeviceJobs(c *gin.Context) {
 	// anything is handed out, so recovery does not mean replaying history.
 	jobs, compacted, err := database.FetchDeviceWork(c.GetInt64("device_id"), limit)
 	if err != nil {
+		logError(c, "fetch device work", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sync jobs"})
 		return
 	}
@@ -190,23 +194,26 @@ func GetDeviceJobs(c *gin.Context) {
 // a terminal is believed to have drifted.
 func ResyncDevice(c *gin.Context) {
 	device, err := database.GetDeviceBySerial(c.GetInt64("site_id"), c.Param("serial"))
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Device not registered for this site"})
 		return
 	}
 	if err != nil {
+		logError(c, "resolve device", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve device"})
 		return
 	}
 
 	superseded, err := database.CompactDeviceBacklog(device.ID)
 	if err != nil {
+		logError(c, "compact device backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue full sync"})
 		return
 	}
 
 	pending, err := database.GetDeviceSyncBacklog(device.ID)
 	if err != nil {
+		logError(c, "read sync backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read sync backlog"})
 		return
 	}
@@ -230,6 +237,7 @@ func GetDeviceSettings(c *gin.Context) {
 
 	settings, err := database.GetSiteSettings(c.GetInt64("site_id"))
 	if err != nil {
+		logError(c, "get device settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve settings"})
 		return
 	}
@@ -284,6 +292,7 @@ func CompleteDeviceJob(c *gin.Context) {
 	}
 
 	if err != nil {
+		logError(c, "acknowledge job", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to acknowledge job"})
 		return
 	}
@@ -294,6 +303,7 @@ func CompleteDeviceJob(c *gin.Context) {
 
 	pending, err := database.GetDeviceSyncBacklog(deviceID)
 	if err != nil {
+		logError(c, "read sync backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read sync backlog"})
 		return
 	}

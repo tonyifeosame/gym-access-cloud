@@ -30,11 +30,15 @@ const deviceInventoryColumns = `
 	    ELSE d.firmware_version <> fv.version
 	END AS firmware_outdated`
 
+// The firmware join carries company_id as well as type and channel: "current"
+// is a per-tenant target, so a device must only ever be measured against its own
+// company's build.
 const deviceInventoryFrom = `
 	FROM devices d
 	JOIN sites s ON s.id = d.site_id
 	LEFT JOIN firmware_versions fv
-	       ON fv.device_type = d.device_type
+	       ON fv.company_id = s.company_id
+	      AND fv.device_type = d.device_type
 	      AND fv.release_channel = d.release_channel
 	      AND fv.is_current
 	      AND fv.deleted_at IS NULL
@@ -98,7 +102,8 @@ func GetFleetSummary(companyID int64) (*models.FleetSummary, error) {
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  LEFT JOIN firmware_versions fv
-		         ON fv.device_type = d.device_type
+		         ON fv.company_id = s.company_id
+		        AND fv.device_type = d.device_type
 		        AND fv.release_channel = d.release_channel
 		        AND fv.is_current AND fv.deleted_at IS NULL
 		 WHERE s.company_id = $1 AND d.deleted_at IS NULL AND s.deleted_at IS NULL`,
@@ -112,15 +117,19 @@ func GetFleetSummary(companyID int64) (*models.FleetSummary, error) {
 
 // Firmware catalog
 
-// ListFirmwareVersions returns the firmware catalog, newest first
-func ListFirmwareVersions() ([]models.FirmwareVersion, error) {
+// ListFirmwareVersions returns the company's firmware catalog, newest first.
+//
+// Scoped by company like every other read: the catalog carries download URLs and
+// checksums, which are not another tenant's business.
+func ListFirmwareVersions(companyID int64) ([]models.FirmwareVersion, error) {
 	rows, err := DB.Query(`
 		SELECT id, public_id, version, device_type, release_channel,
 		       COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		       COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at
 		  FROM firmware_versions
-		 WHERE deleted_at IS NULL
-		 ORDER BY device_type, release_channel, published_at DESC NULLS LAST, id DESC`)
+		 WHERE company_id = $1 AND deleted_at IS NULL
+		 ORDER BY device_type, release_channel, published_at DESC NULLS LAST, id DESC`,
+		companyID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,9 +149,9 @@ func ListFirmwareVersions() ([]models.FirmwareVersion, error) {
 	return versions, rows.Err()
 }
 
-// CreateFirmwareVersion adds a build to the catalog. It does not become the
-// deployment target until it is explicitly marked current.
-func CreateFirmwareVersion(req models.CreateFirmwareRequest) (*models.FirmwareVersion, error) {
+// CreateFirmwareVersion adds a build to the company's catalog. It does not
+// become the deployment target until it is explicitly marked current.
+func CreateFirmwareVersion(companyID int64, req models.CreateFirmwareRequest) (*models.FirmwareVersion, error) {
 	deviceType := req.DeviceType
 	if deviceType == "" {
 		deviceType = "TERMINAL"
@@ -155,13 +164,13 @@ func CreateFirmwareVersion(req models.CreateFirmwareRequest) (*models.FirmwareVe
 	var f models.FirmwareVersion
 	err := DB.QueryRow(`
 		INSERT INTO firmware_versions
-		    (version, device_type, release_channel, download_url, checksum_sha256,
+		    (company_id, version, device_type, release_channel, download_url, checksum_sha256,
 		     size_bytes, release_notes, is_mandatory, published_at)
-		VALUES ($1, $2, $3, NULLIF($4,''), NULLIF($5,''), $6, NULLIF($7,''), $8, CURRENT_TIMESTAMP)
+		VALUES ($1, $2, $3, $4, NULLIF($5,''), NULLIF($6,''), $7, NULLIF($8,''), $9, CURRENT_TIMESTAMP)
 		RETURNING id, public_id, version, device_type, release_channel,
 		          COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		          COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at`,
-		req.Version, deviceType, channel, req.DownloadURL, req.ChecksumSHA256,
+		companyID, req.Version, deviceType, channel, req.DownloadURL, req.ChecksumSHA256,
 		req.SizeBytes, req.ReleaseNotes, req.IsMandatory).
 		Scan(&f.ID, &f.PublicID, &f.Version, &f.DeviceType, &f.ReleaseChannel,
 			&f.DownloadURL, &f.ChecksumSHA256, &f.SizeBytes, &f.ReleaseNotes,
@@ -173,11 +182,16 @@ func CreateFirmwareVersion(req models.CreateFirmwareRequest) (*models.FirmwareVe
 }
 
 // SetCurrentFirmware makes a build the deployment target for its device type and
-// release channel, demoting whatever held that slot.
+// release channel within the company, demoting whatever held that slot.
 //
 // This only changes what "outdated" means. It does not push anything to any
 // device -- that is OTA, and is not implemented.
-func SetCurrentFirmware(firmwareID int64) (*models.FirmwareVersion, error) {
+//
+// The company filter on the initial lookup is what stops one tenant retargeting
+// another's fleet: a firmware id belonging to a different company reads as
+// sql.ErrNoRows and the caller answers 404, exactly as it would for an id that
+// does not exist.
+func SetCurrentFirmware(companyID, firmwareID int64) (*models.FirmwareVersion, error) {
 	tx, err := DB.Begin()
 	if err != nil {
 		return nil, err
@@ -187,27 +201,30 @@ func SetCurrentFirmware(firmwareID int64) (*models.FirmwareVersion, error) {
 	var deviceType, channel string
 	err = tx.QueryRow(
 		`SELECT device_type, release_channel FROM firmware_versions
-		  WHERE id = $1 AND deleted_at IS NULL`, firmwareID).Scan(&deviceType, &channel)
+		  WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
+		firmwareID, companyID).Scan(&deviceType, &channel)
 	if err != nil {
 		return nil, err
 	}
 
 	// Demote first: the partial unique index permits only one current build per
-	// (device_type, release_channel).
+	// (company_id, device_type, release_channel).
 	if _, err = tx.Exec(
 		`UPDATE firmware_versions SET is_current = FALSE
-		  WHERE device_type = $1 AND release_channel = $2 AND is_current AND deleted_at IS NULL`,
-		deviceType, channel); err != nil {
+		  WHERE company_id = $1 AND device_type = $2 AND release_channel = $3
+		    AND is_current AND deleted_at IS NULL`,
+		companyID, deviceType, channel); err != nil {
 		return nil, err
 	}
 
 	var f models.FirmwareVersion
 	err = tx.QueryRow(`
-		UPDATE firmware_versions SET is_current = TRUE WHERE id = $1
+		UPDATE firmware_versions SET is_current = TRUE
+		 WHERE id = $1 AND company_id = $2
 		RETURNING id, public_id, version, device_type, release_channel,
 		          COALESCE(download_url, ''), COALESCE(TRIM(checksum_sha256), ''), size_bytes,
 		          COALESCE(release_notes, ''), is_mandatory, is_current, published_at, created_at`,
-		firmwareID).
+		firmwareID, companyID).
 		Scan(&f.ID, &f.PublicID, &f.Version, &f.DeviceType, &f.ReleaseChannel,
 			&f.DownloadURL, &f.ChecksumSHA256, &f.SizeBytes, &f.ReleaseNotes,
 			&f.IsMandatory, &f.IsCurrent, &f.PublishedAt, &f.CreatedAt)

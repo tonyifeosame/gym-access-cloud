@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -25,6 +26,7 @@ func ListDevices(c *gin.Context) {
 
 	devices, err := database.ListDevices(c.GetInt64("company_id"), outdatedOnly)
 	if err != nil {
+		logError(c, "list devices", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve devices"})
 		return
 	}
@@ -39,6 +41,7 @@ func ListDevices(c *gin.Context) {
 func GetFleetSummary(c *gin.Context) {
 	summary, err := database.GetFleetSummary(c.GetInt64("company_id"))
 	if err != nil {
+		logError(c, "fleet summary", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve fleet summary"})
 		return
 	}
@@ -47,8 +50,9 @@ func GetFleetSummary(c *gin.Context) {
 
 // ListFirmwareVersions handles GET /firmware
 func ListFirmwareVersions(c *gin.Context) {
-	versions, err := database.ListFirmwareVersions()
+	versions, err := database.ListFirmwareVersions(c.GetInt64("company_id"))
 	if err != nil {
+		logError(c, "list firmware versions", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve firmware versions"})
 		return
 	}
@@ -69,8 +73,13 @@ func CreateFirmwareVersion(c *gin.Context) {
 		return
 	}
 
-	version, err := database.CreateFirmwareVersion(req)
+	version, err := database.CreateFirmwareVersion(c.GetInt64("company_id"), req)
+	if database.IsUniqueViolation(err) {
+		c.JSON(http.StatusConflict, gin.H{"error": "That version already exists for this device type"})
+		return
+	}
 	if err != nil {
+		logError(c, "create firmware version", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create firmware version"})
 		return
 	}
@@ -89,12 +98,15 @@ func SetCurrentFirmware(c *gin.Context) {
 		return
 	}
 
-	version, err := database.SetCurrentFirmware(id)
-	if err == sql.ErrNoRows {
+	// A firmware id belonging to another company is reported as not found rather
+	// than forbidden, so the endpoint does not confirm that the id exists.
+	version, err := database.SetCurrentFirmware(c.GetInt64("company_id"), id)
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Firmware version not found"})
 		return
 	}
 	if err != nil {
+		logError(c, "set current firmware", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to set current firmware"})
 		return
 	}

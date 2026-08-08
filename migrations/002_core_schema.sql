@@ -514,23 +514,15 @@ UPDATE sites
 UPDATE access_logs SET site_name = 'Main Site' WHERE site_name = 'Main Gym';
 
 -- ---------------------------------------------------------------------------
--- Development seed data (change or remove before production)
+-- Development seed data has moved to seeds/dev_seed.sql
 -- ---------------------------------------------------------------------------
-INSERT INTO firmware_versions (version, device_type, release_channel, is_mandatory, published_at)
-SELECT '1.0.0', 'TERMINAL', 'STABLE', FALSE, CURRENT_TIMESTAMP
- WHERE NOT EXISTS (
-    SELECT 1 FROM firmware_versions
-     WHERE device_type = 'TERMINAL' AND version = '1.0.0' AND deleted_at IS NULL
- );
-
--- One main entrance per existing site
-INSERT INTO doors (site_id, door_name, description, direction)
-SELECT s.id, 'Main Entrance', 'Primary entry door', 'IN'
-  FROM sites s
- WHERE s.deleted_at IS NULL
-   AND NOT EXISTS (
-        SELECT 1 FROM doors d
-         WHERE d.site_id = s.id AND d.door_name = 'Main Entrance' AND d.deleted_at IS NULL
-   );
+--
+-- A demo firmware row used to be inserted here, and migration 006 marks the
+-- newest build per channel as current. On a production database that combined
+-- to report every real terminal as "firmware outdated" against a placeholder
+-- 1.0.0 that was never a real build.
+--
+-- The doors seed moved with it. Nothing reads doors yet -- door-level access is
+-- part of the permission engine, which is not implemented.
 
 COMMIT;

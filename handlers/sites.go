@@ -15,6 +15,7 @@ import (
 func GetSiteSettings(c *gin.Context) {
 	settings, err := database.GetSiteSettings(c.GetInt64("site_id"))
 	if err != nil {
+		logError(c, "get site settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve settings"})
 		return
 	}
@@ -42,6 +43,7 @@ func UpdateSiteSettings(c *gin.Context) {
 
 	updated, err := database.UpdateSiteSettings(c.GetInt64("site_id"), settings)
 	if err != nil {
+		logError(c, "update site settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
 		return
 	}

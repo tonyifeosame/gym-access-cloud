@@ -16,6 +16,7 @@ func CheckAccess(c *gin.Context) {
 
 	response, err := database.CheckMemberAccess(c.GetInt64("company_id"), memberID)
 	if err != nil {
+		logError(c, "check access", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check access"})
 		return
 	}
@@ -53,6 +54,7 @@ func LogAccess(c *gin.Context) {
 	}
 
 	if err := database.CreateAccessLog(c.GetInt64("company_id"), c.GetInt64("site_id"), &log); err != nil {
+		logError(c, "create access log", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log access"})
 		return
 	}
@@ -96,6 +98,7 @@ func GetAccessLogs(c *gin.Context) {
 
 	logs, err := database.GetAccessLogs(c.GetInt64("company_id"), limit, offset)
 	if err != nil {
+		logError(c, "list access logs", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
 	}
@@ -114,6 +117,7 @@ func GetMemberAccessLogs(c *gin.Context) {
 
 	logs, err := database.GetAccessLogsByMember(c.GetInt64("company_id"), memberID, limit)
 	if err != nil {
+		logError(c, "list member access logs", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
 		return
 	}

@@ -104,7 +104,8 @@ func CollectMetrics(ctx context.Context) (*SystemMetrics, error) {
 		SELECT count(*) FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  LEFT JOIN firmware_versions fv
-		         ON fv.device_type = d.device_type
+		         ON fv.company_id = s.company_id
+		        AND fv.device_type = d.device_type
 		        AND fv.release_channel = d.release_channel
 		        AND fv.is_current AND fv.deleted_at IS NULL
 		 WHERE d.deleted_at IS NULL AND s.deleted_at IS NULL

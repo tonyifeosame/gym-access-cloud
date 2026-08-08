@@ -1,7 +1,12 @@
 package middleware
 
 import (
+	"database/sql"
+	"errors"
+	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	"access-terminal-cloud-api/database"
 
@@ -18,9 +23,18 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Validate API key against database
+		// A database failure must not be reported as a bad key. Telling a caller
+		// its credential is invalid during an outage sends operators looking for
+		// a credential problem that does not exist, and can prompt a device to
+		// discard a key that was fine.
 		site, err := database.GetSiteByAPIKey(apiKey)
-		if err != nil || site == nil {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("request_id=%s error op=\"authenticate site\": %v", RequestID(c), err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Authentication unavailable"})
+			c.Abort()
+			return
+		}
+		if site == nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 			c.Abort()
 			return
@@ -41,16 +55,49 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-// CORSMiddleware handles CORS headers
+// corsHeaders is the set a browser client needs to talk to this API
+const corsHeaders = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, " +
+	"Authorization, accept, origin, Cache-Control, X-Requested-With, X-API-Key, " +
+	"X-Device-Key, X-Device-Serial, X-Protocol-Version, X-Request-ID"
+
+// CORSMiddleware handles CORS headers.
+//
+// The previous version sent `Allow-Origin: *` together with
+// `Allow-Credentials: true`. That pairing is contradictory -- browsers reject it
+// outright, so it never actually enabled credentialed requests -- and it
+// advertises the API as open to every origin on the web.
+//
+// CORS_ALLOWED_ORIGINS holds a comma-separated allowlist. When it is set, only a
+// listed origin is echoed back and credentials are permitted, which is what an
+// operator dashboard on a known host needs. When it is unset the API stays
+// readable from any origin but never with credentials, which is the safe
+// interpretation of the old behaviour.
+//
+// None of this affects the terminals: CORS is enforced by browsers, and an ESP32
+// sends no Origin header.
 func CORSMiddleware() gin.HandlerFunc {
+	allowed := parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"))
+
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-API-Key")
+		origin := c.GetHeader("Origin")
+
+		switch {
+		case len(allowed) == 0:
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		case origin != "" && allowed[origin]:
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+			// Caches must not serve one origin's response to another.
+			c.Writer.Header().Add("Vary", "Origin")
+		default:
+			c.Writer.Header().Add("Vary", "Origin")
+		}
+
+		c.Writer.Header().Set("Access-Control-Allow-Headers", corsHeaders)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
@@ -58,19 +105,19 @@ func CORSMiddleware() gin.HandlerFunc {
 	}
 }
 
-// LoggingMiddleware logs request information
-func LoggingMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Skip logging for health checks
-		if c.Request.URL.Path == "/health" {
-			c.Next()
-			return
-		}
-
-		c.Next()
-
-		// Log: method path status client_ip
-		// In production, use a proper logging library
-		_ = c.Writer.Status()
+// parseAllowedOrigins builds the origin allowlist from its configured form
+func parseAllowedOrigins(raw string) map[string]bool {
+	if strings.TrimSpace(raw) == "" {
+		return nil
 	}
+
+	allowed := map[string]bool{}
+	for _, origin := range strings.Split(raw, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			allowed[origin] = true
+		}
+	}
+	return allowed
 }
+
+// LoggingMiddleware lives in logging.go, alongside request id correlation.

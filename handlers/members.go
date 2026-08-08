@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 
 	"access-terminal-cloud-api/database"
@@ -13,6 +15,7 @@ import (
 func GetMembers(c *gin.Context) {
 	members, err := database.GetAllMembers(c.GetInt64("company_id"))
 	if err != nil {
+		logError(c, "list members", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve members"})
 		return
 	}
@@ -27,9 +30,17 @@ func GetMembers(c *gin.Context) {
 // GetMember handles GET /members/:id
 func GetMember(c *gin.Context) {
 	memberID := c.Param("id")
+
+	// A missing member is a 404; anything else is a server fault and must not be
+	// reported as "not found", or a database outage looks like an empty roster.
 	member, err := database.GetMemberByID(c.GetInt64("company_id"), memberID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "get member", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member"})
 		return
 	}
 	c.JSON(http.StatusOK, member)
@@ -43,7 +54,16 @@ func CreateMember(c *gin.Context) {
 		return
 	}
 
-	if err := database.CreateMember(c.GetInt64("company_id"), &member); err != nil {
+	// Re-using an existing member_id is the caller's mistake, not a server
+	// fault. Reporting it as 500 made a client retry a request that could never
+	// succeed.
+	err := database.CreateMember(c.GetInt64("company_id"), &member)
+	if database.IsUniqueViolation(err) {
+		c.JSON(http.StatusConflict, gin.H{"error": "Member ID already exists"})
+		return
+	}
+	if err != nil {
+		logError(c, "create member", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create member"})
 		return
 	}
@@ -68,7 +88,15 @@ func UpdateMember(c *gin.Context) {
 		Active:              req.Active,
 		FingerprintTemplate: req.FingerprintTemplate,
 	}
-	if err := database.UpdateMember(c.GetInt64("company_id"), &member); err != nil {
+	// A member that does not exist (or was soft-deleted) produces no row to
+	// update. That is a 404, not a server fault.
+	err := database.UpdateMember(c.GetInt64("company_id"), &member)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "update member", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
 		return
 	}
@@ -81,6 +109,7 @@ func DeleteMember(c *gin.Context) {
 	memberID := c.Param("id")
 
 	if err := database.DeleteMember(c.GetInt64("company_id"), memberID); err != nil {
+		logError(c, "delete member", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete member"})
 		return
 	}
@@ -98,6 +127,7 @@ func GetMemberChanges(c *gin.Context) {
 
 	members, err := database.GetMembersChangedSince(c.GetInt64("company_id"), since)
 	if err != nil {
+		logError(c, "list member changes", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member changes"})
 		return
 	}

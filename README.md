@@ -37,18 +37,32 @@ cp .env.example .env
 # Edit .env with your database credentials
 ```
 
-3. **Run migrations**:
+3. **Run migrations**, in filename order:
 ```bash
-psql -U at_admin -d access_terminal -f migrations/001_init_schema.sql
-psql -U at_admin -d access_terminal -f migrations/002_core_schema.sql
+for f in migrations/*.sql; do
+  psql -U at_admin -d access_terminal -v ON_ERROR_STOP=1 -f "$f" || break
+done
 ```
 
-Migrations are versioned and applied in filename order. They are additive:
-later migrations never edit or replace earlier ones.
+Migrations are versioned and additive: later migrations never edit or replace
+earlier ones. Applying all of them to an empty database produces the current
+schema, which the integration test suite verifies on every run.
 
-4. **Run the server**:
+**A database built from `migrations/` alone contains no sites and therefore no
+usable API keys.** That is deliberate — see [Credentials](#credentials).
+
+4. **Seed development data** (optional, dev only):
 ```bash
-go run main.go
+psql -U at_admin -d access_terminal -v SEED_ALLOW_INSECURE=1 -f seeds/dev_seed.sql
+```
+
+This creates the three sites the local stack and the ESP32 firmware expect. The
+keys it inserts are committed to this repository and therefore public; the
+script refuses to run without the flag.
+
+5. **Run the server**:
+```bash
+go run .
 ```
 
 The API will start on port 8080 (configurable via `SERVER_PORT` env var).
@@ -148,6 +162,48 @@ X-API-Key: your-site-api-key
 
 API keys are configured in the `sites` table in PostgreSQL.
 
+## Credentials
+
+### Device keys
+
+Generated server-side from 256 bits of `crypto/rand`, returned in plaintext
+exactly once at registration, and stored only as a SHA-256 hash. There is no
+recovery path: a terminal that loses its key re-registers and is issued a new
+one, which invalidates the old one immediately.
+
+### Site keys
+
+Stored in plaintext and compared with a plain SQL equality. This is the weakest
+part of the credential story and is **not** fixed yet, because fixing it needs a
+way to re-issue a site key and no endpoint offers one — hashing them today would
+make a lost key unrecoverable with no way to mint a replacement. Treat a site key
+as a provisioning secret: it can enrol terminals.
+
+### Rotating seeded credentials
+
+Databases created before this change were seeded by the migrations with three
+sites whose keys are in this repository's git history
+(`main-site-api-key-123` and friends). Any such database should be rotated:
+
+```sql
+-- Inspect what is present
+SELECT id, site_name, api_key FROM sites WHERE deleted_at IS NULL;
+
+-- Replace a known-public key with a fresh one
+UPDATE sites
+   SET api_key = encode(gen_random_bytes(32), 'hex')
+ WHERE api_key IN ('main-site-api-key-123',
+                   'main-gym-api-key-123',
+                   'lekki-branch-api-key-456',
+                   'abuja-branch-api-key-789')
+RETURNING id, site_name, api_key;
+```
+
+Rotating a site key does **not** invalidate device keys — terminals authenticate
+with their own credential and keep working. It does invalidate any firmware
+still using the deprecated `X-API-Key` + `X-Device-Serial` path, and any
+dashboard or tooling configured with the old key.
+
 ## Database Schema
 
 ### Tables
@@ -238,19 +294,63 @@ GIN_MODE=debug go run main.go
 go test ./...
 ```
 
+The suite is mostly **integration tests against a real PostgreSQL instance**.
+The behaviour worth protecting — tenant filters, the partial unique indexes, the
+acknowledgement constraint, `SKIP LOCKED` delivery — lives in SQL, and a mocked
+database layer would only assert that the Go code calls queries, not that the
+queries are right.
+
+The tests create and drop their own database (`access_terminal_test`, override
+with `TEST_DB_NAME`) from `migrations/` on every run, so they never touch a real
+one and double as the check that a fresh database can be built from zero.
+Connection settings come from the same `DB_*` variables the server uses:
+
+```bash
+DB_HOST=localhost DB_USER=postgres DB_PASSWORD=secret go test ./...
+```
+
+Set `TEST_DB_SKIP=1` to skip them where no PostgreSQL is available.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DB_HOST` / `DB_PORT` | `localhost` / `5432` | Database address |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `at_admin` / — / `access_terminal` | Credentials |
+| `DB_SSLMODE` | `disable` | Set to `require` or stronger when the database is across a network |
+| `DB_MAX_OPEN_CONNS` | `25` | Pool ceiling. Unbounded lets a polling fleet exhaust PostgreSQL's connection slots |
+| `DB_MAX_IDLE_CONNS` | `5` | Idle connections retained |
+| `DB_CONN_MAX_LIFETIME_SECONDS` | `1800` | Recycle connections so a failover does not leave stale ones |
+| `DB_CONN_MAX_IDLE_SECONDS` | `300` | Idle connection timeout |
+| `SERVER_PORT` | `8080` | Listen port |
+| `GIN_MODE` | `release` | `debug` prints the routing table at startup |
+| `CORS_ALLOWED_ORIGINS` | unset | Comma-separated origin allowlist. Unset means any origin, never with credentials |
+| `METRICS_TOKEN` | unset | Requires a bearer token on `/metrics`. Unset leaves it open |
+| `SYNC_COMPACTION_THRESHOLD` | `500` | Backlog at which a device's queue is replaced by a snapshot |
+| `MAINTENANCE_ENABLED` | `true` | Background sweeps |
+| `DEVICE_OFFLINE_AFTER_SECONDS` | `300` | Silence before a device is marked `OFFLINE` |
+| `SYNC_JOB_RETENTION_DAYS` | `90` | Delivered job retention; `0` disables pruning |
+
 ## Deployment
 
 For production deployment:
 1. Use environment variables for all configuration
-2. Enable SSL/TLS
-3. Use a reverse proxy (nginx, Caddy)
-4. Set up database backups
-5. Monitor logs and metrics
+2. Terminate TLS in front of the API (it serves plain HTTP)
+3. Set `DB_SSLMODE=require` unless the database is on the same host
+4. Use a reverse proxy (nginx, Caddy)
+5. Set up database backups
+6. Monitor logs and metrics
 
 ## Security Notes
 
-- Change default API keys in production
+- **Rotate any seeded API keys** — see [Credentials](#credentials)
 - Use strong database passwords
-- Enable PostgreSQL SSL
-- Implement rate limiting
+- Enable PostgreSQL SSL (`DB_SSLMODE=require`)
+- Keep `/metrics` off the public network, or set `METRICS_TOKEN`: it reports
+  fleet-wide counts across all tenants
+- Implement rate limiting — there is none, including on authentication
 - Use HTTPS in production
+- Set `CORS_ALLOWED_ORIGINS` before a browser dashboard sends credentials
+
+Known gaps a deployment must design around are listed under **Known limitations**
+in [API_SPEC.md](API_SPEC.md).
