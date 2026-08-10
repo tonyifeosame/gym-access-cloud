@@ -24,6 +24,13 @@ import (
 
 const deviceKeyPrefix = "atd_"
 
+// execer is whatever can run a statement -- *sql.DB or *sql.Tx. It exists so a
+// helper can be called either on its own or as part of a caller's transaction,
+// without the helper having to know which.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
 // generateDeviceKey returns a new credential and its storage form
 func generateDeviceKey() (key, hash, prefix string, err error) {
 	raw := make([]byte, 32)
@@ -49,11 +56,21 @@ func hashDeviceKey(key string) string {
 // rotates its credential rather than creating a duplicate. That is what lets a
 // factory-reset terminal recover -- it re-registers and is issued a new key.
 //
-// The returned plaintext key is the only time it exists outside the device.
-func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models.Device, string, error) {
+// The returned plaintext key is the only time it exists outside the device, and
+// the bootstrap jobs are queued INSIDE this transaction. Both of those are the
+// same requirement: the credential is committed the moment this function
+// succeeds, and a caller that then fails has no way to tell the device what its
+// key is. Seeding afterwards -- which is what this used to do -- meant a failure
+// to queue the roster left a terminal with a rotated, committed, unrecoverable
+// credential and a 500 in place of the response carrying it. The device was
+// locked out until someone re-registered it by hand.
+//
+// Returns the device, its plaintext key, and how many bootstrap jobs were
+// queued.
+func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
 	key, hash, prefix, err := generateDeviceKey()
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
 	deviceType := req.DeviceType
@@ -67,7 +84,7 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 
 	tx, err := DB.Begin()
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	defer tx.Rollback()
 
@@ -98,7 +115,17 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 		              build_number = COALESCE(EXCLUDED.build_number, devices.build_number),
 		              release_channel = EXCLUDED.release_channel,
 		              ip_address = COALESCE(EXCLUDED.ip_address, devices.ip_address),
-		              status = 'ONLINE',
+		              -- DISABLED survives re-registration.
+		              --
+		              -- This used to be an unconditional 'ONLINE', which made
+		              -- registration undo the only revocation this system has:
+		              -- an operator disables a stolen terminal, whoever holds
+		              -- the site key re-registers its serial, and the device is
+		              -- back in service with a fresh working credential. The
+		              -- heartbeat path has always been careful about this
+		              -- (RecordHeartbeat below); registration was not.
+		              status = CASE WHEN devices.status = 'DISABLED'
+		                            THEN 'DISABLED' ELSE 'ONLINE' END,
 		              last_error = NULL,
 		              last_error_at = NULL,
 		              registered_at = CURRENT_TIMESTAMP
@@ -110,20 +137,37 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 			&device.DeviceName, &device.DeviceType, &device.Status, &device.Active,
 			&device.APIKeyPrefix, &wasRegistered)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
 	// A device registering at a different site than it currently belongs to is
 	// a provisioning mistake, not a move. Refuse rather than silently reassign.
 	if device.SiteID != siteID {
-		return nil, "", models.ErrDeviceSiteMismatch
+		return nil, "", 0, models.ErrDeviceSiteMismatch
+	}
+
+	// Administratively out of service. The row above has already had a new
+	// credential written into it, so this rolls back -- which is the point: a
+	// disabled terminal must not be brought back by anyone who can reach the
+	// registration endpoint, and it must not be handed a working key either.
+	//
+	// `active` is checked as well as the status. They are set independently and
+	// either one is an operator saying no.
+	if device.Status == models.DeviceDisabled || !device.Active {
+		return nil, "", 0, models.ErrDeviceDisabled
+	}
+
+	// Inside the transaction. See the note on this function.
+	bootstrapped, err := enqueueBootstrapJobs(tx, device.ID)
+	if err != nil {
+		return nil, "", 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 
-	return &device, key, nil
+	return &device, key, bootstrapped, nil
 }
 
 // AuthenticateDevice resolves a device from its credential. Returns nil when the

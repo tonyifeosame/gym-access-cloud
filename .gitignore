@@ -9,6 +9,10 @@ access-terminal-cloud-api
 # Test binary, built with `go test -c`
 *.test
 
+# Written by the integration suite: which server it last connected to, and when.
+# Also what keeps the suite out of the test cache -- see main_test.go.
+.integration-run
+
 # Output of the go coverage tool
 *.out
 
@@ -20,6 +24,16 @@ go.work
 
 # Environment variables
 .env
+
+# Production secrets. The .example alongside it IS committed; the filled-in one
+# holds the database password and the metrics token and must never be.
+deploy/.env.production
+deploy/.env.production.local
+
+# Database dumps taken by the backup command in deploy/README.md -- these
+# contain the full member roster and every device credential hash.
+deploy/backups/
+*.dump
 
 # IDE
 .vscode/

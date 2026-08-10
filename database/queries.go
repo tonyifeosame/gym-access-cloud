@@ -263,9 +263,24 @@ func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) e
 	}
 	defer tx.Rollback()
 
-	// Update fingerprint template and set active to true
+	// Records the enrolment. It does NOT touch `active`.
+	//
+	// This used to set `active = true`, which quietly made enrolment an
+	// authorization decision: an operator suspends a member, someone presents
+	// that member's finger at a terminal, and the enrolment report reactivates
+	// them. Worse once terminals could call this with their own credential --
+	// a device would have been able to restore access an operator had revoked,
+	// which is not a privilege a door controller should hold.
+	//
+	// Enrolment and authorization are now strictly separate: this says "we have
+	// a fingerprint for this person", and only an operator says "this person may
+	// come in". A suspended member can be enrolled -- useful, since the finger
+	// is captured ready for their return -- and stays suspended.
+	//
+	// `active` is still RETURNED, so the sync job below carries the member's
+	// real state to every terminal rather than an assumed one.
 	var member models.Member
-	err = tx.QueryRow(`UPDATE people SET fingerprint_template = $1, active = true
+	err = tx.QueryRow(`UPDATE people SET fingerprint_template = $1
 	                   WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
 	                   RETURNING id, public_id, external_id, full_name, membership_type,
 	                             active, COALESCE(fingerprint_template, ''), updated_at`,
@@ -336,6 +351,57 @@ func CreateAccessLog(companyID, siteID int64, log *models.AccessLog) error {
 	return DB.QueryRow(query, companyID, siteID, log.MemberID, log.Granted,
 		log.Source, log.SiteName, log.Message).
 		Scan(&log.ID, &log.PublicID, &log.CreatedAt)
+}
+
+// CreateDeviceAccessLog records a door event reported by a terminal.
+//
+// Separate from CreateAccessLog because the trust model is different, and the
+// difference is the whole point:
+//
+//   - company, site and device come from the AUTHENTICATED DEVICE, never from
+//     the body. A terminal cannot write a log against another site, because
+//     there is no parameter through which it could name one.
+//   - `eventID` becomes public_id, which is UNIQUE, and the insert is
+//     ON CONFLICT DO NOTHING. A retry of an upload whose response was lost is
+//     therefore a no-op rather than a duplicate audit line.
+//   - occurredAt is the DEVICE's time, not the server's. A log queued offline
+//     and uploaded hours later must say when the door opened, not when the
+//     network came back. A zero time falls back to now, which is the honest
+//     answer for a terminal whose clock has never synced.
+//
+// Returns whether a row was actually inserted, so the caller can distinguish a
+// new event from a replayed one.
+func CreateDeviceAccessLog(companyID, siteID, deviceID int64, eventID string,
+	memberID *string, granted bool, source, siteName, message string,
+	occurredAt time.Time) (bool, error) {
+
+	if occurredAt.IsZero() {
+		occurredAt = time.Now()
+	}
+
+	// person_id is resolved by subquery and left NULL when the external id
+	// matches nobody -- an unrecognised finger is still a real event and must
+	// still be recorded.
+	query := `INSERT INTO access_logs
+	          (public_id, company_id, site_id, device_id, person_id,
+	           person_external_id, granted, source, site_name, message, occurred_at)
+	          VALUES ($1, $2, $3, $4,
+	                  (SELECT id FROM people
+	                    WHERE external_id = $5 AND company_id = $2 AND deleted_at IS NULL),
+	                  $5, $6, $7, $8, NULLIF($9, ''), $10)
+	          ON CONFLICT (public_id) DO NOTHING`
+
+	result, err := DB.Exec(query, eventID, companyID, siteID, deviceID,
+		memberID, granted, source, siteName, message, occurredAt)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // GetAccessLogs retrieves access logs for a company

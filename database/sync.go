@@ -188,6 +188,13 @@ func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSet
 // Soft-deleted people are intentionally excluded: a device that never knew
 // about them has nothing to delete.
 func EnqueueBootstrapJobs(deviceID int64) (int, error) {
+	return enqueueBootstrapJobs(DB, deviceID)
+}
+
+// enqueueBootstrapJobs is the same work against an arbitrary executor, so
+// registration can seed the device inside the transaction that issued its
+// credential. See the note in RegisterDevice about why that has to be atomic.
+func enqueueBootstrapJobs(db execer, deviceID int64) (int, error) {
 	query := `INSERT INTO sync_jobs
 	          (site_id, device_id, job_type, entity_type, entity_id, entity_external_id,
 	           payload, protocol_version, status)
@@ -209,7 +216,7 @@ func EnqueueBootstrapJobs(deviceID int64) (int, error) {
 	             AND d.deleted_at IS NULL
 	             AND p.deleted_at IS NULL`
 
-	result, err := DB.Exec(query, models.SyncProtocolVersion, deviceID)
+	result, err := db.Exec(query, models.SyncProtocolVersion, deviceID)
 	if err != nil {
 		return 0, err
 	}

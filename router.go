@@ -104,6 +104,32 @@ func NewRouter() *gin.Engine {
 		deviceAPI.GET("/settings", handlers.GetDeviceSettings)
 		deviceAPI.GET("/jobs", handlers.GetDeviceJobs)
 		deviceAPI.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
+
+		// Enrolment, reachable with the DEVICE credential.
+		//
+		// These are the same two handlers the operator API exposes, mounted a
+		// second time behind device authentication. Both read company_id from
+		// the context and DeviceAuthMiddleware sets it, so nothing about their
+		// behaviour changes -- only who is allowed to call them.
+		//
+		// WHY THIS EXISTS. A terminal is where enrolment physically happens: an
+		// operator stands at the door and presents a finger. Until now the only
+		// way to report that was `POST /enrollment/result`, which is
+		// site-key-authenticated -- so a terminal could only close the loop by
+		// carrying the site's PROVISIONING SECRET, the credential that can
+		// register devices and rotate their keys. Putting that on every terminal
+		// to report an enrolment inverts the entire point of per-device
+		// credentials.
+		deviceAPI.GET("/enrollment/pending", handlers.GetPendingEnrollments)
+		deviceAPI.POST("/enrollment/result", handlers.SubmitEnrollmentResult)
+
+		// Door events, reported with the device's own credential.
+		//
+		// NOT the same handler as POST /access/log above. That one trusts the
+		// site key and reads site_name from it; this one takes company, site AND
+		// device from the authenticated terminal, so there is no parameter
+		// through which a device could write a log against another site.
+		deviceAPI.POST("/access/log", handlers.LogDeviceAccess)
 	}
 
 	return r

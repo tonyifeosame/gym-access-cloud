@@ -2,7 +2,10 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+
+	"access-terminal-cloud-api/database"
 )
 
 // The ESP32 device contract.
@@ -408,4 +411,259 @@ func TestFullSyncSnapshotReplacesBacklog(t *testing.T) {
 // jobPath builds the acknowledgement URL for a job
 func jobPath(id int64) string {
 	return "/api/v1/devices/jobs/" + itoa(id) + "/complete"
+}
+
+// --- enrolment over the device credential -----------------------------------
+//
+// A terminal is where enrolment physically happens. Before these routes existed
+// the only way to report one was POST /enrollment/result, which takes the SITE
+// key -- the provisioning secret that can register devices and rotate their
+// credentials. Requiring that on every terminal to report an enrolment inverts
+// the whole point of per-device credentials, so the same two handlers are
+// mounted behind device auth.
+
+func TestADeviceCanReportAnEnrollmentWithItsOwnCredential(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	// The operator asks for an enrolment.
+	start := env.do(http.MethodPost, "/api/v1/enrollment/start",
+		map[string]any{"member_id": "M001"}, siteAuth(env.siteAKey))
+	if start.Code != http.StatusCreated {
+		t.Fatalf("start enrollment got %d, want 201 (body %s)", start.Code, start.Raw)
+	}
+
+	// The terminal sees it with its OWN credential -- no site key involved.
+	pending := env.do(http.MethodGet, "/api/v1/devices/enrollment/pending", nil, deviceAuth(key))
+	if pending.Code != http.StatusOK {
+		t.Fatalf("device pending enrollments got %d, want 200 (body %s)", pending.Code, pending.Raw)
+	}
+	if !strings.Contains(pending.Raw, "M001") {
+		t.Errorf("device did not see the pending enrollment (body %s)", pending.Raw)
+	}
+
+	// And reports the result the same way.
+	result := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
+		deviceAuth(key))
+	if result.Code != http.StatusOK {
+		t.Errorf("device enrollment result got %d, want 200 (body %s)", result.Code, result.Raw)
+	}
+
+	// The request is closed out.
+	after := env.do(http.MethodGet, "/api/v1/enrollment/pending", nil, siteAuth(env.siteAKey))
+	if strings.Contains(after.Raw, "M001") {
+		t.Errorf("enrollment still pending after the device reported it (body %s)", after.Raw)
+	}
+}
+
+// The device routes must be no weaker than the rest of the device API.
+func TestDeviceEnrollmentRoutesRejectEverythingButADeviceKey(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	for _, tc := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{"no credential", nil},
+		{"garbage device key", deviceAuth("atd_deadbeef")},
+		{"site key in the device header", deviceAuth(env.siteAKey)},
+	} {
+		res := env.do(http.MethodGet, "/api/v1/devices/enrollment/pending", nil, tc.headers)
+		if res.Code != http.StatusUnauthorized {
+			t.Errorf("%s: pending got %d, want 401 (body %s)", tc.name, res.Code, res.Raw)
+		}
+
+		post := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+			map[string]any{"member_id": "M001", "fingerprint_template": "x"}, tc.headers)
+		if post.Code != http.StatusUnauthorized {
+			t.Errorf("%s: result got %d, want 401 (body %s)", tc.name, post.Code, post.Raw)
+		}
+	}
+}
+
+// A terminal must not be able to reach across into another site's people.
+func TestADeviceCannotEnrollAMemberOfAnotherTenant(t *testing.T) {
+	env := newTestEnv(t)
+	// Site C, not Site B: B is a different SITE in the same company, and
+	// enrolment is company-scoped by design -- a member can be enrolled at any
+	// door their tenant operates. C is a different tenant entirely.
+	env.createMember(env.siteCKey, "OTHER-M1", "Someone Else")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	res := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "OTHER-M1", "fingerprint_template": "terminal:ESP32-0001:slot:1"},
+		deviceAuth(key))
+	if res.Code != http.StatusNotFound {
+		t.Errorf("cross-tenant enrollment got %d, want 404 (body %s)", res.Code, res.Raw)
+	}
+}
+
+// --- enrolment is not an authorization decision -----------------------------
+//
+// CompleteEnrollment used to set `active = true`. That made enrolment a way to
+// GRANT access: suspend a member, present their finger at a terminal, and the
+// enrolment report reactivated them. Once terminals could call this endpoint
+// with their own credential it became worse still -- a door controller able to
+// restore access an operator had deliberately revoked.
+//
+// Enrolment now records a fingerprint and nothing else. Only an operator
+// decides who may come in.
+
+func TestEnrollingAnActiveMemberLeavesThemActive(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	res := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
+		deviceAuth(key))
+	if res.Code != http.StatusOK {
+		t.Fatalf("enrollment result got %d, want 200 (body %s)", res.Code, res.Raw)
+	}
+
+	if active := memberActive(t, "M001"); !active {
+		t.Error("an active member became inactive after enrolment")
+	}
+
+	// And the door still opens for them.
+	check := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	if granted, _ := check.Body["granted"].(bool); !granted {
+		t.Errorf("active member was denied after enrolment (body %s)", check.Raw)
+	}
+}
+
+// THE regression. A suspended member must not be reactivated by enrolling.
+func TestEnrollingAnInactiveMemberLeavesThemInactive(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	// An operator suspends them.
+	mustExec(t, `UPDATE people SET active = FALSE WHERE external_id = 'M001'`)
+
+	res := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
+		deviceAuth(key))
+	if res.Code != http.StatusOK {
+		t.Fatalf("enrollment result got %d, want 200 (body %s)", res.Code, res.Raw)
+	}
+
+	if active := memberActive(t, "M001"); active {
+		t.Error("enrolment reactivated a suspended member")
+	}
+}
+
+// The same thing stated as the access decision it actually is: a suspended
+// member gains nothing by being enrolled.
+func TestASuspendedMemberCannotGainAccessByEnrolling(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	// Suspended through the API, as an operator would -- which also queues the
+	// UPDATE job that tells the terminals.
+	susp := env.do(http.MethodPut, "/api/v1/members/M001", map[string]any{
+		"full_name": "Ada", "membership_type": "PREMIUM", "active": false,
+	}, siteAuth(env.siteAKey))
+	if susp.Code != http.StatusOK {
+		t.Fatalf("suspending got %d, want 200 (body %s)", susp.Code, susp.Raw)
+	}
+
+	before := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	if granted, _ := before.Body["granted"].(bool); granted {
+		t.Fatalf("fixture wrong: suspended member was already granted (body %s)", before.Raw)
+	}
+
+	env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
+		deviceAuth(key))
+
+	after := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	if granted, _ := after.Body["granted"].(bool); granted {
+		t.Errorf("a suspended member was granted access after enrolling (body %s)", after.Raw)
+	}
+
+	// And the terminals are told the truth. The LAST job for this member is the
+	// one the enrolment produced -- earlier jobs legitimately carry the state
+	// that was current when they were queued.
+	var latest map[string]any
+	for _, job := range env.jobs(key) {
+		payload, _ := job["payload"].(map[string]any)
+		if payload != nil && payload["member_id"] == "M001" {
+			latest = payload
+		}
+	}
+	if latest == nil {
+		t.Fatal("no PERSON job for M001 reached the terminal")
+	}
+	if active, _ := latest["active"].(bool); active {
+		t.Errorf("the enrolment's sync job told the terminal a suspended member is active (payload %v)", latest)
+	}
+}
+
+// The enrolment itself must still be recorded -- this change removes a
+// privilege, not the feature.
+func TestEnrollmentIsStillPersistedForAnInactiveMember(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Ada")
+	key := env.registerDevice(env.siteAKey, "ESP32-0001")
+
+	start := env.do(http.MethodPost, "/api/v1/enrollment/start",
+		map[string]any{"member_id": "M001"}, siteAuth(env.siteAKey))
+	if start.Code != http.StatusCreated {
+		t.Fatalf("start enrollment got %d, want 201 (body %s)", start.Code, start.Raw)
+	}
+
+	mustExec(t, `UPDATE people SET active = FALSE WHERE external_id = 'M001'`)
+
+	res := env.do(http.MethodPost, "/api/v1/devices/enrollment/result",
+		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
+		deviceAuth(key))
+	if res.Code != http.StatusOK {
+		t.Fatalf("enrollment result got %d, want 200 (body %s)", res.Code, res.Raw)
+	}
+
+	// The marker is stored...
+	var stored string
+	if err := database.DB.QueryRow(
+		`SELECT COALESCE(fingerprint_template,'') FROM people WHERE external_id = 'M001'`).Scan(&stored); err != nil {
+		t.Fatalf("reading stored enrolment: %v", err)
+	}
+	if stored != "terminal:ESP32-0001:slot:5" {
+		t.Errorf("enrolment was not persisted; stored %q", stored)
+	}
+
+	// ...the request is closed out...
+	var status string
+	if err := database.DB.QueryRow(`
+		SELECT r.status FROM enrollment_requests r
+		  JOIN people p ON p.id = r.person_id
+		 WHERE p.external_id = 'M001'`).Scan(&status); err != nil {
+		t.Fatalf("reading enrollment request: %v", err)
+	}
+	if status != "COMPLETED" {
+		t.Errorf("enrollment request status is %q, want COMPLETED", status)
+	}
+
+	// ...and the member is still suspended.
+	if memberActive(t, "M001") {
+		t.Error("enrolment reactivated a suspended member")
+	}
+}
+
+// memberActive reads a person's authorization state straight from the database
+func memberActive(t *testing.T, externalID string) bool {
+	t.Helper()
+
+	var active bool
+	if err := database.DB.QueryRow(
+		`SELECT active FROM people WHERE external_id = $1 AND deleted_at IS NULL`,
+		externalID).Scan(&active); err != nil {
+		t.Fatalf("reading active flag for %s: %v", externalID, err)
+	}
+	return active
 }

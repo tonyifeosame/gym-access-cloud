@@ -79,24 +79,21 @@ func RegisterDevice(c *gin.Context) {
 		req.IPAddress = c.ClientIP()
 	}
 
-	device, apiKey, err := database.RegisterDevice(c.GetInt64("site_id"), req)
+	// The device is seeded with current state inside the same transaction that
+	// issues the credential, so there is no window in which a key is committed
+	// but never returned to the caller that has to store it.
+	device, apiKey, bootstrapped, err := database.RegisterDevice(c.GetInt64("site_id"), req)
 	if errors.Is(err, models.ErrDeviceSiteMismatch) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Serial number is registered to another site"})
+		return
+	}
+	if errors.Is(err, models.ErrDeviceDisabled) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Device is disabled; re-enable it before registering"})
 		return
 	}
 	if err != nil {
 		logError(c, "register device", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to register device"})
-		return
-	}
-
-	// Seed the device with current state. Bootstrap jobs are ordinary CREATE
-	// jobs queued after anything already pending, so they land last and reflect
-	// the newest state.
-	bootstrapped, err := database.EnqueueBootstrapJobs(device.ID)
-	if err != nil {
-		logError(c, "seed device state", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to seed device state"})
 		return
 	}
 

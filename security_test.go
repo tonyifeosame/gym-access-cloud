@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"testing"
+
+	"access-terminal-cloud-api/database"
 )
 
 // Authorization boundaries.
@@ -269,5 +271,154 @@ func TestCORSDoesNotPairWildcardWithCredentials(t *testing.T) {
 	credentials := rec.Header().Get("Access-Control-Allow-Credentials")
 	if origin == "*" && credentials == "true" {
 		t.Error("wildcard origin is paired with credentials, which advertises the API as open to every origin")
+	}
+}
+
+// A disabled terminal is the only revocation this system has -- there is no
+// revoke endpoint -- so registration must not be a way around it.
+//
+// Before this was fixed, the upsert set `status = 'ONLINE'` unconditionally. An
+// operator disabled a stolen unit, anyone holding the site key re-registered
+// its serial, and the unit came back into service with a fresh working
+// credential in the response.
+func TestRegisteringADisabledDeviceDoesNotReviveIt(t *testing.T) {
+	env := newTestEnv(t)
+	originalKey := env.registerDevice(env.siteAKey, "ESP32-AAA")
+
+	mustExec(t, `UPDATE devices SET status = 'DISABLED' WHERE serial_number = 'ESP32-AAA'`)
+
+	res := env.do(http.MethodPost, "/api/v1/devices/register",
+		map[string]any{"serial_number": "ESP32-AAA"}, siteAuth(env.siteAKey))
+	if res.Code != http.StatusForbidden {
+		t.Errorf("registering a disabled device got %d, want 403 (body %s)", res.Code, res.Raw)
+	}
+
+	// No credential may be handed out on that path.
+	if key, _ := res.Body["api_key"].(string); key != "" {
+		t.Error("a disabled device was issued a credential")
+	}
+
+	// Still disabled, and still locked out.
+	var status string
+	if err := database.DB.QueryRow(
+		`SELECT status FROM devices WHERE serial_number = 'ESP32-AAA'`).Scan(&status); err != nil {
+		t.Fatalf("reading device status: %v", err)
+	}
+	if status != "DISABLED" {
+		t.Errorf("device status is %q after a refused registration, want DISABLED", status)
+	}
+
+	check := env.do(http.MethodGet, "/api/v1/devices/settings", nil, deviceAuth(originalKey))
+	if check.Code != http.StatusForbidden {
+		t.Errorf("disabled device still authenticates: got %d, want 403", check.Code)
+	}
+}
+
+// `active` is set independently of `status`, and either one is an operator
+// saying no.
+func TestRegisteringAnInactiveDeviceIsRefused(t *testing.T) {
+	env := newTestEnv(t)
+	env.registerDevice(env.siteAKey, "ESP32-AAA")
+
+	mustExec(t, `UPDATE devices SET active = FALSE WHERE serial_number = 'ESP32-AAA'`)
+
+	res := env.do(http.MethodPost, "/api/v1/devices/register",
+		map[string]any{"serial_number": "ESP32-AAA"}, siteAuth(env.siteAKey))
+	if res.Code != http.StatusForbidden {
+		t.Errorf("registering an inactive device got %d, want 403 (body %s)", res.Code, res.Raw)
+	}
+}
+
+// The refusal must roll back the credential the upsert had already written,
+// not merely decline to report it. Otherwise the live terminal's key is
+// silently rotated to one nobody holds and it drops off the fleet.
+func TestARefusedRegistrationDoesNotRotateTheCredential(t *testing.T) {
+	env := newTestEnv(t)
+	originalKey := env.registerDevice(env.siteAKey, "ESP32-AAA")
+
+	var before string
+	if err := database.DB.QueryRow(
+		`SELECT api_key_hash FROM devices WHERE serial_number = 'ESP32-AAA'`).Scan(&before); err != nil {
+		t.Fatalf("reading credential hash: %v", err)
+	}
+
+	mustExec(t, `UPDATE devices SET status = 'DISABLED' WHERE serial_number = 'ESP32-AAA'`)
+	env.do(http.MethodPost, "/api/v1/devices/register",
+		map[string]any{"serial_number": "ESP32-AAA"}, siteAuth(env.siteAKey))
+
+	var after string
+	if err := database.DB.QueryRow(
+		`SELECT api_key_hash FROM devices WHERE serial_number = 'ESP32-AAA'`).Scan(&after); err != nil {
+		t.Fatalf("reading credential hash: %v", err)
+	}
+	if before != after {
+		t.Error("a refused registration rotated the stored credential anyway")
+	}
+
+	// Re-enabled, the original key still works -- nothing was lost.
+	mustExec(t, `UPDATE devices SET status = 'ONLINE' WHERE serial_number = 'ESP32-AAA'`)
+	check := env.do(http.MethodGet, "/api/v1/devices/settings", nil, deviceAuth(originalKey))
+	if check.Code != http.StatusOK {
+		t.Errorf("original credential stopped working after a refused registration: got %d", check.Code)
+	}
+}
+
+// An unknown enum is the caller's mistake, not the server's. Reporting it as a
+// 500 told a terminal to retry something that will never succeed.
+func TestInvalidRegistrationEnumsAreRejectedAsBadRequests(t *testing.T) {
+	env := newTestEnv(t)
+
+	for _, body := range []map[string]any{
+		{"serial_number": "ESP32-BBB", "device_type": "ESP32"},
+		{"serial_number": "ESP32-BBB", "release_channel": "NIGHTLY"},
+	} {
+		res := env.do(http.MethodPost, "/api/v1/devices/register", body, siteAuth(env.siteAKey))
+		if res.Code != http.StatusBadRequest {
+			t.Errorf("registration with %v got %d, want 400 (body %s)", body, res.Code, res.Raw)
+		}
+	}
+
+	// The valid values still work, and omitting them still defaults.
+	for _, body := range []map[string]any{
+		{"serial_number": "ESP32-CCC"},
+		{"serial_number": "ESP32-DDD", "device_type": "READER", "release_channel": "BETA"},
+	} {
+		res := env.do(http.MethodPost, "/api/v1/devices/register", body, siteAuth(env.siteAKey))
+		if res.Code != http.StatusCreated {
+			t.Errorf("registration with %v got %d, want 201 (body %s)", body, res.Code, res.Raw)
+		}
+	}
+}
+
+// The credential is committed the moment registration succeeds, so the roster
+// it is seeded with has to be committed in the same transaction. If seeding
+// could fail after the commit, the caller would get a 500 and the terminal
+// would hold a rotated key nobody ever saw.
+func TestRegistrationSeedsTheRosterAtomically(t *testing.T) {
+	env := newTestEnv(t)
+	env.createMember(env.siteAKey, "M001", "Alice")
+	env.createMember(env.siteAKey, "M002", "Bob")
+
+	res := env.do(http.MethodPost, "/api/v1/devices/register",
+		map[string]any{"serial_number": "ESP32-AAA"}, siteAuth(env.siteAKey))
+	if res.Code != http.StatusCreated {
+		t.Fatalf("registration got %d, want 201 (body %s)", res.Code, res.Raw)
+	}
+
+	bootstrapped, _ := res.Body["bootstrap_jobs"].(float64)
+	if int(bootstrapped) != 2 {
+		t.Errorf("bootstrap_jobs is %v, want 2 (body %s)", bootstrapped, res.Raw)
+	}
+
+	// Reported and actually queued are the same number.
+	var queued int
+	if err := database.DB.QueryRow(`
+		SELECT count(*) FROM sync_jobs j
+		  JOIN devices d ON d.id = j.device_id
+		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'`).Scan(&queued); err != nil {
+		t.Fatalf("counting queued jobs: %v", err)
+	}
+	if queued != int(bootstrapped) {
+		t.Errorf("registration reported %v bootstrap jobs but %d are queued", bootstrapped, queued)
 	}
 }

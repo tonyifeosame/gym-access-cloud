@@ -119,6 +119,49 @@ type AccessLogRequest struct {
 	Message  string `json:"message,omitempty"`
 }
 
+// DeviceAccessLogRequest is the body of POST /api/v1/devices/access/log.
+//
+// A terminal reports door events with its OWN credential. The operator endpoint
+// (POST /access/log) takes the site key, which is the provisioning secret --
+// putting that on every terminal so it can write an audit line would hand every
+// door the ability to register devices and rotate their credentials.
+//
+// WHAT THE DEVICE MAY NOT SAY. There is no site, company or device field here,
+// deliberately. All three are taken from the authenticated credential, so a
+// terminal cannot write a log against another site however it is asked to.
+// Anything of the sort in the body is ignored because there is nowhere for it
+// to land.
+//
+// EventID is the idempotency key and the reason retries are safe. The terminal
+// generates it once per door event and reuses it for every retry of that event;
+// the server maps it onto access_logs.public_id, which is UNIQUE, and a repeat
+// insert is discarded. Without it a terminal that uploaded successfully but
+// lost the response would duplicate the event on the next attempt -- and an
+// audit trail that double-counts entries is not one.
+type DeviceAccessLogRequest struct {
+	// A UUID the DEVICE generates. Required: an absent one would make every
+	// retry a new event.
+	EventID string `json:"event_id" binding:"required,uuid"`
+
+	// Empty for an unrecognised finger, which is stored as NULL and matches no
+	// person. A denial is the more interesting half of an audit trail.
+	MemberID string `json:"member_id,omitempty"`
+
+	Granted bool   `json:"granted"`
+	Source  string `json:"source" binding:"required"`
+	Message string `json:"message,omitempty"`
+
+	// When the event happened at the door, RFC3339. Optional, because a terminal
+	// whose clock has not synced cannot supply an honest one -- the server then
+	// records its own arrival time and the log says so by omission rather than
+	// by inventing a timestamp.
+	//
+	// A queued event uploaded hours later is the normal case, so this is the
+	// difference between an audit trail that reflects the door and one that
+	// reflects the network.
+	OccurredAt string `json:"occurred_at,omitempty"`
+}
+
 // MemberUpdateRequest is the body of PUT /members/:id.
 //
 // Separate from Member because the member id comes from the URL; requiring it in
@@ -139,6 +182,15 @@ type MemberChangesRequest struct {
 // to a different site. Reassignment is a provisioning decision, not something a
 // registration call should do silently.
 var ErrDeviceSiteMismatch = errors.New("device serial is registered to another site")
+
+// ErrDeviceDisabled is returned when registration targets a device an operator
+// has taken out of service, by status or by clearing `active`.
+//
+// Disabling is currently the only way to revoke a terminal -- there is no
+// revocation endpoint -- so registration must not be a way around it. Otherwise
+// anyone holding the site key could re-enable a device that was deliberately
+// stopped, and be issued a working credential for it in the same call.
+var ErrDeviceDisabled = errors.New("device is administratively disabled")
 
 // Device represents a terminal installed at a site
 type Device struct {
@@ -185,14 +237,22 @@ var DeviceReportableStates = map[string]bool{
 }
 
 // DeviceRegistrationRequest is the body of POST /devices/register
+//
+// device_type and release_channel are validated here rather than being left to
+// the CHECK constraints on `devices`. Those constraints do reject a bad value,
+// but they reject it as a database error, which the handler cannot distinguish
+// from the database being down -- so a terminal sending `"device_type":"ESP32"`
+// received a 500 and retried forever instead of a 400 telling it what was
+// wrong. `oneof` on an `omitempty` field only fires when the field is present,
+// so the defaults applied in the database layer still stand.
 type DeviceRegistrationRequest struct {
 	SerialNumber     string `json:"serial_number" binding:"required"`
 	DeviceName       string `json:"device_name,omitempty"`
-	DeviceType       string `json:"device_type,omitempty"`
+	DeviceType       string `json:"device_type,omitempty" binding:"omitempty,oneof=TERMINAL READER CONTROLLER"`
 	FirmwareVersion  string `json:"firmware_version,omitempty"`
 	HardwareRevision string `json:"hardware_revision,omitempty"`
 	BuildNumber      string `json:"build_number,omitempty"`
-	ReleaseChannel   string `json:"release_channel,omitempty"`
+	ReleaseChannel   string `json:"release_channel,omitempty" binding:"omitempty,oneof=STABLE BETA CANARY"`
 	IPAddress        string `json:"ip_address,omitempty"`
 }
 

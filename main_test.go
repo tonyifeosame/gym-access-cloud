@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"access-terminal-cloud-api/database"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 // Integration test harness.
@@ -32,10 +34,20 @@ import (
 //
 // Configuration comes from the same DB_* variables the server uses, except
 // DB_NAME: the tests create and drop their own database (TEST_DB_NAME, default
-// access_terminal_test) so they can never touch a real one. Set TEST_DB_SKIP=1
-// to skip when no PostgreSQL is available.
+// access_terminal_test) so they can never touch a real one. A .env in the repo
+// root is loaded automatically, so `go test` and `go run` agree on which server
+// they are talking to. Set TEST_DB_SKIP=1 to skip when no PostgreSQL is
+// available -- which leaves the tenancy and sync SQL entirely uncovered.
 
 const defaultTestDB = "access_terminal_test"
+
+// runRecordFile records which server the suite last connected to, and when. It
+// is the durable proof that a run really reached PostgreSQL: `go test` hides a
+// passing package's stdout, so the banner alone is not visible without -v.
+const runRecordFile = ".integration-run"
+
+// runRecord is the content written to runRecordFile by this process
+var runRecord string
 
 // testEnv is the fixture shared by every test in the suite
 type testEnv struct {
@@ -49,19 +61,69 @@ type testEnv struct {
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
 
+	// The suite reads its database configuration the same way the server does,
+	// but it must not depend on main() having loaded .env: main() never runs in
+	// a test binary, so the godotenv.Load() there is invisible from here. That
+	// gap is what silently pointed the tests at the DB_USER default while the
+	// server used the value in .env. Loading it explicitly closes it.
+	//
+	// Load never overwrites a variable that is already set, so an explicit
+	// DB_USER=... on the command line still wins, and production is unaffected:
+	// nothing about main()'s own configuration path changes.
+	if err := godotenv.Load(); err == nil {
+		fmt.Println("integration tests: loaded .env from the repo root")
+	}
+
 	if os.Getenv("TEST_DB_SKIP") != "" {
-		fmt.Println("TEST_DB_SKIP set, skipping integration tests")
+		fmt.Println("======================================================================")
+		fmt.Println("TEST_DB_SKIP is set: the integration tests were SKIPPED, not run.")
+		fmt.Println("The tenancy, sync and migration SQL has NO coverage in this run.")
+		fmt.Println("======================================================================")
 		os.Exit(0)
 	}
 
 	code, err := runSuite(m)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\nintegration tests could not start: %v\n\n"+
-			"These tests need a PostgreSQL instance. Point DB_HOST/DB_PORT/DB_USER/\n"+
-			"DB_PASSWORD at one, or set TEST_DB_SKIP=1 to skip them.\n", err)
+			"These are integration tests against a real PostgreSQL instance; there is\n"+
+			"no mock to fall back to, so this is a failure and not a skip.\n\n"+
+			"Point DB_HOST/DB_PORT/DB_USER/DB_PASSWORD at a server (a .env in the repo\n"+
+			"root is picked up automatically) and re-run:\n\n"+
+			"    go test -count=1 ./...\n\n"+
+			"The account needs CREATEDB: the suite builds its own database from\n"+
+			"migrations/ on every run and drops it afterwards.\n\n"+
+			"TEST_DB_SKIP=1 skips these deliberately, leaving the tenancy and sync SQL\n"+
+			"uncovered.\n", err)
 		os.Exit(1)
 	}
 	os.Exit(code)
+}
+
+// TestSuiteConnectedToPostgres records, on disk, which server this run actually
+// reached -- and fails if it reached none.
+//
+// It exists because a passing `go test` swallows package stdout, so the banner
+// runSuite prints is invisible without -v. After any run, .integration-run says
+// what was really talked to, which is the difference between "the suite passed"
+// and "the suite passed against something".
+//
+// It is NOT a defence against the test cache. `go test` caches a passing package
+// result and replays it whenever its key matches, and nothing in that key
+// describes the database -- the DB_* variables are not even part of it, because
+// the go command re-reads recorded variables from its own environment and
+// runSuite resolves them before m.Run() starts. A pass banked while PostgreSQL
+// was reachable is therefore replayed unchanged after it goes away. Defeating
+// that from inside the binary was tried and abandoned: the techniques that work
+// in a synthetic module did not hold here, and a guard that works by accident is
+// worse than none. Use -count=1, or `make test`, which is what the README and
+// the startup failure message both point at.
+func TestSuiteConnectedToPostgres(t *testing.T) {
+	if runRecord == "" {
+		t.Fatal("run record is empty, so runSuite established no connection")
+	}
+	if err := os.WriteFile(runRecordFile, []byte(runRecord), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", runRecordFile, err)
+	}
 }
 
 // runSuite builds a database from the migrations, runs the tests, and drops it
@@ -73,7 +135,10 @@ func runSuite(m *testing.M) (int, error) {
 	adminCfg := cfg
 	adminCfg.DBName = envOr("TEST_ADMIN_DB", "postgres")
 	if err := database.Connect(adminCfg); err != nil {
-		return 0, err
+		// Naming the target matters: the failure that hid behind this line was a
+		// user mismatch, and "authentication failed" alone reads like a password
+		// problem rather than a configuration one.
+		return 0, fmt.Errorf("connecting to %s: %w", describeTarget(adminCfg), err)
 	}
 
 	// A leftover database from an interrupted run must not silently become the
@@ -88,8 +153,23 @@ func runSuite(m *testing.M) (int, error) {
 
 	cfg.DBName = testDB
 	if err := database.Connect(cfg); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("connecting to %s: %w", describeTarget(cfg), err)
 	}
+
+	// Report what the suite is actually talking to. A run that prints this line
+	// reached a real server; a run that does not, did not.
+	var serverVersion, whoami, dbName string
+	if err := database.DB.QueryRow(
+		`SELECT version(), current_user, current_database()`).
+		Scan(&serverVersion, &whoami, &dbName); err != nil {
+		return 0, fmt.Errorf("verifying connection to %s: %w", describeTarget(cfg), err)
+	}
+	fmt.Printf("integration tests: connected to %s as %q, database %q\n",
+		truncate(serverVersion, 60), whoami, dbName)
+
+	// Describe the connection that actually happened.
+	// TestSuiteConnectedToPostgres writes this to disk.
+	runRecord = fmt.Sprintf("%d %s\n", time.Now().UnixNano(), describeTarget(cfg))
 
 	if err := applyMigrations(); err != nil {
 		return 0, fmt.Errorf("applying migrations: %w", err)
@@ -127,6 +207,21 @@ func applyMigrations() error {
 		}
 	}
 	return nil
+}
+
+// describeTarget renders a connection target without its password, so a failure
+// says which server, user and database were tried.
+func describeTarget(c database.Config) string {
+	return fmt.Sprintf("postgres://%s@%s:%s/%s", c.User, c.Host, c.Port, c.DBName)
+}
+
+// truncate keeps the connection banner to one readable line
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(strings.SplitN(s, "\n", 2)[0])
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // newTestEnv gives each test its own tenants, sites and clean tables.
