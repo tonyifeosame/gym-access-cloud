@@ -89,6 +89,12 @@ A serial already registered to a **different** site returns `409` and changes
 nothing — reassignment is a provisioning decision, not something registration
 does silently.
 
+A device an operator has taken out of service — `DISABLED`, or `active = false`
+— returns `403` and changes nothing. Disabling is the only revocation this API
+offers, so registration must not be a route around it: a re-registration of a
+disabled serial neither re-enables the device nor issues a credential, and the
+key already on the row is left exactly as it was.
+
 ## `POST /api/v1/devices/heartbeat`
 
 ```json

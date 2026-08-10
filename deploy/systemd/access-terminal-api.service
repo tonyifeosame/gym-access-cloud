@@ -1,0 +1,75 @@
+# Running the API as a plain systemd service instead of a container.
+#
+# Use this when PostgreSQL is already managed on the host and Docker would only
+# add a layer. The Nginx config and the environment file are identical either
+# way -- only the process supervisor changes.
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin access-terminal
+#   sudo install -m 0755 access-terminal-cloud-api /usr/local/bin/
+#   sudo install -d -o root -g access-terminal -m 0750 /etc/access-terminal
+#   sudo install -o root -g access-terminal -m 0640 \
+#        deploy/.env.production /etc/access-terminal/env
+#   sudo cp deploy/systemd/access-terminal-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now access-terminal-api
+#
+# Build the binary for the host:
+#   CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o access-terminal-cloud-api .
+
+[Unit]
+Description=Access Terminal Cloud API
+Documentation=file:///opt/access-terminal/deploy/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=access-terminal
+Group=access-terminal
+
+# 0640 root:access-terminal -- readable by the service, not by other users on
+# the box. It holds the database password and the metrics token.
+EnvironmentFile=/etc/access-terminal/env
+
+ExecStart=/usr/local/bin/access-terminal-cloud-api
+
+# The API drains in-flight requests on SIGTERM (main.go), which matters because
+# a terminal may be mid-acknowledgement -- dropping that connection makes it
+# retry a job it had already applied. The timeout is longer than the 15s drain
+# the process allows itself.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5s
+
+# --- hardening --------------------------------------------------------------
+# The process keeps no state on disk: no writable path is required anywhere.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+
+# IPv4/IPv6 and unix sockets. Everything else is a category this process has no
+# business using.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The API listens on 8080 behind Nginx; no privileged port is needed.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

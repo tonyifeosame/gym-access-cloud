@@ -581,11 +581,21 @@ curl -X POST http://localhost:8080/api/v1/devices/register \
 Registering an existing serial **rotates** the credential rather than failing —
 this is how a factory-reset terminal recovers. The previous key stops working
 immediately. Registration also seeds the device with the current member list as
-`CREATE` jobs (`bootstrap_jobs` reports how many).
+`CREATE` jobs (`bootstrap_jobs` reports how many), **in the same transaction**
+that issues the credential — so there is no state in which a key is committed
+but never returned to the caller that has to store it.
+
+A device that is `DISABLED`, or whose `active` is false, is **refused**.
+Disabling is currently the only way to revoke a terminal, so registration is not
+allowed to undo it: nothing is rotated, nothing is re-enabled, and no credential
+is issued. Re-enable the device first.
 
 | Error | Status | Body |
 |---|---|---|
 | `serial_number` missing | `400` | validator message |
+| `device_type` not `TERMINAL`/`READER`/`CONTROLLER` | `400` | validator message |
+| `release_channel` not `STABLE`/`BETA`/`CANARY` | `400` | validator message |
+| Device is `DISABLED` or inactive | `403` | `{"error":"Device is disabled; re-enable it before registering"}` |
 | Serial belongs to another site | `409` | `{"error":"Serial number is registered to another site"}` |
 
 ### `GET /api/v1/devices?outdated=true`

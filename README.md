@@ -291,7 +291,7 @@ GIN_MODE=debug go run main.go
 
 ### Run tests:
 ```bash
-go test ./...
+go test -count=1 ./...
 ```
 
 The suite is mostly **integration tests against a real PostgreSQL instance**.
@@ -302,14 +302,54 @@ queries are right.
 
 The tests create and drop their own database (`access_terminal_test`, override
 with `TEST_DB_NAME`) from `migrations/` on every run, so they never touch a real
-one and double as the check that a fresh database can be built from zero.
-Connection settings come from the same `DB_*` variables the server uses:
+one and double as the check that a fresh database can be built from zero. The
+account therefore needs `CREATEDB`.
+
+Connection settings come from the same `DB_*` variables the server uses, and a
+`.env` in the repo root is loaded automatically — the tests read it themselves
+rather than relying on `main()`, which a test binary never executes. Anything
+set on the command line still wins:
 
 ```bash
-DB_HOST=localhost DB_USER=postgres DB_PASSWORD=secret go test ./...
+DB_HOST=localhost DB_USER=postgres DB_PASSWORD=secret go test -count=1 ./...
 ```
 
-Set `TEST_DB_SKIP=1` to skip them where no PostgreSQL is available.
+A run that reached a server prints the server it reached before the tests start:
+
+```
+integration tests: loaded .env from the repo root
+integration tests: connected to PostgreSQL 18.4 ... as "postgres", database "access_terminal_test"
+```
+
+**`-count=1` is not optional here.** `go test` caches a passing package result
+and replays it whenever the cache key matches. That key covers the test binary,
+the command line, and the files and environment variables the tests consult —
+it does not, and cannot, cover whether PostgreSQL is reachable. Worse, the `DB_*`
+variables are not part of it either: the go command re-reads recorded variables
+from its own environment, and the harness resolves them before `m.Run()` starts.
+
+So a bare `go test ./...` can report `ok (cached)` for a run that never opened a
+connection — a pass banked while the database was up, replayed after it went
+away. That is not hypothetical; it is how this suite once reported green against
+a server refusing every connection. Always run:
+
+```bash
+go test -count=1 ./...
+
+# and if a pass may already be banked against a database that has since gone:
+go clean -testcache && go test -count=1 ./...
+```
+
+The `Makefile` wraps these as `make test` and `make test-fresh` where `make` is
+available; the commands above are the source of truth.
+
+If PostgreSQL is unavailable the suite **fails** and names the target it tried
+(`postgres://user@host:port/db`); it does not fall back to a mock and it does not
+skip. `TEST_DB_SKIP=1` (`make test-skip-db`) skips it deliberately and says
+loudly that the tenancy and sync SQL went uncovered.
+
+After any real run, `.integration-run` records which server was reached and
+when — worth checking in CI, since a passing `go test` prints nothing.
 
 ## Configuration
 
