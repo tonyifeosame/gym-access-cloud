@@ -18,8 +18,27 @@
 #   * migrations/ is NOT mounted into docker-entrypoint-initdb.d. That directory
 #     runs only on FIRST init of an empty data volume, so it silently does
 #     nothing on every subsequent deploy -- which reads as "migrations applied"
-#     when they were not. Migrations are run explicitly; see deploy/README.md.
-#   * DB_SSLMODE is required, not disabled.
+#     when they were not. Migrations are run explicitly by deploy/migrate.sh,
+#     which keeps a ledger; see deploy/README.md.
+#
+# ON DB_SSLMODE, which this file used to set to `require`:
+#
+#   It does not, now, and the reason is worth writing down because `require`
+#   reads like the safer choice. The official postgres image ships with
+#   `ssl = off` -- it generates no server certificate, and there is nothing in
+#   this stack that gives it one. lib/pq asked for `require` against that server
+#   gets "pq: SSL is not enabled on the server" and the API exits at startup.
+#   So the setting was not hardening; it was a stack that could not come up.
+#
+#   What actually carries the security here is topology: postgres publishes no
+#   host port and sits on a bridge network whose only other member is the API.
+#   Nothing can reach it to intercept.
+#
+#   `require` is also weaker than it sounds even when it works -- it encrypts but
+#   does NOT authenticate the server, so it stops a passive listener and not an
+#   active one. The setting that means something is `verify-full`, and it needs a
+#   CA the client trusts. When the database moves off this host, that is the one
+#   to use; deploy/README.md has the steps.
 
 services:
   postgres:
@@ -59,13 +78,25 @@ services:
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME}
-      # In-cluster traffic on a private network; `require` gets encryption
-      # without needing the server cert distributed to the API container.
-      # Raise to verify-full if the database moves off this host.
-      DB_SSLMODE: ${DB_SSLMODE:-require}
+      # See the note at the top of this file. `disable` is correct for a
+      # database on this host's private bridge network; use verify-full, with a
+      # CA, once it is anywhere else.
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-25}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-5}
+      DB_CONN_MAX_LIFETIME_SECONDS: ${DB_CONN_MAX_LIFETIME_SECONDS:-1800}
+      DB_CONN_MAX_IDLE_SECONDS: ${DB_CONN_MAX_IDLE_SECONDS:-300}
 
       SERVER_PORT: 8080
       GIN_MODE: release
+
+      # Nginx runs on the HOST and reaches the API through the loopback publish
+      # below, so from inside the container the proxy appears as the bridge
+      # gateway -- not as 127.0.0.1, which is what the application defaults to.
+      # Left unset, gin would not trust the real proxy and every device would be
+      # recorded at the gateway address instead of its own.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
 
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN is required in production}
@@ -74,6 +105,8 @@ services:
       DEVICE_OFFLINE_AFTER_SECONDS: ${DEVICE_OFFLINE_AFTER_SECONDS:-180}
       OFFLINE_SWEEP_INTERVAL_SECONDS: ${OFFLINE_SWEEP_INTERVAL_SECONDS:-60}
       SYNC_JOB_RETENTION_DAYS: ${SYNC_JOB_RETENTION_DAYS:-90}
+      SYNC_JOB_PRUNE_INTERVAL_SECONDS: ${SYNC_JOB_PRUNE_INTERVAL_SECONDS:-3600}
+      MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS: ${MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS:-10}
       SYNC_COMPACTION_THRESHOLD: ${SYNC_COMPACTION_THRESHOLD:-500}
     depends_on:
       postgres:

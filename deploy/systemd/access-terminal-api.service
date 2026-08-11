@@ -13,7 +13,11 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now access-terminal-api
 #
 # Build the binary for the host:
-#   CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o access-terminal-cloud-api .
+#   make build
+#
+# Use the make target rather than a bare `go build`: it stamps version/commit
+# into the binary, which is what /health and access_terminal_build_info report.
+# An unstamped binary reports version=dev and cannot be matched to a commit.
 
 [Unit]
 Description=Access Terminal Cloud API

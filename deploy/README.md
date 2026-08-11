@@ -3,7 +3,9 @@
 Everything here is prepared and **nothing has been deployed**. The hostname is
 settled — `api.accesslink.store`, written into the nginx site and every command
 below — but no DNS record has been created and no certificate has been issued,
-so the two things that depend on those are still outstanding. See below.
+so the two things that depend on those are still outstanding. Start at
+[Domain configuration](#domain-configuration) — nothing else can proceed until
+the name resolves.
 
 Files:
 
@@ -11,6 +13,7 @@ Files:
 |---|---|
 | `Dockerfile` | Production image — non-root, pinned tags, healthcheck, stamped with commit |
 | `docker-compose.prod.yml` | API + PostgreSQL; database not published, API on loopback only |
+| `migrate.sh` | Applies migrations once each, against a `schema_migrations` ledger |
 | `.env.production.example` | Every environment variable the app reads, with the reasoning |
 | `nginx/access-terminal-api.conf` | TLS termination, rate limits, proxy headers |
 | `systemd/access-terminal-api.service` | Alternative to Docker for the API process |
@@ -34,6 +37,89 @@ connect, and cannot be fixed over the network.
 Note that step 2 does **not** wait for step 1. The roots come from the CA, not
 from the server (step 7), so the firmware image can be built and tested before
 the certificate is issued — only the final connection check has to wait.
+
+---
+
+## Domain configuration
+
+`api.accesslink.store` is written out in full in the Nginx site, in the
+certificate paths, and in the terminal's `set url`. This is what has to exist
+before any of it works.
+
+### 1. Create the DNS record
+
+At the registrar holding `accesslink.store`, add an address record for the `api`
+label pointing at the host's **public** address:
+
+| Type | Name | Value | TTL |
+|---|---|---|---|
+| `A` | `api` | *public IPv4 of the host* | 300 |
+| `AAAA` | `api` | *public IPv6, if the host has one* | 300 |
+
+Keep the TTL low (300s) until the deployment has settled. A 24-hour TTL on a
+record that turns out to be wrong is a day of waiting, and the fleet is pinned
+to this name.
+
+Add the `AAAA` record **only if the host actually serves on IPv6**. The Nginx
+site listens on `[::]:80` and `[::]:443`, so it will — but if the host has no
+working IPv6 route, a published `AAAA` makes clients that prefer v6 try it first
+and stall. Publish one or fix routing; do not publish one and hope.
+
+### 2. Verify it resolves, before requesting a certificate
+
+Certbot's webroot challenge proves control by being *reached over the name*, so
+a record that has not propagated produces a confusing failure that looks like a
+certbot problem.
+
+```bash
+dig +short A    api.accesslink.store
+dig +short AAAA api.accesslink.store
+
+# Ask an authoritative server directly -- this skips every resolver cache
+# between here and the registrar, which is what makes propagation confusing.
+dig +short NS accesslink.store
+dig +short api.accesslink.store @$(dig +short NS accesslink.store | head -1)
+```
+
+Both must return the host's own addresses. Then confirm the host answers on that
+name over plain HTTP, which is the exact path the challenge takes:
+
+```bash
+curl -sI http://api.accesslink.store/.well-known/acme-challenge/probe
+```
+
+A 404 from Nginx is success — it means the name resolved here and the location
+block is serving. A timeout means DNS or the firewall; a connection refused
+means Nginx is not listening.
+
+### 3. Then continue to the certificate
+
+Only once the above returns cleanly, go to **First deploy → step 5**.
+
+### Using a different domain
+
+The hostname appears in several places and they must move together. There is
+deliberately no variable for it: an Nginx `server_name` cannot be templated, and
+a half-substituted config that still starts is worse than one that does not.
+
+```bash
+OLD=api.accesslink.store
+NEW=api.otherdomain.tld
+
+sed -i "s/${OLD//./\\.}/$NEW/g" deploy/nginx/access-terminal-api.conf
+sed -i "s/${OLD//./\\.}/$NEW/g" deploy/README.md
+
+# Confirm nothing was missed -- expect no output.
+grep -rn "$OLD" deploy/ || echo "clean"
+```
+
+Then re-issue the certificate for the new name, and re-flash the terminals with
+`set url https://$NEW`. The certificate paths in the Nginx site are
+`/etc/letsencrypt/live/<name>/`, which certbot creates from the name you request,
+so those are covered by the same substitution.
+
+Changing the domain after terminals are deployed means visiting each one — a
+terminal holds its URL in NVS and there is no remote path to change it.
 
 ---
 
@@ -75,12 +161,49 @@ docker compose --env-file deploy/.env.production \
                -f deploy/docker-compose.prod.yml up -d postgres
 
 set -a; . deploy/.env.production; set +a
-for f in migrations/*.sql; do
-  echo "applying $f"
-  docker compose --env-file deploy/.env.production \
-                 -f deploy/docker-compose.prod.yml \
-                 exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 < "$f"
-done
+sh deploy/migrate.sh --dry-run     # what would run
+sh deploy/migrate.sh               # run it
+```
+
+`migrate.sh` keeps a `schema_migrations` ledger and applies each file once,
+inside a single transaction that also records the ledger row — so a migration
+and the record of it either both land or neither does.
+
+> **Do not go back to looping `psql` over `migrations/*.sql`.** These migrations
+> are not merely non-idempotent — 001 is *incompatible with the schema the later
+> ones produce*. Replayed against a fully migrated database it fails at
+> `001_init_schema.sql:52`:
+>
+> ```
+> ERROR: column "member_id" does not exist
+> ```
+>
+> because that line indexes `enrollment_requests(member_id)`, and 002 replaced
+> that column with `person_id`. The `IF NOT EXISTS` on the index does not help:
+> the object it guards is gone and the column it names no longer exists. Bare
+> `CREATE TRIGGER` and `ALTER TABLE ... ADD CONSTRAINT` further on would fail
+> too, if execution ever reached them.
+>
+> And 001 opens no transaction of its own — 002–007 do, so they roll back
+> cleanly, but whatever 001 executes before the failing line stays. A deploy
+> that half-applies schema and then reports an error is the worst outcome
+> available here.
+>
+> This ran correctly on a fresh database, which is why it survived review: the
+> loop only misbehaves on the *second* deploy.
+
+Re-running is safe and is the normal upgrade step — it applies whatever is new:
+
+```bash
+sh deploy/migrate.sh --status      # applied vs pending, changes nothing
+```
+
+If the schema was already applied by hand before this script existed, record it
+without re-executing anything, then confirm it reads as clean:
+
+```bash
+sh deploy/migrate.sh --baseline
+sh deploy/migrate.sh --status      # expect: 0 pending
 ```
 
 **Do not load `seeds/dev_seed.sql`.** It creates sites with known keys.
@@ -203,6 +326,15 @@ and confirms it without either end printing the key.
 curl -sI https://api.accesslink.store/health | head -1
 curl -s https://api.accesslink.store/health/ready
 
+# Which build is actually running. `"version":"dev"` here means the binary was
+# built without the ldflags stamp -- the deployed commit is then unknowable, so
+# treat it as a failed deploy rather than a cosmetic issue.
+curl -s https://api.accesslink.store/health
+
+# Schema state. Expect "0 pending"; anything else means the API is running
+# against a database it does not match.
+sh deploy/migrate.sh --status
+
 # TLS 1.2 must work -- this is the fleet's path
 openssl s_client -connect api.accesslink.store:443 -tls1_2 </dev/null 2>&1 | grep -E "Protocol|Cipher"
 
@@ -222,12 +354,55 @@ is no way to re-derive a device key, but a lost database means re-registering
 every terminal by hand.
 
 ```bash
+mkdir -p deploy/backups
 docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
   exec -T postgres pg_dump -U "$DB_USER" -d "$DB_NAME" -Fc \
-  > backups/at-$(date +%F-%H%M).dump
+  > deploy/backups/at-$(date +%F-%H%M).dump
 ```
 
+`deploy/backups/` and `*.dump` are gitignored — that path, specifically. Writing
+to a `backups/` at the repository root instead puts a file holding the entire
+member roster and every device credential hash into `git status` as untracked,
+one `git add -A` away from being committed.
+
 Put it on a timer, keep it off this host, and restore one before you need to.
+
+---
+
+## Moving the database off-host
+
+`DB_SSLMODE=disable` is correct only while PostgreSQL is on this host or on the
+private bridge the compose stack creates. The moment it is reachable over a
+network the setting has to change — and the one to change it to is
+**`verify-full`**, not `require`.
+
+`require` encrypts but does not check who answered, so it defeats a passive
+listener and not an active one; against a server presenting any certificate at
+all it connects happily. `verify-full` checks the chain and the hostname.
+
+```bash
+# on the API host
+sudo install -D -m 0644 ca.crt /etc/access-terminal/db-ca.crt
+```
+
+```ini
+DB_HOST=db.internal.example
+DB_SSLMODE=verify-full
+PGSSLROOTCERT=/etc/access-terminal/db-ca.crt
+```
+
+`lib/pq` reads `PGSSLROOTCERT` from the environment, so it needs no code change —
+but it is read at connection time, which means the file must be readable by the
+service user and mounted into the container if the API runs in one.
+
+Confirm the connection is actually verified rather than merely encrypted:
+
+```bash
+docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" \
+  -c "SELECT ssl, version, cipher FROM pg_stat_ssl
+      JOIN pg_stat_activity USING (pid) WHERE usename = current_user;"
+```
 
 ---
 
@@ -240,7 +415,7 @@ is a deliberate not-yet rather than an oversight.
 |---|---|
 | No revoke/rotate endpoint | Revoking a stolen terminal needs `psql`. Disabling it works and registration can no longer undo that, but there is no API for it. |
 | Site keys stored in plaintext, compared with `=` | The provisioning secret is readable by anyone with database access. |
-| `SetTrustedProxies` not called | Gin trusts any `X-Forwarded-For`, so the recorded device IP is spoofable. The Nginx config overwrites the header rather than appending, which contains it at the edge — but the application should set its trusted proxy list. |
+| ~~`SetTrustedProxies` not called~~ | **Closed.** `TRUSTED_PROXIES` (router.go); Nginx also overwrites the header rather than appending. Set it to match your topology — the value differs between the compose and systemd deployments. |
 | No application-level rate limiting | Handled at Nginx here. An attacker reaching port 8080 directly would bypass it, which is why the API binds to loopback only. |
 | Access logs are site-key authenticated | A terminal cannot upload door events without the provisioning secret. Blocks the ESP32 sync client; needs a device-authenticated endpoint. |
 | Fingerprint templates are cloud-stored | `people.fingerprint_template` is pushed to devices in `PERSON` sync payloads, which contradicts "templates stay device-local". Decide before the fleet grows. |

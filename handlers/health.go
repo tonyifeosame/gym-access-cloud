@@ -45,6 +45,8 @@ func HealthLive(c *gin.Context) {
 		"status":         "alive",
 		"service":        "Access Terminal Cloud API",
 		"uptime_seconds": int(time.Since(startedAt).Seconds()),
+		"version":        buildInfo.Version,
+		"commit":         buildInfo.Commit,
 	})
 }
 
@@ -131,6 +133,14 @@ func Metrics(c *gin.Context) {
 
 	writeGauge(&b, "access_terminal_uptime_seconds",
 		"Seconds since process start.", nil, time.Since(startedAt).Seconds())
+
+	// The conventional build_info shape: a constant 1 carrying the identity in
+	// labels, so a dashboard can group by version and a deploy shows up as the
+	// series changing rather than as a gap.
+	b.WriteString("# HELP access_terminal_build_info Version and commit of the running binary.\n")
+	b.WriteString("# TYPE access_terminal_build_info gauge\n")
+	fmt.Fprintf(&b, "access_terminal_build_info{version=%q,commit=%q} 1\n",
+		buildInfo.Version, buildInfo.Commit)
 
 	b.WriteString("# HELP access_terminal_devices Devices by status.\n")
 	b.WriteString("# TYPE access_terminal_devices gauge\n")

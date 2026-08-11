@@ -17,11 +17,29 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// Build metadata, stamped at link time by deploy/Dockerfile and the Makefile:
+//
+//	-ldflags="-X main.version=$(git describe ...) -X main.commit=$(git rev-parse ...)"
+//
+// These must be declared here, as package-level strings in `main`, for that to
+// do anything. `-X` on a symbol the linker cannot find is silently ignored --
+// no warning, no error, just an unstamped binary that looks fine. The build
+// arguments were being passed for a while against variables that did not exist.
+//
+// Surfaced on /health, /health/live and as access_terminal_build_info so a
+// running container can be matched to a commit without guessing.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
 	}
+
+	handlers.SetBuildInfo(version, commit)
 
 	// Set Gin mode
 	ginMode := os.Getenv("GIN_MODE")
@@ -60,7 +78,8 @@ func main() {
 
 	// Serve in the background so the main goroutine can wait for a signal.
 	go func() {
-		log.Printf("Starting Access Terminal Cloud API server on port %s", port)
+		log.Printf("Starting Access Terminal Cloud API server on port %s (version=%s commit=%s)",
+			port, version, commit)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}

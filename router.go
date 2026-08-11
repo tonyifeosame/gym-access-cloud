@@ -1,11 +1,64 @@
 package main
 
 import (
+	"log"
+	"os"
+	"strings"
+
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 )
+
+// configureTrustedProxies decides whose X-Forwarded-For gin is allowed to
+// believe.
+//
+// Gin's default is to trust EVERY proxy, which means it takes the last hop of
+// whatever X-Forwarded-For arrives and reports that as c.ClientIP(). Reached
+// directly, a client can therefore choose its own apparent address -- and this
+// API writes c.ClientIP() onto the device row at registration and heartbeat,
+// so the recorded address of a terminal was spoofable. The Nginx site in
+// deploy/ overwrites the header rather than appending to contain that at the
+// edge, but the edge is not the only way in and the mitigation belonged here.
+//
+// TRUSTED_PROXIES is a comma-separated list of IPs or CIDRs. The default is
+// loopback, matching the deployment: Nginx runs on the host and the API is
+// published on 127.0.0.1 only. Set it explicitly when the proxy is elsewhere --
+// a container on the compose network, or a load balancer on a private subnet.
+//
+// TRUSTED_PROXIES=none trusts nobody: ClientIP() then always reports the peer
+// address and X-Forwarded-For is ignored entirely. That is the right setting if
+// the API is ever exposed without a proxy in front of it.
+func configureTrustedProxies(r *gin.Engine) {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+
+	if strings.EqualFold(raw, "none") {
+		if err := r.SetTrustedProxies(nil); err != nil {
+			log.Fatalf("TRUSTED_PROXIES: %v", err)
+		}
+		log.Println("Trusted proxies: none (X-Forwarded-For ignored)")
+		return
+	}
+
+	proxies := []string{"127.0.0.1", "::1"}
+	if raw != "" {
+		proxies = proxies[:0]
+		for _, p := range strings.Split(raw, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				proxies = append(proxies, p)
+			}
+		}
+	}
+
+	// A malformed entry is fatal rather than logged and skipped. Falling back to
+	// gin's trust-everything default because a CIDR had a typo is exactly the
+	// silent downgrade this function exists to prevent.
+	if err := r.SetTrustedProxies(proxies); err != nil {
+		log.Fatalf("TRUSTED_PROXIES is not a valid list of IPs/CIDRs: %v", err)
+	}
+	log.Printf("Trusted proxies: %s", strings.Join(proxies, ", "))
+}
 
 // NewRouter builds the HTTP routing table.
 //
@@ -20,16 +73,24 @@ func NewRouter() *gin.Engine {
 	// carries the request id and device identity.
 	r := gin.New()
 
+	configureTrustedProxies(r)
+
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestIDMiddleware())
 	r.Use(middleware.CORSMiddleware())
 	r.Use(middleware.LoggingMiddleware())
 
-	// Health check endpoint (no auth required)
+	// Health check endpoint (no auth required).
+	//
+	// The existing status/service fields are unchanged -- terminals and uptime
+	// checks already parse this response, and version/commit are additive.
 	r.GET("/health", func(c *gin.Context) {
+		build := handlers.Build()
 		c.JSON(200, gin.H{
 			"status":  "healthy",
 			"service": "Access Terminal Cloud API",
+			"version": build.Version,
+			"commit":  build.Commit,
 		})
 	})
 

@@ -7,7 +7,22 @@
 # reachable -- so a pass banked while the database was up is replayed unchanged
 # after it goes away. -count=1 is the supported way to bypass that.
 
-.PHONY: test test-fresh test-skip-db vet fmt
+.PHONY: test test-fresh test-skip-db vet fmt build
+
+# Build metadata. These must reach package-level vars named `version` and
+# `commit` in package main -- `-X` against a symbol the linker cannot find is
+# ignored silently, producing an unstamped binary with no warning. Verify with:
+#   ./access-terminal-cloud-api & curl -s localhost:8080/health
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
+LDFLAGS = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+
+# The binary for the systemd deployment. CGO off so it is static and does not
+# depend on the build host's libc; -trimpath keeps build paths out of it.
+build:
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="$(LDFLAGS)" \
+		-o access-terminal-cloud-api .
 
 # The normal way to run the tests. Never served from cache.
 test:
