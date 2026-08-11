@@ -7,7 +7,7 @@
 # reachable -- so a pass banked while the database was up is replayed unchanged
 # after it goes away. -count=1 is the supported way to bypass that.
 
-.PHONY: test test-fresh test-skip-db vet fmt build
+.PHONY: test test-fresh test-skip-db vet fmt build docker-render
 
 # Build metadata. These must reach package-level vars named `version` and
 # `commit` in package main -- `-X` against a symbol the linker cannot find is
@@ -23,6 +23,15 @@ LDFLAGS = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 build:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="$(LDFLAGS)" \
 		-o access-terminal-cloud-api .
+
+# The image Render builds, built the way Render builds it: deploy/Dockerfile
+# with the repository root as context and NO build arguments. Render passes
+# none, so the binary is not stamped and /health reports "dev" for version and
+# the commit from RENDER_GIT_COMMIT at runtime. Reproducing that here is the
+# point -- `make build` and the deploy/README build both pass VERSION/COMMIT and
+# so would not catch a Dockerfile that only works when they are supplied.
+docker-render:
+	docker build -f deploy/Dockerfile -t accesslink-api:render .
 
 # The normal way to run the tests. Never served from cache.
 test:

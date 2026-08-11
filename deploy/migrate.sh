@@ -39,6 +39,19 @@
 #   set -a; . deploy/.env.production; set +a
 #   DB_HOST=localhost sh deploy/migrate.sh
 #
+# DATABASE_URL, if set, supersedes all of them and psql runs directly against
+# it. That is the path for a managed database -- Render, RDS, Neon -- which
+# hands out one connection string and no host port to reach any other way:
+#
+#   DATABASE_URL='postgres://user:pass@host/db' sh deploy/migrate.sh
+#
+# It matters on Render's free tier specifically: the service has no shell and
+# cannot run one-off jobs, so migrations are applied from a workstation against
+# the database's EXTERNAL URL. That connection crosses the public internet, so
+# this script requires TLS on it -- sslmode defaults to `require` and a URL
+# asking for a downgrade against a remote host is refused, matching what the API
+# itself does with the same variable.
+#
 # In the compose deployment PostgreSQL publishes no host port, so psql has to
 # run inside the container. That is the default when docker compose is present
 # and DB_HOST is unset or "postgres"; force either way with:
@@ -58,6 +71,7 @@ DB_NAME="${DB_NAME:-access_terminal}"
 DB_HOST="${DB_HOST:-}"
 DB_PORT="${DB_PORT:-5432}"
 DB_SSLMODE="${DB_SSLMODE:-disable}"
+DATABASE_URL="${DATABASE_URL:-}"
 
 MODE=apply
 for arg in "$@"; do
@@ -65,14 +79,50 @@ for arg in "$@"; do
     --status)   MODE=status ;;
     --dry-run)  MODE=dryrun ;;
     --baseline) MODE=baseline ;;
-    -h|--help)  sed -n '2,50p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,62p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
 # --- how we reach psql -------------------------------------------------------
 
-if [ -z "${MIGRATE_VIA_COMPOSE:-}" ]; then
+if [ -n "$DATABASE_URL" ]; then
+  # A connection string names its own server. Nothing about compose applies.
+  MIGRATE_VIA_COMPOSE=0
+
+  # Refuse a downgrade to plaintext against a remote database, and default to
+  # TLS when the URL says nothing -- psql's own default is `prefer`, which tries
+  # TLS, silently accepts plaintext when the server declines, and reports
+  # success either way. The API applies the same rule to the same variable; the
+  # migration path carries the same credentials over the same network and has no
+  # business being weaker than the thing it is preparing.
+  url_host=$(printf '%s' "$DATABASE_URL" \
+    | sed -e 's|^[a-zA-Z][a-zA-Z0-9+.-]*://||' -e 's|^[^@/]*@||' \
+          -e 's|[/?].*$||' -e 's|:[0-9]*$||')
+
+  case "$url_host" in
+    localhost|127.*|::1|'[::1]') url_is_local=1 ;;
+    *)                           url_is_local=0 ;;
+  esac
+
+  case "$DATABASE_URL" in
+    *sslmode=disable*|*sslmode=allow*|*sslmode=prefer*)
+      if [ "$url_is_local" = 0 ]; then
+        echo "  ! DATABASE_URL permits an unencrypted connection to $url_host." >&2
+        echo "    Use sslmode=require or stronger." >&2
+        exit 1
+      fi
+      ;;
+    *sslmode=*) : ;;  # require/verify-ca/verify-full -- left alone
+    *)
+      # No sslmode in the URL. PGSSLMODE supplies the default without editing
+      # the string, and an explicit sslmode in a future URL still wins over it.
+      if [ "$url_is_local" = 0 ]; then
+        export PGSSLMODE="${PGSSLMODE:-require}"
+      fi
+      ;;
+  esac
+elif [ -z "${MIGRATE_VIA_COMPOSE:-}" ]; then
   if [ -z "$DB_HOST" ] || [ "$DB_HOST" = "postgres" ]; then
     MIGRATE_VIA_COMPOSE=1
   else
@@ -87,7 +137,9 @@ export PGPASSWORD="${DB_PASSWORD:-}"
 # -v ON_ERROR_STOP=1 is what makes a failed statement abort the script instead
 # of psql shrugging and carrying on to the next one with a broken transaction.
 psql_run() {
-  if [ "$MIGRATE_VIA_COMPOSE" = "1" ]; then
+  if [ -n "$DATABASE_URL" ]; then
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 "$@"
+  elif [ "$MIGRATE_VIA_COMPOSE" = "1" ]; then
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T \
       -e PGPASSWORD="$PGPASSWORD" postgres \
       psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 "$@"

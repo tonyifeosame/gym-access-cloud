@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,12 +34,67 @@ var (
 	commit  = "unknown"
 )
 
+// listenAddress resolves the address the HTTP server binds to.
+//
+// PORT before SERVER_PORT. Render -- and every other platform that starts a
+// container it did not choose the port for -- injects PORT and routes to
+// whatever the process bound there; a service that ignores it binds a port
+// nothing is forwarded to and is marked unhealthy with no useful error. The
+// existing SERVER_PORT is kept as the fallback so the compose and systemd
+// deployments in deploy/ are unaffected.
+//
+// The host defaults to 0.0.0.0. That is a REQUIREMENT on a container platform,
+// not a preference: the health check and the proxy both arrive over the
+// container's network interface, and a process on 127.0.0.1 answers neither.
+// BIND_ADDRESS exists for the opposite case -- on the VPS deployment, where
+// Nginx terminates TLS on the same host, setting it to 127.0.0.1 keeps the API
+// off every other interface.
+func listenAddress() string {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = os.Getenv("SERVER_PORT")
+	}
+	if port == "" {
+		port = "8080"
+	}
+
+	host := os.Getenv("BIND_ADDRESS")
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
+	return net.JoinHostPort(host, port)
+}
+
+// resolveCommit falls back to the platform's build metadata when the linker
+// stamped none.
+//
+// The -X flags come from the Makefile and deploy/Dockerfile, which read git.
+// A platform build does not run those: Render builds from a Dockerfile it
+// invokes itself, with no build arguments, so `commit` stays "unknown" and
+// /health cannot say which revision is serving. RENDER_GIT_COMMIT is set in the
+// runtime environment there, which is enough to answer the question. Shortened
+// to match the `git rev-parse --short` form the stamped builds use.
+func resolveCommit() string {
+	if commit != "unknown" && commit != "" {
+		return commit
+	}
+	if c := os.Getenv("RENDER_GIT_COMMIT"); c != "" {
+		if len(c) > 7 {
+			return c[:7]
+		}
+		return c
+	}
+	return commit
+}
+
 func main() {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
 	}
 
+	commit = resolveCommit()
 	handlers.SetBuildInfo(version, commit)
 
 	// Set Gin mode
@@ -69,17 +125,14 @@ func main() {
 	}
 
 	// Start server
-	port := os.Getenv("SERVER_PORT")
-	if port == "" {
-		port = "8080"
-	}
+	addr := listenAddress()
 
-	srv := &http.Server{Addr: ":" + port, Handler: r}
+	srv := &http.Server{Addr: addr, Handler: r}
 
 	// Serve in the background so the main goroutine can wait for a signal.
 	go func() {
-		log.Printf("Starting Access Terminal Cloud API server on port %s (version=%s commit=%s)",
-			port, version, commit)
+		log.Printf("Starting Access Terminal Cloud API server on %s (version=%s commit=%s)",
+			addr, version, commit)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}

@@ -1,0 +1,7 @@
+# core.autocrlf=true on a Windows checkout rewrites LF to CRLF, and a shell
+# script with CRLF line endings does not run: sh reads the trailing \r as part
+# of the command and fails on the first line. deploy/migrate.sh is the one that
+# matters -- it is how migrations reach the Render database from a workstation,
+# and it would break on a fresh clone rather than in the working copy it was
+# written in.
+*.sh text eol=lf

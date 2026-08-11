@@ -1,0 +1,37 @@
+# What must not enter a build context.
+#
+# The first two entries are the ones that matter. `COPY . .` in the builder
+# stage copies whatever is in the context, so a local .env -- which holds the
+# database password -- was being baked into a build layer. The final stage takes
+# only the binary, so it never reached a published image, but a build layer is
+# still a copy of the secret sitting in the daemon's cache.
+#
+# The rest is weight: the committed Windows binaries alone are ~28 MB of context
+# uploaded on every build for a Linux image that cannot run them.
+
+# Secrets
+.env
+.env.*
+!.env.example
+deploy/.env.production
+deploy/.env.production.local
+
+# Build outputs and dumps
+*.exe
+*.exe~
+*.test
+*.out
+access-terminal-cloud-api
+deploy/backups/
+*.dump
+
+# Not used by the build
+.git
+.gitignore
+.claude/
+.vscode/
+.idea/
+.integration-run
+docs/
+*.md
+!README.md

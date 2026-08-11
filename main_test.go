@@ -132,8 +132,11 @@ func runSuite(m *testing.M) (int, error) {
 	testDB := envOr("TEST_DB_NAME", defaultTestDB)
 
 	// Connect to the maintenance database to create the test one.
-	adminCfg := cfg
-	adminCfg.DBName = envOr("TEST_ADMIN_DB", "postgres")
+	//
+	// WithDatabase, not an assignment to DBName: DBName is ignored when the
+	// configuration came from DATABASE_URL, and a suite that quietly stayed on
+	// the URL's database would run its destructive fixtures against it.
+	adminCfg := cfg.WithDatabase(envOr("TEST_ADMIN_DB", "postgres"))
 	if err := database.Connect(adminCfg); err != nil {
 		// Naming the target matters: the failure that hid behind this line was a
 		// user mismatch, and "authentication failed" alone reads like a password
@@ -151,7 +154,7 @@ func runSuite(m *testing.M) (int, error) {
 	}
 	database.Close()
 
-	cfg.DBName = testDB
+	cfg = cfg.WithDatabase(testDB)
 	if err := database.Connect(cfg); err != nil {
 		return 0, fmt.Errorf("connecting to %s: %w", describeTarget(cfg), err)
 	}
@@ -212,7 +215,7 @@ func applyMigrations() error {
 // describeTarget renders a connection target without its password, so a failure
 // says which server, user and database were tried.
 func describeTarget(c database.Config) string {
-	return fmt.Sprintf("postgres://%s@%s:%s/%s", c.User, c.Host, c.Port, c.DBName)
+	return c.Target()
 }
 
 // truncate keeps the connection banner to one readable line

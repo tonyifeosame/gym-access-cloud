@@ -364,6 +364,7 @@ when — worth checking in CI, since a passing `go test` prints nothing.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `DATABASE_URL` | unset | Full connection URI. Supersedes every `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`/`DB_SSLMODE` below when set — this is the shape managed providers hand out. TLS is enforced on it: no `sslmode` means `require`, and `disable`/`allow`/`prefer` against a non-loopback host is refused at startup |
 | `DB_HOST` / `DB_PORT` | `localhost` / `5432` | Database address |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `at_admin` / — / `access_terminal` | Credentials |
 | `DB_SSLMODE` | `disable` | Use `verify-full` (with a CA) when the database is across a network. `require` encrypts but authenticates nothing, and fails outright against the stock postgres image, which has SSL off |
@@ -371,7 +372,9 @@ when — worth checking in CI, since a passing `go test` prints nothing.
 | `DB_MAX_IDLE_CONNS` | `5` | Idle connections retained |
 | `DB_CONN_MAX_LIFETIME_SECONDS` | `1800` | Recycle connections so a failover does not leave stale ones |
 | `DB_CONN_MAX_IDLE_SECONDS` | `300` | Idle connection timeout |
-| `SERVER_PORT` | `8080` | Listen port |
+| `PORT` | unset | Listen port, checked **before** `SERVER_PORT`. Container platforms inject it and route to whatever the process bound there |
+| `SERVER_PORT` | `8080` | Listen port when `PORT` is unset |
+| `BIND_ADDRESS` | `0.0.0.0` | Interface to bind. `0.0.0.0` is required on a container platform, where the proxy and health check arrive over the container's interface. Set `127.0.0.1` where Nginx terminates TLS on the same host |
 | `GIN_MODE` | `release` | `debug` prints the routing table at startup |
 | `TRUSTED_PROXIES` | `127.0.0.1,::1` | Whose `X-Forwarded-For` to believe, as IPs/CIDRs. `none` ignores the header entirely. A malformed value is fatal at startup rather than a silent fall back to trusting everything |
 | `CORS_ALLOWED_ORIGINS` | unset | Comma-separated origin allowlist. Unset means any origin, never with credentials |
@@ -405,6 +408,27 @@ the runbook. In outline:
 
 See [`deploy/README.md`](deploy/README.md) for the full runbook, including
 domain and DNS setup.
+
+### Render (free tier)
+
+The current development/staging target is Render's free tier, described by
+[`render.yaml`](render.yaml) and
+[`docs/render-free-deployment.md`](docs/render-free-deployment.md). Nothing is
+deployed and no DNS record exists; the blueprint sets `autoDeploy: false`.
+
+The free **web service** is suitable for current development and testing. The
+free **PostgreSQL is disposable** — Render deletes it 30 days after creation, so
+everything in it must be reproducible from `migrations/` and `seeds/`. A
+**persistent production database and service means paid resources**, which are
+out of scope for now.
+
+It differs from the VPS deployment in ways that matter: the service sleeps after
+15 minutes idle (so the first request after that times out against the
+terminals' 10-second budget), the free database is deleted 30 days after
+creation, migrations run from a workstation against the external URL because a
+free service has no shell, and Render's edge replaces Nginx — including losing
+its rate limits. All of it is in that document. `deploy/` is unchanged and
+remains the production path.
 
 ## Security Notes
 

@@ -66,7 +66,13 @@ EXPOSE 8080
 # Liveness only -- deliberately NOT /health/ready. Readiness fails when the
 # database is unreachable, and restarting every API container during a database
 # blip turns one outage into two. See docs/operations.md.
+#
+# ${PORT:-8080} rather than a literal: a platform that starts this image chooses
+# the port and injects PORT, and the process binds what it is given. Hard-coding
+# 8080 here made the healthcheck probe a port nothing was listening on and
+# report the container unhealthy while it was serving normally. Compose and
+# systemd set no PORT, so they keep 8080.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8080/health/live >/dev/null 2>&1 || exit 1
+  CMD wget -qO- "http://127.0.0.1:${PORT:-8080}/health/live" >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/usr/local/bin/access-terminal-cloud-api"]

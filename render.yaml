@@ -1,0 +1,112 @@
+# Render Blueprint -- free-tier development/staging for the AccessLink cloud API.
+#
+# NOTHING IS DEPLOYED BY THIS FILE ON ITS OWN. It is read when a Blueprint is
+# created from the repository in the Render dashboard, and `autoDeploy: false`
+# below means even that does not redeploy on a push afterwards -- deploys stay
+# manual until someone chooses otherwise.
+#
+# Scope: free plans only. Every resource here is on an instance type Render
+# provides at no cost, and the consequences of that are real and documented in
+# docs/render-free-deployment.md -- the service sleeps after 15 minutes idle,
+# and the database is DELETED 30 days after it is created. Read that file before
+# putting anything on this that you would mind losing.
+#
+# The VPS deployment in deploy/ is untouched and remains the target for
+# production. This is the staging environment that gets there.
+
+services:
+  - name: accesslink-api
+    type: web
+    runtime: docker
+    plan: free
+    region: oregon # must match the database's region for the internal URL to work
+    branch: main
+    autoDeploy: false
+
+    # The hardened production image, not the bench Dockerfile at the repository
+    # root: non-root user, pinned base tags, static binary. There is no reason
+    # for the staging environment to run a weaker image than production.
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+
+    # Liveness, not readiness. /health/ready reports 503 while the database is
+    # unreachable, and Render restarts a service that fails its health check --
+    # which during a database blip would turn one outage into a restart loop.
+    # /health touches no dependency and carries the version and commit.
+    healthCheckPath: /health
+
+    envVars:
+      # The connection string for the database below, over Render's private
+      # network. The API appends sslmode=require to it (see
+      # database.normalizeDatabaseURL) because libpq's default is `prefer`,
+      # which downgrades to plaintext without saying so.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: accesslink-db
+          property: connectionString
+
+      - key: GIN_MODE
+        value: release
+
+      # Trust nobody's X-Forwarded-For.
+      #
+      # Render terminates TLS at its edge and forwards over addresses this
+      # deployment does not control or know. Trusting an unverified proxy would
+      # let a caller choose its own apparent address, and that address is
+      # written onto the device row at registration and heartbeat. The cost of
+      # `none` is that every device appears to come from Render's proxy rather
+      # than its real address; the alternative is a recorded address that is
+      # attacker-controlled, which is worse than a useless one.
+      #
+      # On the VPS deployment this goes back to the default (loopback), where
+      # Nginx is on the same host and overwrites the header.
+      - key: TRUSTED_PROXIES
+        value: none
+
+      # /metrics reports fleet-wide counts across every tenant and is reachable
+      # from the internet here -- there is no private network to hide it behind
+      # on a single free service. generateValue puts a random token in Render's
+      # environment and nowhere else; read it from the dashboard when you need
+      # to scrape.
+      - key: METRICS_TOKEN
+        generateValue: true
+
+      # Free Postgres allows far fewer connections than a paid instance, and a
+      # single free web service cannot scale past one instance, so a smaller
+      # pool is both sufficient and safer than the code default of 25.
+      - key: DB_MAX_OPEN_CONNS
+        value: "10"
+      - key: DB_MAX_IDLE_CONNS
+        value: "2"
+
+      - key: MAINTENANCE_ENABLED
+        value: "true"
+
+      # Browser origins allowed to read the API. Empty until a dashboard exists;
+      # `sync: false` means Render prompts for it once and never overwrites what
+      # is set in the dashboard from this file.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+    # NOT set here: PORT. Render injects it, and main.listenAddress reads it
+    # before SERVER_PORT. Overriding it in this file would only create a second
+    # place for the two to disagree.
+
+databases:
+  - name: accesslink-db
+    plan: free
+    region: oregon
+    databaseName: access_terminal
+    user: at_admin
+    postgresMajorVersion: "16"
+
+    # External access, because it is the only way to apply migrations on this
+    # tier: a free service has no shell and cannot run one-off jobs, so
+    # deploy/migrate.sh runs from a workstation against the external URL.
+    #
+    # 0.0.0.0/0 is Render's own default for a new database, and the credential
+    # is a long generated password -- but narrow this to your own address in the
+    # dashboard (Networking) once the schema is applied and you know what it is.
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: workstation migrations -- narrow this after the first run
