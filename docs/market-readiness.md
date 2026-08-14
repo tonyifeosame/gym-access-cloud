@@ -36,6 +36,74 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-008 — No console path for terminal removal or reassignment — **Major**
+
+*Found: 2026-08-14, investigating terminal lifecycle during Phase 2.3.*
+
+The console terminal API is exactly four routes: list, summary, detail, and
+set-application-mode. There is **no operator API** to:
+
+- **remove a terminal** — a unit that is lost, stolen, destroyed or replaced
+  stays in the inventory and keeps authenticating on its device key;
+- **move a terminal to another site** — a unit relocated between locations must
+  be re-registered, and until then reports against the wrong site;
+- **disable or re-enable a terminal** — `active` and `DISABLED` exist in the
+  schema and are honoured by device auth, but nothing operator-facing sets them;
+- **force a resync** — `POST /api/v1/devices/{serial}/resync` exists but is
+  authenticated by the **site provisioning key**, which a browser must never
+  hold, so it is not reachable from the console.
+
+Two consequences worth stating plainly. **A stolen terminal cannot be revoked
+from the console** — the only lever is rotating the site key, which is
+site-wide and does not touch that unit's own device credential. And this is
+what makes site retirement a one-way door: `DELETE /console/sites/{id}` cascades
+to terminals precisely because there is no other way to deal with them.
+
+Recorded as a **product requirement rather than invented**. Any of these is a
+new authorized endpoint with its own tests; none is something the frontend may
+approximate. Phase 2.3 names the gap on the terminal detail page rather than
+leaving an operator hunting for a button that was never built.
+
+Needs a decision before commercial release, and the revocation case is the one
+I would treat as closest to a blocker.
+
+### MR-009 — The terminal list is unpaginated and unsearchable server-side — **Minor**
+
+*Found: 2026-08-14, while building the terminal inventory.*
+
+`GET /console/terminals` returns the caller's entire scoped fleet in one
+response. There is no `limit`, `offset` or `q` — unlike `GET /console/people`,
+which was paginated and given SQL search for exactly this reason.
+
+Phase 2.3 therefore filters and searches **in the browser**, which is *correct
+today*: the client holds the complete set, so narrowing it narrows everything
+rather than one page. That is a property of the current API, not a principle,
+and it stops being true the moment the endpoint is paginated — at which point
+the client-side filter silently becomes a page filter wearing a search box.
+
+It also does not scale: a customer with a few thousand terminals serialises all
+of them on every load. Not urgent at current fleet sizes; would need
+`limit`/`offset`/`q` and a matching frontend change before it is.
+
+### MR-010 — Frontend quality gaps carried forward — **Should fix before launch**
+
+*Recorded 2026-08-14, tracked here so they are not rediscovered at review.*
+
+- **No automated accessibility audit.** The primitives are built to explicit
+  contracts — focus entry and return, focus trapping, labels bound to controls,
+  errors announced, colour never the sole signal — and each is covered by a
+  test. None of that is the same as an axe/WCAG pass. **An automated audit is
+  still required**, plus a manual pass with an actual screen reader.
+- **No real-browser verification.** Everything is jsdom. jsdom does not lay out,
+  does not apply media queries, and only approximates focus behaviour — so the
+  responsive breakpoints (900px navigation, 680px table-to-card) and the dialog
+  focus trap are **proven in tests but unproven in a browser**. Needs a pass on
+  real desktop, tablet and phone before launch.
+- **No real-device verification.** Deliberately out of scope during the frontend
+  phases: nothing has been exercised against actual ESP32 hardware. Site
+  settings changes, application-mode assignment and key rotation all have
+  effects on terminals that only real hardware can confirm.
+
 ### MR-007 — Site reads do not return the key prefix — **Minor**
 
 *Found: 2026-08-14, while building the Sites UI.*

@@ -446,6 +446,9 @@ export const handlers = [
     record(request)
     if (!state.session) return unauthorized()
 
+    const failure = takeFailure('terminals-list')
+    if (failure) return json({ error: 'Failed to retrieve terminals' }, failure)
+
     const url = new URL(request.url)
     const scope = reachableSiteIds()
     let terminals = scope

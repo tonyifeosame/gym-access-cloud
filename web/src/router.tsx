@@ -6,6 +6,8 @@ import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
 import { SiteDetailPage } from './pages/sites/SiteDetailPage'
+import { TerminalDetailPage } from './pages/terminals/TerminalDetailPage'
+import { TerminalsListPage } from './pages/terminals/TerminalsListPage'
 import { SitesListPage } from './pages/sites/SitesListPage'
 
 /**
@@ -41,15 +43,11 @@ export const router = createBrowserRouter([
           />
         ),
       },
-      {
-        path: 'terminals',
-        element: (
-          <NotImplemented
-            title="Terminals"
-            description="The devices installed across your sites, and what each one is for."
-          />
-        ),
-      },
+      // Terminals are a PLATFORM resource. The serial is the path parameter
+      // because it is what the API addresses a terminal by, and what is printed
+      // on the hardware an operator is standing in front of.
+      { path: 'terminals', element: <TerminalsListPage /> },
+      { path: 'terminals/:serial', element: <TerminalDetailPage /> },
       // Sites are a PLATFORM resource: every deployment has locations,
       // whatever it uses the platform for. The lifecycle writes behind these
       // screens are ADMIN-gated in the UI and enforced by the API regardless.

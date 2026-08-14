@@ -850,3 +850,120 @@ textarea.field__input {
     justify-content: space-between;
   }
 }
+
+/* ===========================================================================
+ * Terminals module
+ * ======================================================================== */
+
+/* Health tiles. Colour marks the tone; the label always carries the meaning,
+ * so nothing here depends on seeing it. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.tile {
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tile__label {
+  margin: 0 0 var(--space-1);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.tile__value {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 650;
+  line-height: 1.1;
+}
+
+.tile--positive {
+  border-inline-start: 3px solid var(--success);
+}
+
+.tile--warning {
+  border-inline-start: 3px solid var(--warning);
+}
+
+.tile--danger {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.toolbar__toggle {
+  align-self: flex-end;
+  padding-bottom: var(--space-2);
+}
+
+.filter-status {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.firmware {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* --- key/value detail list ------------------------------------------------
+ *
+ * A description list rather than a table: these are properties of one object,
+ * not rows of a collection, and a screen reader announces them as pairs.
+ */
+.detail-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.detail-list__row {
+  display: contents;
+}
+
+.detail-list dt {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.detail-list dd {
+  margin: 0;
+  font-size: 14px;
+}
+
+@media (max-width: 680px) {
+  .detail-list {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+
+  /* Each pair becomes a stacked block rather than two orphaned columns. */
+  .detail-list__row {
+    display: block;
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .detail-list dt {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .toolbar__toggle {
+    align-self: flex-start;
+    padding-bottom: 0;
+  }
+}
