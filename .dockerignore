@@ -35,3 +35,9 @@ deploy/backups/
 docs/
 *.md
 !README.md
+
+# The operator console. It is a separate deployable, served as static files from
+# its own origin, and the Go binary neither embeds nor serves it -- so it has no
+# business in this build context. node_modules alone would be hundreds of
+# megabytes uploaded to the daemon on every image build.
+web/

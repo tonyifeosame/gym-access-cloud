@@ -1,0 +1,179 @@
+import { getCsrfToken } from './csrf'
+
+/**
+ * The HTTP client.
+ *
+ * Everything the API expects of a browser client lives here, in one place, so
+ * no individual call has to remember it:
+ *
+ *   credentials: 'include'   the session is an HttpOnly cookie, and fetch does
+ *                            not send cookies cross-origin without this
+ *   X-CSRF-Token             required on every unsafe method
+ *   Content-Type: json       login rejects anything else with 415, which is
+ *                            deliberate CSRF defence on an endpoint that has no
+ *                            session yet to carry a token
+ *
+ * WHAT IS NOT HERE, AND MUST NEVER BE: the site API key. It is the provisioning
+ * secret -- it registers terminals and rotates their credentials -- and no
+ * browser request may carry it. There is no code path that sets X-API-Key, a
+ * lint rule forbids the literal, and a test asserts its absence.
+ */
+
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
+
+/**
+ * A failed request, carrying what the UI can actually act on.
+ *
+ * The API's error strings are for humans and are explicitly not stable, so
+ * behaviour branches on `status`. `requestId` is echoed on every response and
+ * appears in the server log against the same request, which is what makes a
+ * user-reported failure findable -- it is exposed cross-origin for this reason.
+ */
+export class ApiError extends Error {
+  readonly status: number
+  readonly requestId: string | null
+  readonly retryAfterSeconds: number | null
+
+  constructor(
+    status: number,
+    message: string,
+    requestId: string | null,
+    retryAfterSeconds: number | null,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.requestId = requestId
+    this.retryAfterSeconds = retryAfterSeconds
+  }
+
+  get isUnauthenticated(): boolean {
+    return this.status === 401
+  }
+
+  get isForbidden(): boolean {
+    return this.status === 403
+  }
+
+  get isNotFound(): boolean {
+    return this.status === 404
+  }
+
+  get isRateLimited(): boolean {
+    return this.status === 429
+  }
+}
+
+/**
+ * Called whenever any request comes back 401.
+ *
+ * A session can end between requests -- it expires, an administrator disables
+ * the account, someone changes the password elsewhere -- and every one of those
+ * arrives as a 401 on whatever request happened to be in flight. Routing that
+ * to one handler is what stops each caller inventing its own recovery.
+ */
+type UnauthenticatedHandler = () => void
+let onUnauthenticated: UnauthenticatedHandler | null = null
+
+export function setUnauthenticatedHandler(handler: UnauthenticatedHandler | null): void {
+  onUnauthenticated = handler
+}
+
+interface RequestOptions {
+  body?: unknown
+  signal?: AbortSignal
+  /** Suppresses the global 401 handler, for the boot-time session probe. */
+  expectUnauthenticated?: boolean
+}
+
+export async function request<T>(
+  method: HttpMethod,
+  path: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  if (!SAFE_METHODS.has(method)) {
+    const token = getCsrfToken()
+    if (token) {
+      headers['X-CSRF-Token'] = token
+    }
+  }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers,
+    // The session lives in a cookie the script cannot read; without this fetch
+    // simply would not send it, and every request would be anonymous.
+    credentials: 'include',
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    signal: options.signal,
+  })
+
+  const requestId = response.headers.get('X-Request-ID')
+
+  if (response.status === 401 && !options.expectUnauthenticated) {
+    onUnauthenticated?.()
+  }
+
+  if (response.status === 204) {
+    return undefined as T
+  }
+
+  const payload = await readJson(response)
+
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      errorMessage(payload, response.status),
+      requestId,
+      retryAfter(response),
+    )
+  }
+
+  return payload as T
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  const text = await response.text()
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    // A non-JSON body means something between here and the API answered -- a
+    // proxy error page, usually. Surface it as text rather than crashing on it.
+    return { error: text.slice(0, 200) }
+  }
+}
+
+function errorMessage(payload: unknown, status: number): string {
+  if (payload && typeof payload === 'object' && 'error' in payload) {
+    const message = (payload as { error?: unknown }).error
+    if (typeof message === 'string' && message.length > 0) return message
+  }
+  return `Request failed with status ${status}`
+}
+
+function retryAfter(response: Response): number | null {
+  const header = response.headers.get('Retry-After')
+  if (!header) return null
+  const seconds = Number.parseInt(header, 10)
+  return Number.isFinite(seconds) ? seconds : null
+}
+
+export const api = {
+  get: <T>(path: string, options?: RequestOptions) => request<T>('GET', path, options),
+  post: <T>(path: string, body?: unknown, options?: RequestOptions) =>
+    request<T>('POST', path, { ...options, body }),
+  put: <T>(path: string, body?: unknown, options?: RequestOptions) =>
+    request<T>('PUT', path, { ...options, body }),
+  delete: <T>(path: string, options?: RequestOptions) => request<T>('DELETE', path, options),
+}

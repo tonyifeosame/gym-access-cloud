@@ -48,3 +48,16 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Operator console (web/)
+#
+# Build output and dependencies only. The source, the lockfile and the
+# configuration are all committed -- the lockfile in particular, because a build
+# that resolves different dependency versions than the one that was tested is
+# not the same build.
+web/node_modules/
+web/dist/
+web/coverage/
+web/.env
+web/.env.local
+!web/.env.example
