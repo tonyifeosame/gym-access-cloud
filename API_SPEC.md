@@ -150,6 +150,22 @@ terminal reads. It is unique **per company**, so two companies may both use
 
 RFC 3339 / ISO 8601, UTC: `2026-08-07T19:20:27.655424Z`.
 
+Every timestamp the API returns is a **true instant in UTC**, and the `Z` is
+accurate. Storage is `TIMESTAMPTZ` and the API pins its database sessions to
+UTC, so the wire format does not change with the database server's location.
+
+> **Before migration 010 this was not true**, and any client that cached
+> timestamps from an earlier build holds values that are wrong by the database
+> server's UTC offset. The columns were `TIMESTAMP WITHOUT TIME ZONE`: they
+> stored a wall-clock reading, the driver labelled it `Z` on the way out, and
+> three different writers (the database's clock, the API process's clock, and a
+> device's own UTC) disagreed about what went in. Re-fetch rather than reconcile.
+
+**Timestamps you send** are accepted in either form. A value carrying an offset
+or a `Z` names an instant and is honoured exactly; a value carrying neither is
+read as UTC. This applies to `?since=` on the member-changes feed and to
+`occurred_at` on a device access log.
+
 ### Empty collections
 
 List endpoints return `[]`, never `null`. Clients may iterate unconditionally.
@@ -347,6 +363,11 @@ curl "http://localhost:8080/api/v1/members/changes?since=2000-01-01T00:00:00Z" \
 ```
 
 Returns an array of member objects → `200`. Empty: `[]`.
+
+`since` is compared as an instant. An offset or `Z` is honoured; no offset means
+UTC. Before migration 010 the offset was **discarded**, so a terminal sending a
+correctly-formed `…Z` was asking about a different moment than the one it named —
+by the database server's offset, in the direction that silently skipped changes.
 
 | Error | Status | Body |
 |---|---|---|

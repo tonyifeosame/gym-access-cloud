@@ -82,13 +82,15 @@ var (
 // repeated failed logins. It carries how long to wait so the handler can answer
 // with Retry-After rather than leaving the operator to guess.
 //
-// A duration rather than an instant, deliberately. Every timestamp column in
-// this schema is TIMESTAMP WITHOUT TIME ZONE and CURRENT_TIMESTAMP writes the
-// DATABASE server's local wall clock, which the driver then hands back to Go
-// labelled UTC. Comparing such a value against time.Now() is wrong by the
-// server's UTC offset -- an hour, on the deployment this was written against.
-// The remaining time is therefore computed in SQL, where both sides of the
-// comparison come from the same clock, and arrives here already resolved.
+// A duration rather than an instant, deliberately. It answers the only question
+// the caller has -- how long to wait -- without either side having to agree on
+// what time it is, which is what a Retry-After needs.
+//
+// The remaining time is computed in SQL and arrives here already resolved. That
+// was once mandatory: every timestamp column in this schema was TIMESTAMP
+// WITHOUT TIME ZONE, so a Go-side comparison against time.Now() was wrong by the
+// database server's UTC offset. Migration 010 made the columns TIMESTAMPTZ and
+// closed that hole, but the duration is still the right thing to return.
 type AccountLockedError struct {
 	RetryAfterSeconds int
 }
@@ -151,10 +153,10 @@ type SiteGrant struct {
 // double-submit cookie pattern would silently fail.
 //
 // ExpiresInSeconds is a DURATION, resolved by the database. The absolute
-// timestamps are TIMESTAMP WITHOUT TIME ZONE holding the database server's local
-// wall clock, so a client reading them as UTC would be wrong by that server's
-// offset. Anything a caller is meant to act on is expressed as a remaining
-// duration, and the handler turns that into a correct absolute instant.
+// timestamps beside it are true instants as of migration 010 -- they were
+// wall-clock readings mislabelled UTC before it -- but the duration remains what
+// a caller should act on, because it is independent of any disagreement between
+// the client's clock and the server's.
 type SessionCredentials struct {
 	Token             string    `json:"-"`
 	CSRFToken         string    `json:"csrf_token"`

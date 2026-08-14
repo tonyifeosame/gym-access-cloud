@@ -305,11 +305,11 @@ func AuthenticatePassword(email, password string) (*models.User, error) {
 	// this address refers to any more.
 	//
 	// The lock is evaluated in SQL rather than by comparing locked_until against
-	// time.Now(). locked_until is TIMESTAMP WITHOUT TIME ZONE holding the
-	// DATABASE server's local wall clock; the driver labels it UTC on the way
-	// out, so a Go-side comparison is wrong by that server's UTC offset. Doing
-	// it here puts both sides of the comparison on the same clock, which is also
-	// how every existing lifetime check in this package works.
+	// time.Now(). That was originally forced by the column being TIMESTAMP
+	// WITHOUT TIME ZONE -- see AuthenticateSession, which explains the same
+	// history in full. Migration 010 removed the hazard; the SQL-side evaluation
+	// stays because it keeps both sides of the comparison on one clock, which is
+	// how every lifetime check in this package works.
 	err := DB.QueryRow(`
 		SELECT u.id, u.password_hash, u.active,
 		       (u.locked_until IS NOT NULL AND u.locked_until > CURRENT_TIMESTAMP)

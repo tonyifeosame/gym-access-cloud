@@ -93,10 +93,24 @@ func GetMemberByID(companyID int64, memberID string) (*models.Member, error) {
 	return &m, nil
 }
 
-// GetMembersChangedSince retrieves members changed since a given timestamp
+// GetMembersChangedSince retrieves members changed since a given timestamp.
+//
+// `since` arrives as the caller's raw string and is cast explicitly rather than
+// left to be coerced by context. updated_at is TIMESTAMPTZ as of migration 010,
+// so the cast decides how the caller's value is read:
+//
+//   - carrying an offset or a Z, it names an instant and is honoured exactly.
+//     Before 010 the offset was silently DISCARDED, so a terminal politely
+//     sending "…T09:00:00Z" was asking a question nobody answered correctly.
+//   - carrying none, it is resolved in the session's zone, which the pool pins
+//     to UTC. "No offset" therefore means UTC rather than meaning whatever the
+//     database host is configured for.
+//
+// Both forms now round-trip: the value a caller passes back here is one this API
+// gave it in a previous response, and those are RFC3339 in UTC.
 func GetMembersChangedSince(companyID int64, since string) ([]models.Member, error) {
 	query := `SELECT ` + memberColumns + `
-	          FROM people WHERE company_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+	          FROM people WHERE company_id = $1 AND updated_at > $2::timestamptz AND deleted_at IS NULL
 	          ORDER BY updated_at ASC`
 
 	rows, err := DB.Query(query, companyID, since)

@@ -206,6 +206,35 @@ sh deploy/migrate.sh --baseline
 sh deploy/migrate.sh --status      # expect: 0 pending
 ```
 
+#### Migration 010 on a database that already holds data
+
+`010_timestamptz.sql` converts every timestamp column from a wall-clock reading
+to a true instant. To do that it has to know **which clock took the existing
+readings**, and it defaults to the time zone of the connection applying it.
+
+Run through `migrate.sh` as documented above, that default is correct: psql pins
+no time zone, so it reports the database server's own — which is the clock
+`CURRENT_TIMESTAMP` was reading. Nothing extra is needed, and on an empty
+database the choice cannot affect any value at all.
+
+It is wrong in one case: **the database has moved or been reconfigured since the
+data was written.** Name the zone the old rows were written in:
+
+```bash
+psql "$DATABASE_URL" -c "SET accesslink.legacy_timezone = 'Africa/Lagos';" \
+                     -f migrations/010_timestamptz.sql
+```
+
+The migration raises a `WARNING` naming the zone it used whenever it converts a
+populated database without an explicit override — check the deploy output for it
+rather than discovering the assumption later in an access log that reads an hour
+out. Getting this wrong shifts historical timestamps and is not automatically
+reversible, so verify before the ledger records it as applied.
+
+Note also that each `ALTER ... TYPE` rewrites its table under an `ACCESS
+EXCLUSIVE` lock and rebuilds the indexes over it. On a large `access_logs` this
+is not instant — apply it in a maintenance window.
+
 **Do not load `seeds/dev_seed.sql`.** It creates sites with known keys.
 
 A database built from migrations alone has no sites, and therefore no usable

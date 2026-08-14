@@ -167,13 +167,22 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 		companyOK   bool
 	)
 
-	// Liveness is decided in SQL, not by comparing the returned timestamps
-	// against time.Now(). These columns are TIMESTAMP WITHOUT TIME ZONE holding
-	// the DATABASE server's local wall clock, and the driver labels them UTC on
-	// the way out -- so a Go-side comparison is wrong by that server's UTC
-	// offset, which on the deployment this was written against would have kept
-	// expired sessions alive for an extra hour. Both sides of every comparison
-	// below come from the same clock.
+	// Liveness is decided in SQL rather than by comparing the returned
+	// timestamps against time.Now().
+	//
+	// This was originally forced: the columns were TIMESTAMP WITHOUT TIME ZONE
+	// holding the database server's wall clock, so a Go-side comparison was
+	// wrong by that server's UTC offset and would have kept expired sessions
+	// alive for an extra hour. Migration 010 made them TIMESTAMPTZ, so that
+	// hazard is gone and a Go-side comparison would now be correct.
+	//
+	// It stays in SQL anyway, because the reason to prefer it never depended on
+	// the column type: an expiry decided here is decided against ONE clock, the
+	// database's. Comparing in Go introduces the API process's clock as a second
+	// authority, and two hosts whose NTP has drifted apart then disagree about
+	// whether a session is still valid. expires_in_seconds is returned as a
+	// remaining DURATION for the same reason -- it is the one form a client can
+	// act on without trusting anybody's wall clock but its own elapsed time.
 	err := DB.QueryRow(`
 		SELECT s.id, s.public_id, s.token_hash, s.csrf_token_hash,
 		       s.idle_expires_at, s.absolute_expires_at,

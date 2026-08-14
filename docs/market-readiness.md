@@ -36,40 +36,66 @@ severity so the final pass has something to sort by:
 
 ## Open
 
-### MR-002 — Timestamps are wall-clock, mislabelled UTC — **Blocker**
-
-*Found: 2026-08-14, while scoping the console's date/time rendering.*
-
-Every timestamp column in the schema is `TIMESTAMP WITHOUT TIME ZONE`, and
-`CURRENT_TIMESTAMP` writes the **database server's local wall clock** into it.
-`lib/pq` then hands that value back to Go labelled UTC. The stored instant is
-therefore wrong by the database server's UTC offset, and nothing in the value
-itself says so.
-
-Consequences already worked around rather than fixed:
-
-- `database/users.go` computes account-lock remaining time in SQL, because a
-  Go-side comparison against `time.Now()` is wrong by that offset.
-- `database/sessions.go` does the same for session expiry.
-- `handlers/auth.go` derives `session_expires_at` from a duration rather than
-  forwarding a stored timestamp.
-
-Those three are correct in isolation, but they are three local escapes from one
-global defect. Every other timestamp the API returns — `created_at`,
-`updated_at`, `last_seen_at`, `last_heartbeat_at`, `last_sync_at`,
-`last_login_at`, `occurred_at` — is still wrong by the same offset, and all of
-them are about to be rendered in a browser that will read the `Z` and believe it.
-
-Classified Blocker because it is not a display bug: access logs and heartbeat
-recency are the evidence a customer uses to answer "was the door open at 14:05",
-and an hour-shifted answer to that question is worse than no answer.
-
-**Resolution planned as frontend step 2.0b**, before any screen that renders a
-date or time is built.
+*Nothing open. Items are added here as they are found.*
 
 ---
 
 ## Resolved
+
+### MR-002 — Timestamps were wall-clock readings mislabelled UTC — **Blocker**
+
+*Found: 2026-08-14, while scoping the console's date/time rendering. Fixed the
+same day, as frontend step 2.0b.*
+
+All **61 timestamp columns across 15 tables** were `TIMESTAMP WITHOUT TIME ZONE`,
+which stores a wall-clock reading and no record of which clock took it. `lib/pq`
+then labelled every value `Z` on the way out, so the API reported a confident,
+well-formed instant that was wrong by the database server's UTC offset — one hour
+on the deployment this was found on (`Africa/Lagos`).
+
+**It was worse than a uniform offset.** Three writers reached the same columns
+from three different clocks, and PostgreSQL discarded the offset on the way into
+a naive column:
+
+| Writer | What it actually stored |
+|---|---|
+| `CURRENT_TIMESTAMP` | the **database** server's wall clock |
+| a Go `time.Time` parameter | the **API process's** wall clock |
+| a device's RFC3339 `Z` | true UTC |
+
+Measured, not inferred: a device reporting `17:00:00Z` and the server default
+firing at the same moment landed **an hour apart** in `access_logs.occurred_at`.
+So a single site's audit trail was internally inconsistent, and could order
+events wrongly, depending on whether the terminal had a working clock. That is
+the evidence a customer uses to answer "was this door released at 14:05".
+
+Three places had already been written around this locally — account lockout,
+session expiry, and `session_expires_at` all compute a remaining duration in SQL
+rather than compare a stored timestamp to `time.Now()`. Correct in isolation, but
+three escapes from one global defect, and every other timestamp still carried it.
+
+**Fixed** by migration `010_timestamptz.sql`, which converts all 61 columns to
+`TIMESTAMPTZ`, plus pinning the connection pool's session time zone to UTC so the
+wire format stays `Z`-suffixed regardless of where the database sits.
+
+Pinning UTC alone was measured to make reads and writes *through the API pool*
+correct, and was deliberately **not** treated as sufficient: it does nothing for
+existing rows, protects only that one pool (psql, restores, BI connections and
+`migrate.sh` are all unpinned), and leaves the stored value ambiguous forever.
+
+Covered by `TestSchemaHasNoNaiveTimestamps` (a regression guard against any
+future migration reintroducing a naive column), `TestPoolPinsUTC`,
+`TestWritePathsAgreeOnTheSameInstant`, `TestStoredTimestampsMatchTheInstantTheyClaim`, `TestChangesSinceHonoursAnOffset`,
+`TestConsoleTimestampsSerialiseAsUTCInstants`, and two migration tests that build
+a pre-010 schema, populate it, convert it and check the arithmetic.
+
+**Carried forward to the final review:** the conversion is not automatically
+reversible and assumes the database server's zone has not changed since the data
+was written. Documented in `deploy/README.md` with an explicit
+`accesslink.legacy_timezone` override, and the migration raises a `WARNING`
+naming the zone it assumed whenever it converts a populated database. Worth
+re-checking against whatever data the staging deployment actually holds before
+that migration is applied to it.
 
 ### MR-001 — Terminal detail and configuration ignored site grants — **Blocker**
 

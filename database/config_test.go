@@ -1,6 +1,9 @@
 package database
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Configuration tests.
 //
@@ -17,7 +20,7 @@ func TestNormalizeDatabaseURLDefaultsToRequiredTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := "postgres://u:p@dpg-abc.oregon-postgres.render.com/appdb?sslmode=require"
+	want := "postgres://u:p@dpg-abc.oregon-postgres.render.com/appdb?sslmode=require&timezone=UTC"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -31,9 +34,51 @@ func TestNormalizeDatabaseURLKeepsStrongerModes(t *testing.T) {
 			t.Errorf("sslmode=%s: unexpected error: %v", mode, err)
 			continue
 		}
-		if got != in {
-			t.Errorf("sslmode=%s: got %q, want it unchanged", mode, got)
+		// Unchanged apart from the pinned time zone, which is added to every
+		// URL -- see TestConnStringPinsUTC.
+		want := in + "&timezone=UTC"
+		if got != want {
+			t.Errorf("sslmode=%s: got %q, want %q", mode, got, want)
 		}
+	}
+}
+
+// TestConnStringPinsUTC covers the second half of the timestamp fix.
+//
+// TIMESTAMPTZ makes a stored value mean one instant; this decides how it is
+// spelled coming back out. lib/pq returns a time.Time located in the session's
+// zone and encoding/json renders that location verbatim, so an unpinned
+// connection to a server in Africa/Lagos would emit "+01:00" offsets where this
+// API has always emitted "Z". The pin keeps the wire format independent of where
+// the database happens to sit.
+func TestConnStringPinsUTC(t *testing.T) {
+	// Both DSN shapes. The key/value form is used by the DB_* variables; the URL
+	// form by every managed provider.
+	for _, cfg := range []Config{
+		{Host: "localhost", Port: "5432", User: "at_admin", DBName: "db", SSLMode: "disable"},
+		{URL: "postgres://u:p@db.example.com/appdb?sslmode=require"},
+	} {
+		got, err := cfg.connString()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "timezone=UTC") {
+			t.Errorf("connection string does not pin the session time zone: %q", got)
+		}
+	}
+
+	// A URL that names its own zone is OVERRIDDEN, not honoured. The API's
+	// documented output format depends on this, so it is not a deployment's
+	// choice to make.
+	got, err := normalizeDatabaseURL("postgres://u:p@db.example.com/appdb?sslmode=require&timezone=Africa%2FLagos")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(got, "Lagos") {
+		t.Errorf("a time zone in DATABASE_URL was honoured; it must be overridden: %q", got)
+	}
+	if !strings.Contains(got, "timezone=UTC") {
+		t.Errorf("got %q, want the time zone forced to UTC", got)
 	}
 }
 
@@ -83,7 +128,7 @@ func TestConnStringPrefersURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != "postgres://u:p@db.example.com/appdb?sslmode=require" {
+	if got != "postgres://u:p@db.example.com/appdb?sslmode=require&timezone=UTC" {
 		t.Errorf("URL was not preferred over the DB_* fields: %q", got)
 	}
 }
@@ -97,7 +142,7 @@ func TestConnStringFallsBackToDiscreteFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := "host=localhost port=5432 user=at_admin password=secret dbname=access_terminal sslmode=disable"
+	want := "host=localhost port=5432 user=at_admin password=secret dbname=access_terminal sslmode=disable timezone=UTC"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
