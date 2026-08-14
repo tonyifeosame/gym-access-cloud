@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"sync"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/models"
@@ -39,9 +41,38 @@ import (
 // cookie unless it is Secure, Path=/, and carries no Domain attribute. That
 // makes the cookie host-only and un-settable by any sibling subdomain, which is
 // worth having on a host that also serves the device provisioning API. The
-// attributes are fixed by the prefix, which is why there is no configuration
-// here to vary them.
+// attributes are fixed by the prefix, which is why there is nothing to configure
+// about them in production.
 const SessionCookieName = "__Host-al_session"
+
+// DevSessionCookieName is the name used ONLY when SESSION_COOKIE_INSECURE is
+// set, for local development that cannot offer TLS.
+//
+// The name has to change with the flag. A __Host- cookie without Secure is not a
+// weaker cookie -- the browser rejects it outright -- so "keep the name, drop
+// Secure" is not an option that exists. Dropping the prefix along with Secure is
+// the honest form of the same switch, and it means a development cookie can
+// never be mistaken for a production one.
+const DevSessionCookieName = "al_session"
+
+var insecureCookieWarning sync.Once
+
+// SessionCookieConfig reports the cookie name and whether Secure is set.
+//
+// Exactly ONE name is ever accepted. Accepting both would defeat the prefix: a
+// sibling subdomain could set a plain al_session cookie and have it honoured on
+// a host that was supposed to only accept a host-locked one.
+func SessionCookieConfig() (name string, secure bool) {
+	if os.Getenv("SESSION_COOKIE_INSECURE") != "" {
+		insecureCookieWarning.Do(func() {
+			log.Println("WARNING: SESSION_COOKIE_INSECURE is set -- operator " +
+				"sessions use a non-Secure cookie without the __Host- prefix. " +
+				"Local development only; never set this in a deployment.")
+		})
+		return DevSessionCookieName, false
+	}
+	return SessionCookieName, true
+}
 
 // CSRFHeader carries the per-session synchronizer token on unsafe requests.
 const CSRFHeader = "X-CSRF-Token"
@@ -117,7 +148,8 @@ func Operator(c *gin.Context) *models.OperatorIdentity {
 // the problem, which is the same reasoning AuthMiddleware applies to site keys.
 func OperatorAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token, err := c.Cookie(SessionCookieName)
+		cookieName, _ := SessionCookieConfig()
+		token, err := c.Cookie(cookieName)
 		if err != nil || token == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 			c.Abort()

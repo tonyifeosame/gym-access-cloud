@@ -384,6 +384,36 @@ func registerFailedLogin(userID int64) error {
 	return err
 }
 
+// VerifyUserPassword checks a password for an operator who is ALREADY
+// authenticated, which is a different question from logging in.
+//
+// Deliberately free of side effects: it does not count a failure, does not lock
+// the account, and does not stamp last_login_at. Running a password change
+// through AuthenticatePassword would do all three -- it would let anyone with a
+// borrowed session lock the real operator out by mistyping, and it would record
+// a "login" that never happened. Brute force is bounded at the route instead,
+// where the same rate limiter that guards login also guards this.
+//
+// Returns models.ErrInvalidCredentials when the password is wrong, so the caller
+// answers the same way it would for any other credential mismatch.
+func VerifyUserPassword(userID int64, password string) error {
+	var storedHash string
+	err := DB.QueryRow(`
+		SELECT password_hash FROM users
+		 WHERE id = $1 AND deleted_at IS NULL`, userID).Scan(&storedHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return models.ErrUserNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(password)) != nil {
+		return models.ErrInvalidCredentials
+	}
+	return nil
+}
+
 // SetUserPassword replaces an operator's password.
 //
 // Every other session for that operator is revoked in the same transaction.

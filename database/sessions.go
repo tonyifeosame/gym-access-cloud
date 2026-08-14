@@ -78,6 +78,31 @@ func generateSecret(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(raw), nil
 }
 
+// csrfDerivationLabel domain-separates the CSRF token from anything else that
+// might one day be derived from a session token.
+const csrfDerivationLabel = "accesslink-csrf-v1:"
+
+// deriveCSRFToken computes a session's CSRF token from the session token.
+//
+// WHY DERIVED RATHER THAN RANDOM AND STORED. GET /auth/me has to return the CSRF
+// token: after a page reload the dashboard has lost its in-memory copy but still
+// holds the session cookie, and without the token it could not make a single
+// unsafe request. Only the SHA-256 of the token is stored, so /me cannot read it
+// back -- and the alternatives are all worse. Rotating on /me would break a
+// second tab. Storing the plaintext would put a live credential in the table.
+// Signing it would introduce a server key to manage.
+//
+// Deriving it costs nothing in strength. A CSRF token has exactly one secrecy
+// requirement -- a cross-site attacker must not be able to obtain it -- and that
+// attacker cannot read the cookie, so it cannot derive this either. Anyone who
+// CAN read the cookie already holds the session and gains nothing. The reverse
+// direction is a SHA-256 preimage, so the CSRF token never yields the session
+// token. What is stored stays a hash, so a database read still yields neither.
+func deriveCSRFToken(sessionToken string) string {
+	sum := sha256.Sum256([]byte(csrfDerivationLabel + sessionToken))
+	return hex.EncodeToString(sum[:])
+}
+
 // CreateSession opens a session for an operator and returns the two plaintext
 // secrets, which exist here and nowhere else.
 //
@@ -90,10 +115,7 @@ func CreateSession(userID int64, ipAddress, userAgent string) (*models.SessionCr
 	if err != nil {
 		return nil, err
 	}
-	csrfToken, err := generateSecret("")
-	if err != nil {
-		return nil, err
-	}
+	csrfToken := deriveCSRFToken(token)
 
 	var creds models.SessionCredentials
 	creds.Token = token
@@ -110,11 +132,13 @@ func CreateSession(userID int64, ipAddress, userAgent string) (*models.SessionCr
 		              CURRENT_TIMESTAMP + make_interval(secs => $5::float8)),
 		        CURRENT_TIMESTAMP + make_interval(secs => $5::float8),
 		        NULLIF($6,''), NULLIF($7,''))
-		RETURNING public_id, idle_expires_at, absolute_expires_at`,
+		RETURNING public_id, idle_expires_at, absolute_expires_at,
+		          CEIL(EXTRACT(EPOCH FROM (absolute_expires_at - CURRENT_TIMESTAMP)))::int`,
 		userID, hashSessionSecret(token), hashSessionSecret(csrfToken),
 		SessionIdleTimeout().Seconds(), SessionAbsoluteTimeout().Seconds(),
 		truncate(ipAddress, 45), truncate(userAgent, 255)).
-		Scan(&creds.PublicID, &creds.IdleExpiresAt, &creds.AbsoluteExpiresAt)
+		Scan(&creds.PublicID, &creds.IdleExpiresAt, &creds.AbsoluteExpiresAt,
+			&creds.ExpiresInSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -152,12 +176,15 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 	err := DB.QueryRow(`
 		SELECT s.id, s.public_id, s.token_hash, s.csrf_token_hash,
 		       s.idle_expires_at, s.absolute_expires_at,
+		       CEIL(EXTRACT(EPOCH FROM (s.absolute_expires_at - CURRENT_TIMESTAMP)))::int
+		           AS expires_in_seconds,
 		       (s.revoked_at IS NULL
 		        AND s.idle_expires_at > CURRENT_TIMESTAMP
 		        AND s.absolute_expires_at > CURRENT_TIMESTAMP) AS session_live,
 		       (s.last_used_at <= CURRENT_TIMESTAMP - make_interval(secs => $2::float8))
 		           AS needs_touch,
 		       u.id, u.public_id, u.company_id, u.email, u.full_name, u.role, u.active,
+		       c.public_id, c.name, c.slug,
 		       (c.active AND c.deleted_at IS NULL) AS company_ok
 		  FROM user_sessions s
 		  JOIN users u ON u.id = s.user_id
@@ -168,9 +195,11 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 		Scan(&identity.SessionID, &identity.SessionPublicID, &storedHash,
 			&identity.CSRFTokenHash,
 			&identity.IdleExpiresAt, &identity.AbsoluteExpiresAt,
+			&identity.ExpiresInSeconds,
 			&sessionLive, &needsTouch,
 			&identity.UserID, &identity.UserPublicID, &identity.CompanyID,
 			&identity.Email, &identity.FullName, &identity.Role, &identity.Active,
+			&identity.CompanyPublicID, &identity.CompanyName, &identity.CompanySlug,
 			&companyOK)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -191,6 +220,10 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 	if !sessionLive || !identity.Active || !companyOK {
 		return nil, nil
 	}
+
+	// Recomputed, never read from the table: only the hash is stored. This is
+	// what lets /auth/me hand the token back after a page reload.
+	identity.CSRFToken = deriveCSRFToken(token)
 
 	// Slide the idle window, at most once a minute. Best effort: a failed touch
 	// costs the operator nothing until the window actually lapses, whereas

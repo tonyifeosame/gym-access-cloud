@@ -100,6 +100,34 @@ func NewRouter() *gin.Engine {
 	r.GET("/health/maintenance", handlers.HealthMaintenance)
 	r.GET("/metrics", handlers.Metrics)
 
+	// Operator authentication, /api/v1/auth/*.
+	//
+	// A SEPARATE group from the v1 tree below, which authenticates with the site
+	// API key. That key is the provisioning secret -- it registers terminals and
+	// rotates their credentials -- so a browser must never hold it, and these
+	// routes never read it. The two credential classes share a URL prefix and
+	// nothing else.
+	//
+	// Domain-neutral by construction: an operator, a company, a role and a
+	// session. Nothing here knows or asks what the platform is being used for.
+	auth := r.Group("/api/v1/auth")
+	{
+		// ONE limiter shared by both credential endpoints, so an attacker
+		// cannot get a second allowance by alternating between them.
+		credentialLimit := middleware.LoginRateLimiter()
+
+		auth.POST("/login", credentialLimit, handlers.OperatorLogin)
+
+		session := auth.Group("")
+		session.Use(middleware.OperatorAuthMiddleware())
+		{
+			session.GET("/me", handlers.OperatorMe)
+			session.POST("/logout", middleware.RequireCSRF(), handlers.OperatorLogout)
+			session.POST("/password", credentialLimit, middleware.RequireCSRF(),
+				handlers.OperatorChangePassword)
+		}
+	}
+
 	// API v1 routes with authentication
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.AuthMiddleware())

@@ -133,20 +133,26 @@ type SiteGrant struct {
 	SiteName     string `json:"site_name"`
 }
 
-// SessionCredentials is what a successful login produces. The two plaintext
-// secrets exist here and nowhere else: only their SHA-256 hashes are stored.
+// SessionCredentials is what a successful login produces.
 //
-// Token goes into the __Host-al_session cookie and is never written to a
-// response body. CSRFToken goes into the response BODY and never into a cookie:
-// in a split-origin deployment (app.accesslink.store calling
-// api.accesslink.store) the dashboard's JavaScript cannot read a cookie scoped
-// to the API host, so the double-submit cookie pattern would silently fail.
+// Token goes into the session cookie and is never written to a response body.
+// CSRFToken goes into the response BODY and never into a cookie: in a
+// split-origin deployment (app.accesslink.store calling api.accesslink.store)
+// the dashboard's JavaScript cannot read a cookie scoped to the API host, so the
+// double-submit cookie pattern would silently fail.
+//
+// ExpiresInSeconds is a DURATION, resolved by the database. The absolute
+// timestamps are TIMESTAMP WITHOUT TIME ZONE holding the database server's local
+// wall clock, so a client reading them as UTC would be wrong by that server's
+// offset. Anything a caller is meant to act on is expressed as a remaining
+// duration, and the handler turns that into a correct absolute instant.
 type SessionCredentials struct {
 	Token             string    `json:"-"`
 	CSRFToken         string    `json:"csrf_token"`
 	PublicID          string    `json:"session_id"`
 	IdleExpiresAt     time.Time `json:"idle_expires_at"`
 	AbsoluteExpiresAt time.Time `json:"expires_at"`
+	ExpiresInSeconds  int       `json:"expires_in_seconds"`
 }
 
 // OperatorIdentity is the authenticated caller behind a dashboard request, the
@@ -157,21 +163,56 @@ type SessionCredentials struct {
 // CompanyID is set under the same context key the site-key middleware uses, so
 // every existing company-scoped query works unchanged for an operator caller.
 type OperatorIdentity struct {
-	UserID          int64
-	UserPublicID    string
-	CompanyID       int64
+	UserID       int64
+	UserPublicID string
+	CompanyID    int64
+	// The operator's company, carried along because the session lookup already
+	// joins it. /me would otherwise need a second query to name the tenant.
+	CompanyPublicID string
+	CompanyName     string
+	CompanySlug     string
+
 	Email           string
 	FullName        string
 	Role            string
 	Active          bool
 	SessionID       int64
 	SessionPublicID string
-	// CSRFTokenHash is the stored form of the session's synchronizer token.
-	// The middleware compares a presented X-CSRF-Token against it in constant
-	// time; the plaintext is not recoverable from here.
-	CSRFTokenHash     string
+
+	// CSRFTokenHash is the stored form of the session's synchronizer token, for
+	// the middleware's constant-time comparison.
+	CSRFTokenHash string
+	// CSRFToken is the plaintext, recomputed from the presented session token
+	// rather than stored. See deriveCSRFToken in database/sessions.go.
+	CSRFToken string
+
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
+	// ExpiresInSeconds is the remaining life of the session as a duration,
+	// resolved by the database. See the note on SessionCredentials.
+	ExpiresInSeconds int
+}
+
+// LoginRequest is the body of POST /api/v1/auth/login.
+//
+// Only presence is validated. A malformed address is not rejected as a bad
+// request: it simply matches no account and is answered exactly like a wrong
+// password, so the endpoint cannot be used to probe which addresses are even
+// shaped like accounts here.
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// PasswordChangeRequest is the body of POST /api/v1/auth/password.
+//
+// The current password is required even though the caller already holds a valid
+// session. A session is not proof of knowing the password -- an unattended
+// browser is enough -- and changing a password is exactly the operation that
+// must not be reachable without it.
+type PasswordChangeRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required"`
 }
 
 // SessionInfo describes a live session without disclosing anything that could
