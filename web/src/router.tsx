@@ -10,6 +10,7 @@ import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
 import { OperatorsListPage } from './pages/operators/OperatorsListPage'
 import { PeopleListPage } from './pages/people/PeopleListPage'
+import { SettingsPage } from './pages/settings/SettingsPage'
 import { PersonDetailPage } from './pages/people/PersonDetailPage'
 import { SiteDetailPage } from './pages/sites/SiteDetailPage'
 import { TerminalDetailPage } from './pages/terminals/TerminalDetailPage'
@@ -72,6 +73,10 @@ export const router = createBrowserRouter([
           </RequireRole>
         ),
       },
+      // Your own account and your company, plus signposts to the other
+      // configuration scopes. No role gate: it holds your own password.
+      { path: 'settings', element: <SettingsPage /> },
+
       // ADMIN to READ, OWNER to change -- the write gate lives on the controls
       // rather than the route, so an administrator can see what the company is
       // configured for without being able to decide it. The API is looser still

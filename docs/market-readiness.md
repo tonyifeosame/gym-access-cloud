@@ -36,6 +36,64 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-020 — No operator-facing activity feed or audit trail — **Major**
+
+*Found: 2026-08-14, building the dashboard.*
+
+The console can show no activity of any kind, because none is reachable:
+
+- **Door events exist but are site-key-only.** `GET /api/v1/access/logs` and
+  `/logs/{member_id}` are authenticated by the site provisioning key, which a
+  browser must never hold. There is no `/console/...` equivalent, so an operator
+  cannot see who was admitted, when, or at which terminal.
+- **There is no audit trail of operator actions at all.** Nothing records who
+  created a site, rotated a key, changed a role, removed a person or disabled a
+  capability. Sessions are logged; the changes made inside them are not.
+
+The first is a functional gap — "who came in this morning" is a question almost
+every deployment will ask, and for ACCESS_CONTROL or ATTENDANCE it is close to
+the whole product. The second is a compliance and forensics gap: after a
+disputed change there is no way to establish who made it.
+
+Phase 2.7 states both on the dashboard rather than filling the space with an
+adjacent metric.
+
+Needs a console-authenticated access-log endpoint (grant-scoped, paginated), and
+a separate decision about an administrative audit log.
+
+### MR-021 — No API to update company details — **Minor**
+
+*Found: 2026-08-14, building Settings.*
+
+`GET /console/company` is the only company route. There is no way to change a
+company's name, slug or contact address through any operator API, at any role —
+including OWNER. Changing a customer's name after a rebrand currently requires
+direct database access.
+
+Phase 2.7 renders the company read-only and says explicitly that this is a
+platform gap rather than a role restriction, so an owner does not go looking for
+someone with a higher role who also cannot do it.
+
+### MR-022 — Two settings surfaces, no shared schema mechanism — **Major**
+
+*Consolidates the settings half of MR-004 and MR-019. Recorded 2026-08-14.*
+
+The platform now has **two** open-JSON settings objects with no server-side
+schema — `sites.settings` (MR-004) and `company_applications.settings`
+(MR-019) — and the console has had to grow validation for both independently.
+
+That is already one duplication too many, and the count only goes up: every
+capability that gains behaviour will want its own configuration, and per-site
+overrides of it are an obvious next request.
+
+**A single schema mechanism should be designed once and serve all of them**:
+declared keys with types and bounds, server-side validation, and a
+machine-readable description the console can build guided controls from without
+hard-coding a key set. Solving MR-004 and MR-019 separately would produce two
+validation systems that disagree.
+
+Recorded as one item so it is decided as one.
+
 ### MR-017 — Applications are configuration with no behaviour behind them — **Blocker**
 
 *Found: 2026-08-14, building the Applications module. Previously noted as

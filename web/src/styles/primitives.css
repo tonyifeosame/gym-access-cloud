@@ -1096,3 +1096,117 @@ textarea.field__input {
     width: 100%;
   }
 }
+
+/* ===========================================================================
+ * Dashboard and settings
+ * ======================================================================== */
+
+.tile--link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.tile--link:hover {
+  border-color: var(--accent);
+}
+
+.tile__description {
+  margin: var(--space-1) 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --- attention list -------------------------------------------------------
+ *
+ * Every entry restates something the platform actually reported. The tone is
+ * carried by an edge AND by the wording, so the ranking survives a monochrome
+ * screen.
+ */
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.attention {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.attention--danger {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.attention--warning {
+  border-inline-start: 3px solid var(--warning);
+}
+
+.attention--info {
+  border-inline-start: 3px solid var(--accent);
+}
+
+.attention__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.attention__detail {
+  margin: var(--space-1) 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* --- settings signposts --------------------------------------------------- */
+
+.settings-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-links li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-links li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.settings-links a {
+  font-weight: 600;
+}
+
+.settings-links span {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 680px) {
+  .attention {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .attention .button {
+    width: 100%;
+  }
+}

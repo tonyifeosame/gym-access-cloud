@@ -184,6 +184,22 @@ export const handlers = [
     record(request)
     const refused = guard(request)
     if (refused) return refused
+
+    // 401 here means the CURRENT password was wrong, not that the session
+    // ended -- the real API answers the same way, and the console has to tell
+    // those two apart.
+    const failure = takeFailure('change-password')
+    if (failure) {
+      return json(
+        {
+          error:
+            failure === 401
+              ? 'Current password is incorrect'
+              : 'Too many attempts, please wait',
+        },
+        failure,
+      )
+    }
     return noContent()
   }),
 
@@ -192,6 +208,10 @@ export const handlers = [
   http.get('*/api/v1/console/company', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
+
+    const failure = takeFailure('company')
+    if (failure) return json({ error: 'Failed to retrieve company' }, failure)
+
     return json({
       ...state.session.company,
       active: true,
@@ -387,6 +407,10 @@ export const handlers = [
   http.get('*/api/v1/console/terminals/summary', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
+
+    const failure = takeFailure('terminals-summary')
+    if (failure) return json({ error: 'Failed to retrieve summary' }, failure)
+
     const scope = reachableSiteIds()
     const visible = scope
       ? state.terminals.filter((terminal) => scope.includes(terminal.site_public_id))

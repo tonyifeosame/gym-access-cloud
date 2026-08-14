@@ -46,6 +46,15 @@ export const PLATFORM_NAV: NavItem[] = [
     // and that gate is on the controls rather than the route.
     minimumRole: 'ADMIN',
   },
+  {
+    id: 'settings',
+    label: 'Settings',
+    path: '/settings',
+    // VIEWER: it holds YOUR OWN account and password. Every operator needs it,
+    // and nothing on it is privileged -- the company section is read-only and
+    // the rest are links to pages with their own gates.
+    minimumRole: 'VIEWER',
+  },
 ]
 
 export function platformNav(role: string): NavItem[] {

@@ -62,7 +62,11 @@ describe('operator session', () => {
     resetServerState(makeSession({ company: { id: 'c1', name: 'Meridian Clinics', slug: 'mc' } }))
     renderApp()
 
-    expect(await screen.findByText('Meridian Clinics')).toBeInTheDocument()
+    // Scoped to the shell's own banner. The dashboard behind it now also names
+    // the company in its context panel, which is correct -- this assertion is
+    // about the SHELL having restored a session, not about a unique string.
+    const banner = await screen.findByRole('banner')
+    expect(within(banner).getByText('Meridian Clinics')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
   })
 

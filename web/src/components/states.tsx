@@ -32,8 +32,14 @@ export function PageHeader({
   actions?: ReactNode
   breadcrumb?: ReactNode
 }) {
+  // A DIV, NOT A <header>. Every page renders one of these, and the shell
+  // already provides the document's single `banner` landmark; a second <header>
+  // outside a sectioning element becomes a second banner, which leaves a screen
+  // reader user with two "banner" entries and no way to tell which is the site
+  // chrome. The <h1> below is what carries this block's meaning in the document
+  // outline, and it does that without a landmark role.
   return (
-    <header className="page__header">
+    <div className="page__header">
       {breadcrumb ? <div className="page__breadcrumb">{breadcrumb}</div> : null}
       <div className="page__heading">
         <div>
@@ -42,7 +48,7 @@ export function PageHeader({
         </div>
         {actions ? <div className="page__actions">{actions}</div> : null}
       </div>
-    </header>
+    </div>
   )
 }
 
