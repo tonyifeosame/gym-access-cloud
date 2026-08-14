@@ -5,6 +5,8 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { PeopleListPage } from './pages/people/PeopleListPage'
+import { PersonDetailPage } from './pages/people/PersonDetailPage'
 import { SiteDetailPage } from './pages/sites/SiteDetailPage'
 import { TerminalDetailPage } from './pages/terminals/TerminalDetailPage'
 import { TerminalsListPage } from './pages/terminals/TerminalsListPage'
@@ -34,15 +36,10 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <DashboardPage /> },
 
-      {
-        path: 'people',
-        element: (
-          <NotImplemented
-            title="People"
-            description="Everyone this platform knows about, and their credentials."
-          />
-        ),
-      },
+      // People are addressed by external_id -- the identifier terminals hold
+      // and sync against, and the one an operator already knows.
+      { path: 'people', element: <PeopleListPage /> },
+      { path: 'people/:externalId', element: <PersonDetailPage /> },
       // Terminals are a PLATFORM resource. The serial is the path parameter
       // because it is what the API addresses a terminal by, and what is printed
       // on the hardware an operator is standing in front of.

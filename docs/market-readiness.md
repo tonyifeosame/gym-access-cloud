@@ -36,6 +36,91 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-011 — No operator API for biometric enrolment — **Major**
+
+*Found: 2026-08-14, auditing the People API before Phase 2.4.*
+
+The console can report **whether** a person has a biometric credential and can
+do nothing else with it. `POST /enrollment/start`, `GET /enrollment/pending` and
+`POST /enrollment/result` are authenticated by the **site key** or a **device
+key** — neither of which a browser may hold — so none is reachable from an
+operator session. There is no console route at all to:
+
+- start an enrolment for a person,
+- see which enrolments are pending or have failed,
+- clear or re-enrol a credential,
+- record which terminal a credential lives on.
+
+The practical gap: **an operator cannot revoke one person's biometric credential
+while keeping their record.** Removing the person entirely is the only lever, and
+that is a different action with different consequences. Re-enrolling someone
+whose finger no longer reads reliably is likewise not an operator-facing
+workflow.
+
+Recorded rather than invented. Phase 2.4 states plainly on the person detail page
+that enrolment happens at a terminal and cannot be managed from the console,
+instead of offering a control that would 404.
+
+### MR-012 — `person_type` is hard-coded to a four-value business taxonomy — **Major**
+
+*Found: 2026-08-14, auditing the People schema.*
+
+`people.person_type` exists, is `NOT NULL DEFAULT 'MEMBER'`, is indexed, and
+carries a CHECK constraint:
+
+```sql
+CHECK (person_type IN ('MEMBER', 'STAFF', 'CONTRACTOR', 'VISITOR'))
+```
+
+**That is a fixed business taxonomy in the database**, and it contradicts the
+platform being general-purpose. A school cannot record STUDENT; a conference
+cannot record ATTENDEE; a hospital cannot record PATIENT. The default value
+`MEMBER` is itself a leftover from the single-purpose product this became.
+
+Compounding it, `person_type` is **not exposed by the console API at all**. What
+the console shows as "person type" is `category`, which maps to the *other*
+column — `membership_type`, free text, also a legacy name. So the schema has two
+overlapping classification fields: one constrained and invisible, one
+unconstrained and visible.
+
+Phase 2.4 exposes only the free-text one, as free text, which is the behaviour a
+general-purpose platform needs. The constrained column remains as a trap for
+whoever next tries to use it.
+
+Needs a product decision: drop `person_type`, widen it to free text, or make it a
+per-company configurable vocabulary. Not fixable from the frontend.
+
+### MR-013 — People API omits fields the schema already holds — **Minor**
+
+*Found: 2026-08-14, auditing the People API.*
+
+`people` carries `email`, `phone`, `valid_from` and `valid_until`. None is
+exposed by any console endpoint, so the console cannot show or set them.
+
+`valid_from`/`valid_until` are the notable pair: a **validity period** is exactly
+what a visitor, a contractor on a fixed engagement, or a temporary badge needs,
+and the column is already there with a CHECK constraint enforcing ordering. There
+is currently no way to grant someone access that expires by itself — an operator
+must remember to deactivate them.
+
+Also minor but real: `PUT /console/people/{external_id}` applies `category` only
+when non-empty, so **a category cannot be cleared once set**, only replaced.
+
+### MR-014 — People list has no filters beyond free-text search — **Minor**
+
+*Found: 2026-08-14, while building the people list.*
+
+`GET /console/people` accepts `limit`, `offset` and `q` and nothing else. There
+is no filter for active/inactive, for enrolled/not-enrolled, or by person type.
+
+Unlike the terminal list (MR-009), this one **is** paginated, so the console
+cannot compensate in the browser: filtering the fetched page would filter fifty
+people and present it as filtering the roster. Phase 2.4 therefore ships search
+and paging only, and adds no client-side filter.
+
+"Who has not enrolled a credential yet" is the query an onboarding operator
+actually wants, and it is currently unanswerable.
+
 ### MR-008 — No console path for terminal removal or reassignment — **Major**
 
 *Found: 2026-08-14, investigating terminal lifecycle during Phase 2.3.*
