@@ -204,6 +204,10 @@ export const handlers = [
   http.get('*/api/v1/console/sites', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
+
+    const failure = takeFailure('sites-list')
+    if (failure) return json({ error: 'Failed to retrieve sites' }, failure)
+
     const scope = reachableSiteIds()
     const sites = scope ? state.sites.filter((site) => scope.includes(site.id)) : state.sites
     return json({ count: sites.length, sites })
@@ -235,6 +239,136 @@ export const handlers = [
     const previous = state.settings[siteId]?.settings_version ?? 1
     state.settings[siteId] = { settings: body, settings_version: previous + 1 }
     return json(state.settings[siteId])
+  }),
+
+  http.post('*/api/v1/console/sites', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    // ADMIN, as the server enforces.
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('create-site')
+    if (failure) return json({ error: 'Failed to create site' }, failure)
+
+    const body = (await request.json()) as { name?: string; address?: string; timezone?: string }
+    const name = (body.name ?? '').trim()
+    if (!name) return json({ error: 'site name is required' }, 400)
+    if (name.length > 100) return json({ error: 'site name must be 100 characters or fewer' }, 400)
+    if (state.sites.some((site) => site.name === name)) {
+      return json({ error: 'a site with that name already exists in this company' }, 409)
+    }
+
+    // A key shaped exactly as the server issues one: ats_ + 64 hex.
+    const key = `ats_${'ab12cd34'.repeat(8)}`
+    const site = makeSite({
+      id: `site-${state.sites.length + 1}`,
+      name,
+      address: body.address,
+      timezone: (body.timezone ?? '').trim() || 'UTC',
+      terminal_count: 0,
+      api_key_prefix: key.slice(0, 12),
+    })
+    state.sites = [...state.sites, site]
+
+    return json(
+      { site, credential: { api_key: key, api_key_prefix: key.slice(0, 12), shown_once: true } },
+      201,
+    )
+  }),
+
+  http.put('*/api/v1/console/sites/:siteId', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const siteId = String(params.siteId)
+    const existing = state.sites.find((site) => site.id === siteId)
+    if (!existing) return json({ error: 'Site not found' }, 404)
+
+    const failure = takeFailure('update-site')
+    if (failure) return json({ error: 'Failed to update site' }, failure)
+
+    const body = (await request.json()) as {
+      name?: string
+      address?: string
+      timezone?: string
+      active?: boolean
+    }
+    if (body.name && state.sites.some((s) => s.id !== siteId && s.name === body.name)) {
+      return json({ error: 'a site with that name already exists in this company' }, 409)
+    }
+
+    const updated = {
+      ...existing,
+      name: body.name ?? existing.name,
+      address: body.address ?? existing.address,
+      timezone: body.timezone ?? existing.timezone,
+      active: body.active ?? existing.active,
+    }
+    state.sites = state.sites.map((site) => (site.id === siteId ? updated : site))
+    return json(updated)
+  }),
+
+  http.delete('*/api/v1/console/sites/:siteId', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const siteId = String(params.siteId)
+    const existing = state.sites.find((site) => site.id === siteId)
+    if (!existing) return json({ error: 'Site not found' }, 404)
+
+    const failure = takeFailure('retire-site')
+    if (failure) return json({ error: 'Failed to retire site' }, failure)
+
+    // Retirement CASCADES, exactly as the server does it.
+    const retired = state.terminals.filter((t) => t.site_public_id === siteId).length
+    state.terminals = state.terminals.filter((t) => t.site_public_id !== siteId)
+    state.sites = state.sites.filter((site) => site.id !== siteId)
+
+    return json({ retired: true, terminals_retired: retired })
+  }),
+
+  http.post('*/api/v1/console/sites/:siteId/api-key', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const siteId = String(params.siteId)
+    const existing = state.sites.find((site) => site.id === siteId)
+    if (!existing) return json({ error: 'Site not found' }, 404)
+
+    const failure = takeFailure('rotate-key')
+    if (failure) return json({ error: 'Failed to rotate the site key' }, failure)
+
+    const key = `ats_${'ff99ee88'.repeat(8)}`
+    state.sites = state.sites.map((site) =>
+      site.id === siteId ? { ...site, api_key_prefix: key.slice(0, 12) } : site,
+    )
+
+    // Terminals with no device credential of their own still depend on the
+    // site key; the server reports them and so does this.
+    const legacy = state.terminals.filter(
+      (t) => t.site_public_id === siteId && t.status === 'PROVISIONING',
+    ).length
+
+    return json({
+      credential: { api_key: key, api_key_prefix: key.slice(0, 12), shown_once: true },
+      legacy_terminals: legacy,
+    })
   }),
 
   http.get('*/api/v1/console/sites/:siteId', ({ request, params }) => {

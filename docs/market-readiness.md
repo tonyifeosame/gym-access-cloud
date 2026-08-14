@@ -36,6 +36,29 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-007 — Site reads do not return the key prefix — **Minor**
+
+*Found: 2026-08-14, while building the Sites UI.*
+
+`sites.api_key_prefix` exists, is populated on creation and rotation, and is
+explicitly **not secret** — it identifies which key a site is on without being
+reconstructible. `database.SiteKeyPrefix` reads it. But `consoleSiteColumns` does
+not select it, so `GET /console/sites` and `GET /console/sites/{id}` never carry
+it.
+
+The consequence is small but real: after creating a site, an operator has no way
+to confirm which key a site is currently on — useful when several have been
+rotated, and the ordinary way to check that hardware was re-provisioned with the
+right one.
+
+The console is already built for it. `Site.api_key_prefix` is typed optional and
+both the list column and the detail card render it when present, degrading to
+"—"/"Not shown" when absent. **The fix is one line in the projection plus the
+field on `ConsoleSite`**, with nothing to change in the frontend.
+
+Deliberately not done in Phase 2.2, which was scoped to the frontend with the
+backend explicitly frozen.
+
 ### MR-004 — Site settings have no schema, and the write is a full replacement — **Major**
 
 *Found: 2026-08-14, while building the frontend data layer for the site settings

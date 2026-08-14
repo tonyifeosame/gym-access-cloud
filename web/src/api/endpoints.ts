@@ -6,6 +6,8 @@ import type {
   ApplicationsResponse,
   CompanyDetail,
   ConfiguredApplication,
+  CreateSiteRequest,
+  CreateSiteResponse,
   CreateOperatorRequest,
   FleetSummary,
   OperatorAccount,
@@ -15,6 +17,8 @@ import type {
   PeopleQuery,
   Person,
   PersonRequest,
+  RetireSiteResponse,
+  RotateSiteKeyResponse,
   Session,
   Site,
   SiteGrantsRequest,
@@ -25,6 +29,7 @@ import type {
   TerminalModeRequest,
   TerminalsResponse,
   UpdateOperatorRequest,
+  UpdateSiteRequest,
 } from './types'
 
 /**
@@ -100,6 +105,44 @@ export function fetchSites(): Promise<SitesResponse> {
 
 export function fetchSite(siteId: string): Promise<Site> {
   return api.get<Site>(`/api/v1/console/sites/${encodeURIComponent(siteId)}`)
+}
+
+/**
+ * Creates a site and returns it WITH its one-time provisioning key.
+ *
+ * The only endpoint besides rotation whose response carries a site key. The
+ * caller owns what happens to it next: it must not be cached, stored, logged or
+ * put in a URL, and there is no way to ask for it again.
+ */
+export function createSite(body: CreateSiteRequest): Promise<CreateSiteResponse> {
+  return api.post<CreateSiteResponse>('/api/v1/console/sites', body)
+}
+
+export function updateSite(siteId: string, body: UpdateSiteRequest): Promise<Site> {
+  return api.put<Site>(`/api/v1/console/sites/${encodeURIComponent(siteId)}`, body)
+}
+
+/**
+ * Retires a site AND every terminal at it, reporting how many.
+ *
+ * Not reversible through the API. `updateSite({active: false})` is the
+ * reversible alternative and is what "closed for a month" needs.
+ */
+export function retireSite(siteId: string): Promise<RetireSiteResponse> {
+  return api.delete<RetireSiteResponse>(`/api/v1/console/sites/${encodeURIComponent(siteId)}`)
+}
+
+/**
+ * Issues a replacement provisioning key, invalidating the old one immediately.
+ *
+ * A POST to a sub-resource rather than a PUT on the site: it does not set a
+ * value the caller supplied, it mints one. Returns the new key once, plus the
+ * count of terminals it just locked out.
+ */
+export function rotateSiteKey(siteId: string): Promise<RotateSiteKeyResponse> {
+  return api.post<RotateSiteKeyResponse>(
+    `/api/v1/console/sites/${encodeURIComponent(siteId)}/api-key`,
+  )
 }
 
 export function fetchSiteSettings(siteId: string): Promise<SiteSettings> {

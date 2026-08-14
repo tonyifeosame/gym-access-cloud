@@ -93,11 +93,100 @@ export interface Site {
   id: string
   name: string
   address?: string
+  /**
+   * IANA zone. Describes where the HARDWARE stands — a different question from
+   * the zone an operator reads timestamps in, which is their own browser's.
+   */
   timezone: string
   active: boolean
   /** Live terminals at this site. */
   terminal_count: number
   created_at: string
+  /**
+   * The first 12 characters of the site's provisioning key. NOT SECRET — it
+   * identifies which key a site is on without being reconstructible.
+   *
+   * OPTIONAL BECAUSE THE READ ENDPOINTS DO NOT YET RETURN IT. The column exists
+   * and `database.SiteKeyPrefix` reads it, but `consoleSiteColumns` does not
+   * select it, so today this is populated only from a create or rotate
+   * response. Typed optional rather than assumed, so adding it to the projection
+   * is a backend-only change with nothing to alter here.
+   */
+  api_key_prefix?: string
+}
+
+/**
+ * Create a site.
+ *
+ * No key field in either direction. The server generates it — a caller-chosen
+ * provisioning secret is a caller-chosen weak provisioning secret — and returns
+ * it exactly once, in the response.
+ */
+export interface CreateSiteRequest {
+  name: string
+  address?: string
+  /** Empty defaults to UTC server-side. */
+  timezone?: string
+}
+
+/**
+ * Update a site's metadata. Every field optional; only what is sent is applied.
+ *
+ * `active: false` is DEACTIVATION, which is reversible and is not retirement.
+ * It stops the site key and every terminal at the site authenticating, and
+ * destroys nothing. DELETE is the one-way door.
+ */
+export interface UpdateSiteRequest {
+  name?: string
+  address?: string
+  timezone?: string
+  active?: boolean
+}
+
+/**
+ * A freshly minted provisioning key.
+ *
+ * THIS IS THE ONLY SHAPE THAT EVER CARRIES ONE, and it arrives only from site
+ * creation or key rotation. It must never be written to localStorage,
+ * sessionStorage, a URL, a query key, or the React Query cache — it lives in
+ * component state for the life of one panel and is dropped when that panel
+ * closes. `shown_once` is the server saying so, so no client has to remember.
+ */
+export interface SiteCredential {
+  api_key: string
+  api_key_prefix: string
+  shown_once: boolean
+}
+
+export interface CreateSiteResponse {
+  site: Site
+  credential: SiteCredential
+}
+
+/**
+ * The result of rotating a site's key.
+ *
+ * `legacy_terminals` counts terminals at the site that have never been issued a
+ * device credential of their own and therefore certainly still authenticate
+ * with the SITE key — the ones this rotation just locked out. Terminals holding
+ * their own device key are unaffected.
+ */
+export interface RotateSiteKeyResponse {
+  credential: SiteCredential
+  legacy_terminals: number
+}
+
+/**
+ * The result of retiring a site.
+ *
+ * `terminals_retired` is not decoration: retiring a site soft-deletes its
+ * terminals in the same transaction and every one of them stops opening a door
+ * immediately. A screen that does not surface this number is not describing
+ * what happened.
+ */
+export interface RetireSiteResponse {
+  retired: boolean
+  terminals_retired: number
 }
 
 export interface ConfiguredApplication {

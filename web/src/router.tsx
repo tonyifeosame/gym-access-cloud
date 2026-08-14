@@ -5,6 +5,8 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { SiteDetailPage } from './pages/sites/SiteDetailPage'
+import { SitesListPage } from './pages/sites/SitesListPage'
 
 /**
  * Routes.
@@ -48,12 +50,11 @@ export const router = createBrowserRouter([
           />
         ),
       },
-      {
-        path: 'sites',
-        element: (
-          <NotImplemented title="Sites" description="Your locations and their settings." />
-        ),
-      },
+      // Sites are a PLATFORM resource: every deployment has locations,
+      // whatever it uses the platform for. The lifecycle writes behind these
+      // screens are ADMIN-gated in the UI and enforced by the API regardless.
+      { path: 'sites', element: <SitesListPage /> },
+      { path: 'sites/:siteId', element: <SiteDetailPage /> },
       {
         path: 'operators',
         element: (

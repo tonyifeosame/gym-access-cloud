@@ -15,6 +15,8 @@ import type {
   CompanyDetail,
   ConfiguredApplication,
   CreateOperatorRequest,
+  CreateSiteRequest,
+  CreateSiteResponse,
   FleetSummary,
   OperatorAccount,
   OperatorSitesResponse,
@@ -23,6 +25,8 @@ import type {
   PeopleQuery,
   Person,
   PersonRequest,
+  RetireSiteResponse,
+  RotateSiteKeyResponse,
   Site,
   SiteGrantsRequest,
   SiteSettings,
@@ -32,6 +36,7 @@ import type {
   TerminalModeRequest,
   TerminalsResponse,
   UpdateOperatorRequest,
+  UpdateSiteRequest,
 } from '../api/types'
 import { keys } from './keys'
 
@@ -96,6 +101,103 @@ export function useSiteSettings(siteId: string | undefined): UseQueryResult<Site
     // written straight back over a colleague's change, since the write is a
     // full replacement.
     staleTime: 0,
+  })
+}
+
+/**
+ * Creates a site.
+ *
+ * THE RESPONSE CARRIES A PROVISIONING KEY, and this hook is careful about where
+ * that goes. React Query keeps every mutation's `data` for the life of the
+ * hook, so the caller is expected to read the credential once, hand it to the
+ * panel that displays it, and `reset()` the mutation when that panel closes.
+ * Nothing here writes the credential into the QUERY cache, which is the part
+ * that would otherwise outlive the screen and be readable from anywhere.
+ *
+ * The site list is invalidated; the new site belongs on it.
+ */
+export function useCreateSite(): UseMutationResult<CreateSiteResponse, Error, CreateSiteRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CreateSiteRequest) => endpoints.createSite(body),
+    onSuccess: (result) => {
+      // The SITE, deliberately -- not the response. Writing the whole thing
+      // would put the key in the query cache, where it would survive the panel
+      // that showed it and be readable by any component with the key factory.
+      queryClient.setQueryData(keys.sites.detail(result.site.id), result.site)
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+    },
+  })
+}
+
+/**
+ * Updates a site's metadata, including reversible deactivation.
+ *
+ * Terminals are invalidated as well: deactivating a site stops every terminal
+ * there authenticating, so a fleet view showing them as they were is stale in
+ * the way that matters.
+ */
+export function useUpdateSite(
+  siteId: string,
+): UseMutationResult<Site, Error, UpdateSiteRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: UpdateSiteRequest) => endpoints.updateSite(siteId, body),
+    onSuccess: (site) => {
+      queryClient.setQueryData(keys.sites.detail(siteId), site)
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+    },
+  })
+}
+
+/**
+ * Retires a site and every terminal at it.
+ *
+ * The site's own cache entries are REMOVED rather than invalidated -- refetching
+ * either would only produce a 404. Terminals go too, because the ones at this
+ * site have just been soft-deleted server-side and any list still holding them
+ * is showing hardware that no longer exists.
+ *
+ * The SESSION is invalidated last and it is the one that is easy to miss: site
+ * grants are carried on the session, and an operator scoped to the site just
+ * retired is now scoped to something that is gone. Leaving that stale gives the
+ * site switcher an option the API will refuse.
+ */
+export function useRetireSite(): UseMutationResult<RetireSiteResponse, Error, string> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (siteId: string) => endpoints.retireSite(siteId),
+    onSuccess: (_result, siteId) => {
+      queryClient.removeQueries({ queryKey: keys.sites.detail(siteId) })
+      queryClient.removeQueries({ queryKey: keys.sites.settings(siteId) })
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
+    },
+  })
+}
+
+/**
+ * Rotates a site's provisioning key.
+ *
+ * NOTHING CACHED CHANGES, which is why this invalidates so little: the key is
+ * not part of any read, and the site's metadata is untouched. The site list is
+ * refreshed only so that a displayed key PREFIX, where the API provides one,
+ * does not go stale.
+ *
+ * As with creation, the credential in `data` is for one panel and the caller
+ * resets the mutation when that panel closes.
+ */
+export function useRotateSiteKey(
+  siteId: string,
+): UseMutationResult<RotateSiteKeyResponse, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.rotateSiteKey(siteId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+    },
   })
 }
 

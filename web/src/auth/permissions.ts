@@ -91,6 +91,15 @@ export const ACTION_ROLES = {
   /** Operator administration. */
   manageOperators: 'ADMIN',
 
+  /**
+   * Site lifecycle: create, rename, deactivate, retire, rotate the key.
+   *
+   * ADMIN rather than MANAGER, matching the server. Creating a site mints a
+   * provisioning credential and retiring one stops doors opening; neither is
+   * day-to-day work, which is what `manageSiteSettings` above covers.
+   */
+  manageSites: 'ADMIN',
+
   /** What the whole company's deployment is for. */
   configureApplications: 'OWNER',
 } as const satisfies Record<string, Role>
