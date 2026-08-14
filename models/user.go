@@ -68,6 +68,12 @@ var (
 	ErrUserNotFound     = errors.New("operator not found")
 	ErrSiteNotFound     = errors.New("site not found in this company")
 
+	// Site metadata validation. Separate from ErrSiteNotFound because these are
+	// 400s the caller can fix, not 404s.
+	ErrSiteNameRequired = errors.New("site name is required")
+	ErrSiteNameTooLong  = errors.New("site name must be 100 characters or fewer")
+	ErrSiteNameTaken    = errors.New("a site with that name already exists in this company")
+
 	// ErrOperatorsExist reports that the system already has at least one live
 	// operator. Returned by the first-operator bootstrap, where it is a normal
 	// outcome rather than a failure: it is what makes the bootstrap incapable of

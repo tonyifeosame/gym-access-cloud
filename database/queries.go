@@ -22,14 +22,29 @@ import (
 
 // Site Queries
 
-// GetSiteByAPIKey retrieves a site by its API key
+// GetSiteByAPIKey retrieves a site by its provisioning key.
+//
+// THE KEY PRESENTED IS HASHED AND THE HASH IS LOOKED UP. Since
+// 011_site_credentials.sql the database holds no plaintext to compare against,
+// so this is the only way to authenticate one -- and it is the reason the wire
+// contract did not have to change when that migration ran: the caller still
+// sends the same string it always did.
+//
+// Still one index probe, on the partial unique index over api_key_hash. An
+// empty key is refused before touching the database: hashing "" produces a
+// perfectly valid-looking hash, and a row that somehow carried it would then
+// authenticate every caller who sent no key at all.
 func GetSiteByAPIKey(apiKey string) (*models.Site, error) {
-	var site models.Site
-	query := `SELECT id, public_id, company_id, site_name, api_key, active, created_at, updated_at
-	          FROM sites WHERE api_key = $1 AND active = true AND deleted_at IS NULL`
+	if apiKey == "" {
+		return nil, sql.ErrNoRows
+	}
 
-	err := DB.QueryRow(query, apiKey).Scan(
-		&site.ID, &site.PublicID, &site.CompanyID, &site.SiteName, &site.APIKey,
+	var site models.Site
+	query := `SELECT id, public_id, company_id, site_name, active, created_at, updated_at
+	          FROM sites WHERE api_key_hash = $1 AND active = true AND deleted_at IS NULL`
+
+	err := DB.QueryRow(query, HashSiteKey(apiKey)).Scan(
+		&site.ID, &site.PublicID, &site.CompanyID, &site.SiteName,
 		&site.Active, &site.CreatedAt, &site.UpdatedAt,
 	)
 	if err != nil {

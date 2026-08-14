@@ -169,7 +169,8 @@ func TestDeviceOfDeactivatedSiteIsLockedOut(t *testing.T) {
 	env := newTestEnv(t)
 	key := env.registerDevice(env.siteAKey, "ESP32-0001")
 
-	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key = $1`, env.siteAKey)
+	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteAKey))
 
 	// Deactivating a site has to stop its terminals, not just its dashboard.
 	res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, deviceAuth(key))

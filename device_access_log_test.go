@@ -118,11 +118,13 @@ func TestADeviceCannotWriteALogAgainstAnotherSite(t *testing.T) {
 
 	var siteA, siteB int64
 	if err := database.DB.QueryRow(
-		`SELECT id FROM sites WHERE api_key = $1`, env.siteAKey).Scan(&siteA); err != nil {
+		`SELECT id FROM sites WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteAKey)).Scan(&siteA); err != nil {
 		t.Fatalf("reading site A: %v", err)
 	}
 	if err := database.DB.QueryRow(
-		`SELECT id FROM sites WHERE api_key = $1`, env.siteBKey).Scan(&siteB); err != nil {
+		`SELECT id FROM sites WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteBKey)).Scan(&siteB); err != nil {
 		t.Fatalf("reading site B: %v", err)
 	}
 

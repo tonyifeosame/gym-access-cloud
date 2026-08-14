@@ -28,8 +28,19 @@
 BEGIN;
 
 -- Sites belong to the tenant migration 002 created.
-INSERT INTO sites (company_id, site_name, api_key, active)
-SELECT c.id, v.site_name, v.api_key, TRUE
+--
+-- The keys below are stored as SHA-256 hashes, exactly as a real one is since
+-- 011_site_credentials.sql -- there is no plaintext column to write to any
+-- more. The PLAINTEXT is in this file, in the VALUES list, which is the whole
+-- reason this script refuses to run without SEED_ALLOW_INSECURE: these are
+-- publicly known development credentials, not secrets.
+--
+-- Hashing them here rather than special-casing seed data keeps one
+-- authentication path for every caller. A seed that wrote plaintext would need
+-- the server to accept plaintext, which is precisely the hole 011 closed.
+INSERT INTO sites (company_id, site_name, api_key_hash, api_key_prefix, active)
+SELECT c.id, v.site_name,
+       encode(sha256(v.api_key::bytea), 'hex'), left(v.api_key, 12), TRUE
   FROM companies c
   CROSS JOIN (VALUES
       ('Main Site',    'main-site-api-key-123'),

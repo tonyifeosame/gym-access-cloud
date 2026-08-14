@@ -196,10 +196,33 @@ func NewRouter() *gin.Engine {
 				handlers.UpdateSiteSettings)
 		}
 
-		// Operator administration.
+		// Operator administration, and site lifecycle.
+		//
+		// Sites are ADMIN rather than MANAGER: creating one mints a
+		// PROVISIONING CREDENTIAL and retiring one stops doors opening. Neither
+		// is day-to-day work, which is what the MANAGER gate above is for.
+		//
+		// The grant rule lands correctly here without extra machinery. ADMIN and
+		// OWNER are never site-scoped, so "an operator scoped to Site A creates
+		// Site B" cannot arise -- and the routes naming a site still go through
+		// RequireSiteGrant, which resolves it inside the caller's company and
+		// answers 404 for anybody else's.
 		admin := console.Group("")
 		admin.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleAdmin))
 		{
+			admin.POST("/sites", handlers.ConsoleCreateSite)
+			admin.PUT("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleUpdateSite)
+			admin.DELETE("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleRetireSite)
+
+			// Rotation is a POST to a sub-resource rather than a PUT on the
+			// site: it does not set a value the caller supplied, it mints one
+			// and returns it. Making that a metadata update would invite a
+			// client to send it twice.
+			admin.POST("/sites/:site_id/api-key", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleRotateSiteAPIKey)
+
 			admin.GET("/operators", handlers.ConsoleListOperators)
 			admin.GET("/operators/:operator_id", handlers.ConsoleGetOperator)
 			admin.GET("/operators/:operator_id/sites", handlers.ConsoleGetOperatorSites)

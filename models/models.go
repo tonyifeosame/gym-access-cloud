@@ -28,13 +28,24 @@ const (
 	SyncEntitySettings = "SETTINGS"
 )
 
-// Site represents a physical location running an access terminal
+// Site represents a physical location running an access terminal.
+//
+// THERE IS NO API KEY FIELD, AND THERE MUST NOT BE ONE. Since
+// 011_site_credentials.sql the database stores only a SHA-256 hash, so there is
+// no plaintext to put here -- but the omission is load-bearing beyond that.
+// This struct is the authenticated site as the middleware resolves it, and it
+// is one careless `c.JSON(200, site)` away from a response. The provisioning
+// secret registers terminals and rotates their device credentials; a type that
+// cannot carry it cannot leak it.
+//
+// The key is returned exactly twice in the lifetime of a site: from the console
+// call that creates it and from the one that rotates it. Both use a dedicated
+// response type that says so in its name.
 type Site struct {
 	ID        int64     `json:"id"`
 	PublicID  string    `json:"public_id"`
 	CompanyID int64     `json:"company_id"`
 	SiteName  string    `json:"site_name" binding:"required"`
-	APIKey    string    `json:"api_key" binding:"required"`
 	Active    bool      `json:"active"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

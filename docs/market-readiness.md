@@ -60,27 +60,85 @@ Classified Major rather than Blocker because the guided editor removes the
 realistic path to the typo; it stays open because the API still accepts one from
 any other client.
 
-### MR-005 — No API to create, edit or retire a site — **Major**
-
-*Found: 2026-08-14, while enumerating the console's endpoints against the plan.*
-
-Phase 2.2 calls for site creation and editing. The console API exposes
-`GET /console/sites`, `GET /console/sites/{id}` and the settings pair — there is
-no `POST`, `PUT` or `DELETE` for a site itself. A site is currently created only
-by direct database access, which is how `deploy/README.md` step 6 describes
-onboarding a customer.
-
-This is a genuine gap in customer onboarding, not merely a missing screen: a
-company cannot add its second location without an operator with database access.
-
-Needs an API decision before 2.2 can deliver site creation. Noted here rather
-than fixed inline, because it also raises where the site API key comes from on
-creation — and that key must never reach the browser, so "create a site" cannot
-simply return one.
-
 ---
 
 ## Resolved
+
+### MR-006 — Site provisioning keys were stored in plaintext — **Blocker**
+
+*Found: 2026-08-14, while inspecting site credential storage before designing
+the site-management API. Fixed the same day.*
+
+`sites.api_key` held the provisioning secret in plaintext, matched by exact
+comparison. That key registers terminals and rotates their device credentials,
+which makes it the highest-value secret on the platform — higher than any single
+device key, because it mints them.
+
+The consequence: anything that could read one row of `sites` — a backup, a
+replica, a support engineer with `SELECT`, an injection on any query touching the
+table — yielded a working provisioning credential for **every site in every
+company on the installation**. `deploy/README.md` even documented reading one
+back with `SELECT`.
+
+This was known and deferred. `005_device_identity.sql` moved *device* credentials
+to SHA-256 and said so explicitly: *"Note the asymmetry with sites.api_key, which
+is still plaintext… Hashing site keys belongs in its own migration with a
+rotation window."*
+
+**Assessed as not acceptable for a commercial release**, and fixed by
+`011_site_credentials.sql`: SHA-256 hash, non-secret 12-character prefix for
+display, plaintext column dropped.
+
+**No rotation window was needed**, which is the finding that made this cheap.
+Unlike a password, the plaintext was sitting in the column at migration time, so
+every existing key's hash could be computed during the migration. The wire
+contract did not change by a byte — the same `X-API-Key: <same string>` — so
+every provisioned site, and every terminal still on the deprecated
+site-key-plus-serial path, keeps authenticating with the key it already holds. No
+firmware is aware of it. The migration refuses to run if any live site would be
+left without a hash.
+
+What is deliberately lost: the key can no longer be read back out of the
+database. Rotation replaces that recovery path.
+
+Covered by `TestSiteKeyMigrationPreservesExistingCredentials` (builds a pre-011
+schema, seeds a plaintext key, migrates, proves the same key still resolves and
+the column is gone), `TestSiteKeyAuthenticationSurvivesHashedStorage`, and
+`TestNoPlaintextSiteKeyRemainsInTheDatabase`.
+
+### MR-005 — No API to create, edit or retire a site — **Major**
+
+*Found: 2026-08-14, while enumerating the console's endpoints against the plan.
+Fixed the same day.*
+
+The console API exposed only `GET /console/sites`, `GET /console/sites/{id}` and
+the settings pair. A site could be created only by direct database access, which
+is how `deploy/README.md` step 6 described onboarding a customer — so a company
+could not add its second location without an operator holding database
+credentials. A genuine gap in customer onboarding, not merely a missing screen.
+
+Resolved with a full lifecycle at ADMIN: create (returning the generated key
+once), update metadata, deactivate reversibly, retire irreversibly, and rotate
+the key. Onboarding in `deploy/README.md` now runs through the API.
+
+Two design decisions worth recording for the final review:
+
+- **Retirement cascades to terminals**, in one transaction, and reports the
+  count. Refusing to retire a site that still holds hardware sounds safer and is
+  a dead end — there is no console route that removes a terminal, so such a site
+  could never be retired at all. Every terminal at a retired site stops
+  authenticating immediately, on its own device key as well as the site key.
+  `PUT active:false` is the reversible alternative.
+- **Rotation has no overlap window.** A window is a period during which a
+  credential believed to be revoked still provisions door hardware. The response
+  reports how many terminals at the site have never been issued a device
+  credential and therefore just lost access.
+
+Covered by `console_sites_test.go` — authorized creation, role and CSRF gates,
+cross-company refusal, name uniqueness per company, key entropy and format, key
+returned only on creation, key absent from every subsequent read, rotation,
+deactivation, retirement cascade, and a sweep of the whole site surface for
+credential material.
 
 ### MR-002 — Timestamps were wall-clock readings mislabelled UTC — **Blocker**
 

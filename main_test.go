@@ -254,14 +254,44 @@ func newTestEnv(t *testing.T) *testEnv {
 	mustScan(t, `INSERT INTO companies (name, slug) VALUES ('Company One', 'one') RETURNING id`, &companyOne)
 	mustScan(t, `INSERT INTO companies (name, slug) VALUES ('Company Two', 'two') RETURNING id`, &companyTwo)
 
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site A', $2, TRUE)`,
-		companyOne, env.siteAKey)
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site B', $2, TRUE)`,
-		companyOne, env.siteBKey)
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site C', $2, TRUE)`,
-		companyTwo, env.siteCKey)
+	// Site keys are stored HASHED, exactly as a real one is since
+	// 011_site_credentials.sql. The fixture keeps the plaintext in env.site*Key
+	// because the tests present it in X-API-Key -- which is the point: the wire
+	// contract did not change when the storage did, and a fixture that wrote
+	// plaintext would be testing a database shape the server no longer has.
+	seedSite(t, companyOne, "Site A", env.siteAKey)
+	seedSite(t, companyOne, "Site B", env.siteBKey)
+	seedSite(t, companyTwo, "Site C", env.siteCKey)
 
 	return env
+}
+
+// seedSite inserts a site whose provisioning key is `key`, stored the way the
+// server stores one.
+func seedSite(t *testing.T, companyID int64, name, key string) {
+	t.Helper()
+	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key_hash, api_key_prefix, active)
+	             VALUES ($1, $2, $3, $4, TRUE)`,
+		companyID, name, database.HashSiteKey(key), truncateKeyPrefix(key))
+}
+
+func truncateKeyPrefix(key string) string {
+	if len(key) < 12 {
+		return key
+	}
+	return key[:12]
+}
+
+// siteIDByKey resolves a site from the plaintext key a test holds, hashing it
+// the same way authentication does.
+func siteIDByKey(t *testing.T, key string) int64 {
+	t.Helper()
+	var id int64
+	if err := database.DB.QueryRow(
+		`SELECT id FROM sites WHERE api_key_hash = $1`, database.HashSiteKey(key)).Scan(&id); err != nil {
+		t.Fatalf("resolving site for key: %v", err)
+	}
+	return id
 }
 
 // ---------------------------------------------------------------------------

@@ -254,7 +254,8 @@ func TestAuthenticationIsRequired(t *testing.T) {
 
 func TestDeactivatedSiteCannotUseItsKey(t *testing.T) {
 	env := newTestEnv(t)
-	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key = $1`, env.siteAKey)
+	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteAKey))
 
 	res := env.do(http.MethodGet, "/api/v1/members", nil, siteAuth(env.siteAKey))
 	if res.Code != http.StatusUnauthorized {

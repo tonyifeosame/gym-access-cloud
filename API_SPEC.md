@@ -68,6 +68,16 @@ The site key is also the **provisioning secret**: it is what authorises
 `POST /devices/register`, which mints device credentials. Treat it accordingly —
 anyone holding it can enrol a terminal at that site.
 
+**Stored as a SHA-256 hash and not recoverable.** Since migration 011 the
+database holds no plaintext, so a key exists exactly twice: in the response that
+created or rotated it, and wherever the operator put it. There is no endpoint and
+no query that reads one back. Lost it? Rotate:
+`POST /api/v1/console/sites/{site_id}/api-key`.
+
+The format is `ats_` followed by 64 hex characters — 256 bits from `crypto/rand`.
+The `ats_` prefix distinguishes it at a glance from a device key (`atd_`), which
+matters when one is pasted where the other belongs.
+
 > The key shown above is the development seed from `seeds/dev_seed.sql`. It is
 > committed to the repository and therefore public. It is **not** created by the
 > migrations: a database built from `migrations/` alone has no sites and no
@@ -1344,6 +1354,10 @@ tenant is `404`.
 | `GET` | `/console/sites/{site_id}` | VIEWER | one site |
 | `GET` | `/console/sites/{site_id}/settings` | VIEWER | `{settings, settings_version}` |
 | `PUT` | `/console/sites/{site_id}/settings` | MANAGER | updated settings |
+| `POST` | `/console/sites` | **ADMIN** | new site **+ its key, once** |
+| `PUT` | `/console/sites/{site_id}` | **ADMIN** | updated site |
+| `DELETE` | `/console/sites/{site_id}` | **ADMIN** | `{retired, terminals_retired}` |
+| `POST` | `/console/sites/{site_id}/api-key` | **ADMIN** | **new key, once** |
 
 A site:
 
@@ -1361,6 +1375,98 @@ endpoints. `{site_id}` is a site's `public_id` (a UUID); a malformed one is
 Writing settings replaces the object wholesale and enqueues a `SETTINGS` sync job
 for every terminal at that site — the same handler and the same behaviour as
 [section 6](#6-site-settings).
+
+Site lifecycle is **ADMIN**, above the MANAGER gate on day-to-day writes:
+creating a site mints a provisioning credential and retiring one stops doors
+opening. ADMIN and OWNER are never site-scoped, so an operator scoped to one site
+cannot create or modify another; the `{site_id}` routes still resolve inside the
+caller's company, so another tenant's site is `404`.
+
+#### `POST /console/sites`
+
+```json
+{"name": "Lagos Depot", "address": "14 Marina Road", "timezone": "Africa/Lagos"}
+```
+
+`name` is required and unique per company (`409` on a clash; a *retired* site's
+name is free for reuse). `timezone` defaults to `UTC` — it describes where the
+hardware stands, which is a different question from the zone an operator reads
+timestamps in.
+
+```json
+{
+  "site": { "id": "…", "name": "Lagos Depot", "…": "…" },
+  "credential": {
+    "api_key": "ats_9f1c…",
+    "api_key_prefix": "ats_9f1c2a",
+    "shown_once": true
+  }
+}
+```
+→ `201`
+
+> ### The key is shown once and cannot be recovered
+>
+> `api_key` is the **provisioning secret**: whoever holds it can register a
+> terminal at that site and rotate any device credential there. The server stores
+> only its SHA-256 hash, so this response is the only time it exists outside
+> whatever the caller does with it. **No `GET` ever returns it**, and there is no
+> endpoint that can. An operator who loses it must rotate.
+>
+> `api_key_prefix` is the first 12 characters. It is **not** secret, it *does*
+> appear in later reads, and it exists so a key can be identified in a log or a
+> support conversation without being reconstructible.
+
+#### `PUT /console/sites/{site_id}`
+
+```json
+{"name": "…", "address": "…", "timezone": "…", "active": false}
+```
+
+Metadata only; every field optional, and only what is supplied is applied.
+
+`active: false` is **deactivation, not retirement**. The site key and every
+terminal at the site stop authenticating immediately, and **nothing is
+destroyed** — setting it back to `true` restores service. This is what "we are
+closing this depot for a month" needs.
+
+#### `DELETE /console/sites/{site_id}`
+
+Retires the site **and soft-deletes every terminal at it, in one transaction**.
+
+```json
+{"retired": true, "terminals_retired": 3}
+```
+→ `200`
+
+> **This stops doors opening.** A terminal whose site is retired fails
+> authentication immediately — on its own device key as well as on the site key,
+> because both middlewares refuse a device whose site is gone. `terminals_retired`
+> is how many; a client that does not show that number is not describing what
+> happened. One-way through the API; use `PUT active:false` if you want it back.
+
+Rows are soft-deleted and retained for audit. The site's *name* becomes reusable,
+because the per-company unique index ignores retired rows.
+
+#### `POST /console/sites/{site_id}/api-key`
+
+Issues a replacement key and **invalidates the previous one immediately**. There
+is no overlap window — a window is a period in which a credential believed to be
+revoked still provisions hardware.
+
+```json
+{
+  "credential": {"api_key": "ats_…", "api_key_prefix": "ats_…", "shown_once": true},
+  "legacy_terminals": 2
+}
+```
+→ `200`
+
+`legacy_terminals` counts terminals at this site that have **never been issued a
+device credential of their own** and therefore certainly still authenticate with
+the site key — the ones this rotation just locked out. **Terminals holding their
+own `X-Device-Key` are unaffected**: that is a different secret and rotation does
+not touch it.
 
 ### Terminals
 
