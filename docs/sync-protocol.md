@@ -56,6 +56,56 @@ construction: the site key is shared by every terminal at the site, so it cannot
 distinguish one device from another beyond the serial the caller claims. **Move
 to `X-Device-Key` and expect this path to be removed.**
 
+## Response framing
+
+**A client must not assume `Content-Length` is present, and must decode
+`Transfer-Encoding: chunked`.**
+
+This is not a hypothetical. Every response from the Render deployment is
+chunked, including bodies of under a hundred bytes:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Transfer-Encoding: chunked
+
+5d
+{"commit":"5f8eb3e","service":"Access Terminal Cloud API","status":"healthy","version":"dev"}
+0
+
+```
+
+The API does not choose this. Go sets `Content-Length` on a small response, and
+the Nginx deployment in `deploy/` passes it through — but the managed edge in
+front of the Render service re-frames responses on its way out, and the origin's
+length header does not survive. **Framing is a property of the deployment, not
+of the contract**, so firmware must handle both and must not be tuned to
+whichever one a given environment happens to use.
+
+The failure mode when it is not handled is quiet and total. A client reading the
+socket directly receives the chunk-size line as though it were payload, so the
+body begins `5d\r\n{` — which is not JSON. On the ESP32 that surfaced as
+`Sync: response did not parse -- InvalidInput` on every sync cycle, while
+heartbeat, enrolment upload, job acknowledgement and access-log upload all
+appeared to work, because those calls only inspect the status code and never
+parse the body. `GET /devices/jobs` is the only device call whose body is read,
+which is what made a total transport fault look like a sync-specific one.
+
+Two consequences for anyone writing a client:
+
+- **Use an HTTP client that de-chunks**, rather than reading the socket. On the
+  ESP32 that means `HTTPClient::writeToStream()`; `getStreamPtr()` is the raw
+  stream and returns the framing with the payload.
+- **Do not use `Content-Length` as the completeness check.** Over a chunked
+  transfer there is nothing to compare against, so a length-based check silently
+  passes rather than failing closed — and a partially delivered `FULL_SYNC`
+  roster that is treated as complete is read as a list of deletions. Take
+  completeness from whether the transfer itself finished.
+
+Nothing about the JSON bodies documented below changes with the framing, and
+this is not a protocol version concern: `SyncProtocolVersion` describes the
+envelope, not the transport that carries it.
+
 ## `POST /api/v1/devices/register`
 
 Authenticated with the **site** API key, which acts as the provisioning secret.

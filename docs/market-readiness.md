@@ -1,578 +1,529 @@
 # AccessLink market readiness
 
-A running checklist, maintained **during** development rather than assembled at
-the end. Items are added the moment they are discovered — including ones found
-while building something else — so that nothing depends on remembering it later.
+The tracked remediation register for the full-product audit of 2026-08-14.
 
-**This document does not certify anything.** A comprehensive review of the whole
-product (frontend, API, database, auth, multi-tenancy, applications, sync,
-firmware, fingerprint lifecycle, provisioning, offline behaviour, relay safety,
-firmware update/recovery, deployment, backup/restore, monitoring, documentation,
-onboarding, production hardware) happens once the frontend is complete. Until
-that review has been done and passed, AccessLink is **not** market-ready and must
-not be described as such.
+**This document does not certify anything.** It records what was found, why it
+was wrong, what was done about it, and what proves the fix. A finding is only
+`FIXED` when a test that would have caught it exists and passes. Everything else
+carries the status it actually has.
 
-## Classification
+AccessLink is a **general-purpose identity, biometric, terminal and workflow
+platform**. It is sold to different companies for different purposes. Nothing in
+this document, and nothing in the remediation it tracks, may assume a gym, a
+school, an office, a factory, a hotel, a warehouse or a residential building is
+the customer.
 
-Findings are classified only at the final review. Until then they carry a
-severity so the final pass has something to sort by:
+---
+
+## Status vocabulary
+
+| Status | Meaning |
+|---|---|
+| `FIXED` | Implemented, and a test that would have caught the original defect passes. |
+| `PARTIAL` | Materially improved, with a named remainder. The remainder is a finding in its own right. |
+| `ACCEPTED` | Not fixed, deliberately, with the risk stated and owned. |
+| `BLOCKED` | Cannot be fixed here — needs hardware, a legal decision, or a commercial decision. |
+| `OPEN` | Not yet started. |
+
+## Severity vocabulary
 
 | Severity | Meaning |
 |---|---|
-| **Blocker** | Ships broken or unsafe. Cannot be released with this open. |
-| **Major** | Real customer-visible defect or risk; should not launch with it. |
-| **Minor** | Worth fixing, tolerable at launch. |
-
-## Status
-
-| Area | State |
-|---|---|
-| Backend / API | Feature-complete for Phase 2; not reviewed |
-| Frontend console | In progress (Phase 2) |
-| Firmware | Untouched this phase |
-| Everything else | Not yet reviewed |
+| `BLOCKER` | Cannot be sold with this open. |
+| `CRITICAL` | Ships broken or unsafe in a way customers will hit. |
+| `MAJOR` | Real customer-visible defect or risk. Should not launch with it. |
+| `MINOR` | Worth fixing; tolerable at launch if stated. |
+| `NICE-TO-HAVE` | Improvement, not a gap. |
 
 ---
 
-## Open
+## Subsystem grouping
 
-### MR-020 — No operator-facing activity feed or audit trail — **Major**
+The 57 findings, grouped by the subsystem that owns the fix. A finding appears
+once, under the subsystem where the work actually lands.
 
-*Found: 2026-08-14, building the dashboard.*
+| Subsystem | Findings |
+|---|---|
+| Tenancy / company | GP-01, CON-01 |
+| Authentication / authorization | SEC-09, SEC-10, SEC-13, SEC-14 |
+| Operators | PPL-02, PPL-06 |
+| Sites | CON-03 |
+| Terminals | SEC-01, SEC-05, SEC-06, CON-02, SYN-04 |
+| People | GP-02, PPL-03, PPL-04, PPL-05 |
+| Credentials / biometrics | FW-03, HW-03, PPL-01 |
+| Applications | APP-01, APP-03, GP-03, GP-05, GP-06 |
+| Access control | APP-02 |
+| Attendance / workflows | APP-04 |
+| Synchronization | SEC-04, SYN-01, SYN-02, SYN-03, SYN-05, SYN-06, SYN-07 |
+| Firmware | FW-01, FW-02, FW-04, FW-05, FW-06, FW-07, FW-09, DOC-04 |
+| Hardware integration | SEC-03, HW-01, HW-02 |
+| Settings | FW-08, GP-04 |
+| Audit / activity | SEC-07, SEC-08, OPS-06 |
+| Deployment | OPS-02, OPS-04, OPS-05, SEC-15 |
+| CI/CD | OPS-03 |
+| Security | SEC-02, SEC-11, SEC-12, CON-04 |
+| Documentation | DOC-01, DOC-02, DOC-03, CON-05, LEG-01 |
 
-The console can show no activity of any kind, because none is reachable:
+---
 
-- **Door events exist but are site-key-only.** `GET /api/v1/access/logs` and
-  `/logs/{member_id}` are authenticated by the site provisioning key, which a
-  browser must never hold. There is no `/console/...` equivalent, so an operator
-  cannot see who was admitted, when, or at which terminal.
-- **There is no audit trail of operator actions at all.** Nothing records who
-  created a site, rotated a key, changed a role, removed a person or disabled a
-  capability. Sessions are logged; the changes made inside them are not.
+## Dependency order
 
-The first is a functional gap — "who came in this morning" is a question almost
-every deployment will ask, and for ACCESS_CONTROL or ATTENDANCE it is close to
-the whole product. The second is a compliance and forensics gap: after a
-disputed change there is no way to establish who made it.
+Findings are not independent. This is the order the work has to happen in,
+derived from what each fix needs to already exist.
 
-Phase 2.7 states both on the dashboard rather than filling the space with an
-adjacent metric.
-
-Needs a console-authenticated access-log endpoint (grant-scoped, paginated), and
-a separate decision about an administrative audit log.
-
-### MR-021 — No API to update company details — **Minor**
-
-*Found: 2026-08-14, building Settings.*
-
-`GET /console/company` is the only company route. There is no way to change a
-company's name, slug or contact address through any operator API, at any role —
-including OWNER. Changing a customer's name after a rebrand currently requires
-direct database access.
-
-Phase 2.7 renders the company read-only and says explicitly that this is a
-platform gap rather than a role restriction, so an owner does not go looking for
-someone with a higher role who also cannot do it.
-
-### MR-022 — Two settings surfaces, no shared schema mechanism — **Major**
-
-*Consolidates the settings half of MR-004 and MR-019. Recorded 2026-08-14.*
-
-The platform now has **two** open-JSON settings objects with no server-side
-schema — `sites.settings` (MR-004) and `company_applications.settings`
-(MR-019) — and the console has had to grow validation for both independently.
-
-That is already one duplication too many, and the count only goes up: every
-capability that gains behaviour will want its own configuration, and per-site
-overrides of it are an obvious next request.
-
-**A single schema mechanism should be designed once and serve all of them**:
-declared keys with types and bounds, server-side validation, and a
-machine-readable description the console can build guided controls from without
-hard-coding a key set. Solving MR-004 and MR-019 separately would produce two
-validation systems that disagree.
-
-Recorded as one item so it is decided as one.
-
-### MR-017 — Applications are configuration with no behaviour behind them — **Blocker**
-
-*Found: 2026-08-14, building the Applications module. Previously noted as
-limitation 11 in `API_SPEC.md`; promoted here because it is a commercial
-blocker rather than an API footnote.*
-
-`company_applications` records which capabilities a company has enabled, and
-`devices.application_mode` records what each terminal is assigned to. **Nothing
-in the platform evaluates any of it.** No attendance is computed, no access
-decision is made against a capability, no check-in is recorded, no worked time
-accumulates. Enabling ACCESS_CONTROL changes what the console offers and what a
-terminal may be pointed at, and nothing else.
-
-The device protocol is also unchanged: terminals are **not told their
-application mode** (limitation 12), so even a terminal correctly assigned to
-ATTENDANCE has no idea it is.
-
-This is the gap between what the product can be *sold* as and what it currently
-*does*. Every other item in this document is a defect or a missing control;
-this one is missing product. AccessLink today is a general-purpose identity and
-terminal-management platform with a capability model bolted on in advance of the
-capabilities.
-
-Phase 2.6 states it plainly on both the catalog and the detail page rather than
-letting an owner infer that enabling something switches it on. That is the
-honest handling, not a fix.
-
-**Nothing should be sold as ACCESS_CONTROL, ATTENDANCE, CHECK_IN, TIME_TRACKING,
-VERIFICATION, REGISTRATION or VISITOR_MANAGEMENT until the corresponding logic
-exists.** Which capability ships first is a product decision.
-
-### MR-018 — No dependency or conflict model between capabilities — **Minor**
-
-*Found: 2026-08-14, building the Applications module.*
-
-Nothing records that one capability requires another, or that two cannot run
-together. `models.Applications` is a flat set; `company_applications` has one
-row per capability with no relationships.
-
-Plausibly fine today, because none of them do anything (MR-017). It stops being
-fine as soon as they do: TIME_TRACKING computed from arrivals and departures
-plainly depends on whatever records those, and REGISTRATION enrolling
-credentials is arguably a prerequisite for anything biometric. Enabling a
-capability whose prerequisite is off would then fail at a terminal rather than
-at the point of configuration.
-
-Phase 2.6 says on the detail page that relationships are not modelled, rather
-than showing an empty "Dependencies" heading that implies the answer is "none".
-
-### MR-019 — Per-application settings have no schema and nothing reads them — **Minor**
-
-*Found: 2026-08-14, building the Applications module.*
-
-`company_applications.settings` is an open JSON object, validated only as being
-an object — the same shape of problem as MR-004 for site settings, and with the
-same consequence: a typo is stored silently.
-
-It is currently less severe only because **nothing consumes the value**. When a
-capability gains behaviour, its settings become load-bearing and will need a
-declared schema, per-capability validation, and guided controls in the console.
-Until then Phase 2.6 offers a raw JSON editor labelled as unread.
-
-Worth deciding alongside MR-004: one settings-schema mechanism should serve
-sites and applications rather than two being invented separately.
-
-### MR-015 — No invitation or credential-handover flow for operators — **Major**
-
-*Found: 2026-08-14, building operator creation in Phase 2.5.*
-
-`POST /console/operators` requires the caller to **choose the new operator's
-password** and hand it over themselves. There is no invitation email, no
-single-use setup link, and no "must change password at first sign-in" flag —
-`users.password_changed_at` exists but nothing reads it as a policy.
-
-The realistic consequence is that initial credentials travel by chat or email in
-plain text, and typically stay unchanged. The administrator who created the
-account also knows the password indefinitely, with nothing recording that they
-do.
-
-Phase 2.5 says so on the form — that AccessLink sends no invitations, that the
-password must be communicated separately, and that it cannot be shown again —
-which is the honest handling of a gap the frontend cannot close.
-
-Needs an invitation flow, a forced first-change flag, or both, before this is
-comfortable for a commercial customer onboarding staff at scale.
-
-### MR-016 — Site grants persist through a promotion and silently reapply — **Minor**
-
-*Found: 2026-08-14, reading `SetUserRole` while building the role dialog.*
-
-Site grants are stored per operator and **ignored for ADMIN and OWNER**, which
-reach every site by role. `SetUserRole` does not clear them.
-
-So: a MANAGER restricted to one site is promoted to ADMIN and correctly reaches
-everything; if they are later moved back to MANAGER, **the old restriction
-silently reapplies** — possibly months later, naming a site that may since have
-been retired. Nobody involved is likely to remember it was ever set.
-
-Not a security hole — the grant is narrowing, not widening, and the server is
-consistent throughout. It is a surprise, and the surprising direction is the one
-that removes access unexpectedly.
-
-Phase 2.5 warns at both points: the role dialog says restrictions will stop
-applying and would return on demotion, and the detail page says stored
-restrictions exist on a role that ignores them. A backend fix would be to clear
-grants on promotion, or to surface them as an explicit part of the role change.
-
-### MR-011 — No operator API for biometric enrolment — **Major**
-
-*Found: 2026-08-14, auditing the People API before Phase 2.4.*
-
-The console can report **whether** a person has a biometric credential and can
-do nothing else with it. `POST /enrollment/start`, `GET /enrollment/pending` and
-`POST /enrollment/result` are authenticated by the **site key** or a **device
-key** — neither of which a browser may hold — so none is reachable from an
-operator session. There is no console route at all to:
-
-- start an enrolment for a person,
-- see which enrolments are pending or have failed,
-- clear or re-enrol a credential,
-- record which terminal a credential lives on.
-
-The practical gap: **an operator cannot revoke one person's biometric credential
-while keeping their record.** Removing the person entirely is the only lever, and
-that is a different action with different consequences. Re-enrolling someone
-whose finger no longer reads reliably is likewise not an operator-facing
-workflow.
-
-Recorded rather than invented. Phase 2.4 states plainly on the person detail page
-that enrolment happens at a terminal and cannot be managed from the console,
-instead of offering a control that would 404.
-
-### MR-012 — `person_type` is hard-coded to a four-value business taxonomy — **Major**
-
-*Found: 2026-08-14, auditing the People schema.*
-
-`people.person_type` exists, is `NOT NULL DEFAULT 'MEMBER'`, is indexed, and
-carries a CHECK constraint:
-
-```sql
-CHECK (person_type IN ('MEMBER', 'STAFF', 'CONTRACTOR', 'VISITOR'))
+```
+                    ┌─────────────────────────────────────────┐
+   FOUNDATION       │  Platform primitives schema             │
+   (nothing else    │  credentials · events · permissions     │
+    can land first) │  schedules · audit · person taxonomy    │
+                    └────────────────┬────────────────────────┘
+                                     │
+        ┌────────────────┬───────────┼────────────┬──────────────────┐
+        ▼                ▼           ▼            ▼                  ▼
+   ┌─────────┐   ┌──────────────┐ ┌────────┐ ┌──────────┐   ┌──────────────┐
+   │ Company │   │  Terminal    │ │Identity│ │ Settings │   │  Operator    │
+   │lifecycle│   │  lifecycle   │ │  and   │ │  schema  │   │  security    │
+   │ GP-01   │   │  SEC-01/02   │ │creds   │ │  GP-04   │   │  PPL-02      │
+   │ CON-01  │   │  SEC-05/06   │ │FW-03   │ │  FW-08   │   │  SEC-10      │
+   └─────────┘   └──────┬───────┘ │HW-03   │ └──────────┘   └──────────────┘
+                        │         │PPL-01  │
+                        │         └───┬────┘
+                        │             │
+                        ▼             ▼
+                 ┌──────────────────────────┐
+                 │  Sync capacity & scoping │
+                 │  SEC-04 · FW-01 · SYN-*  │
+                 └────────────┬─────────────┘
+                              │
+                              ▼
+                 ┌──────────────────────────┐
+                 │  Application engine      │
+                 │  APP-01 · APP-03 · GP-03 │
+                 └────────────┬─────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+      ┌──────────────┐ ┌────────────┐ ┌──────────────┐
+      │Access control│ │  Events /  │ │  Firmware    │
+      │   APP-02     │ │   audit    │ │  FW-02/04/05 │
+      │              │ │ SEC-07/08  │ │  FW-07/09    │
+      └──────────────┘ └────────────┘ └──────────────┘
+                              │
+                              ▼
+                 ┌──────────────────────────┐
+                 │  CI · deployment · docs  │
+                 │  OPS-* · DOC-* · LEG-01  │
+                 └──────────────────────────┘
 ```
 
-**That is a fixed business taxonomy in the database**, and it contradicts the
-platform being general-purpose. A school cannot record STUDENT; a conference
-cannot record ATTENDEE; a hospital cannot record PATIENT. The default value
-`MEMBER` is itself a leftover from the single-purpose product this became.
+**The hard sequencing constraints, stated explicitly:**
 
-Compounding it, `person_type` is **not exposed by the console API at all**. What
-the console shows as "person type" is `category`, which maps to the *other*
-column — `membership_type`, free text, also a legacy name. So the schema has two
-overlapping classification fields: one constrained and invisible, one
-unconstrained and visible.
-
-Phase 2.4 exposes only the free-text one, as free text, which is the behaviour a
-general-purpose platform needs. The constrained column remains as a trap for
-whoever next tries to use it.
-
-Needs a product decision: drop `person_type`, widen it to free text, or make it a
-per-company configurable vocabulary. Not fixable from the frontend.
-
-### MR-013 — People API omits fields the schema already holds — **Minor**
-
-*Found: 2026-08-14, auditing the People API.*
-
-`people` carries `email`, `phone`, `valid_from` and `valid_until`. None is
-exposed by any console endpoint, so the console cannot show or set them.
-
-`valid_from`/`valid_until` are the notable pair: a **validity period** is exactly
-what a visitor, a contractor on a fixed engagement, or a temporary badge needs,
-and the column is already there with a CHECK constraint enforcing ordering. There
-is currently no way to grant someone access that expires by itself — an operator
-must remember to deactivate them.
-
-Also minor but real: `PUT /console/people/{external_id}` applies `category` only
-when non-empty, so **a category cannot be cleared once set**, only replaced.
-
-### MR-014 — People list has no filters beyond free-text search — **Minor**
-
-*Found: 2026-08-14, while building the people list.*
-
-`GET /console/people` accepts `limit`, `offset` and `q` and nothing else. There
-is no filter for active/inactive, for enrolled/not-enrolled, or by person type.
-
-Unlike the terminal list (MR-009), this one **is** paginated, so the console
-cannot compensate in the browser: filtering the fetched page would filter fifty
-people and present it as filtering the roster. Phase 2.4 therefore ships search
-and paging only, and adds no client-side filter.
-
-"Who has not enrolled a credential yet" is the query an onboarding operator
-actually wants, and it is currently unanswerable.
-
-### MR-008 — No console path for terminal removal or reassignment — **Major**
-
-*Found: 2026-08-14, investigating terminal lifecycle during Phase 2.3.*
-
-The console terminal API is exactly four routes: list, summary, detail, and
-set-application-mode. There is **no operator API** to:
-
-- **remove a terminal** — a unit that is lost, stolen, destroyed or replaced
-  stays in the inventory and keeps authenticating on its device key;
-- **move a terminal to another site** — a unit relocated between locations must
-  be re-registered, and until then reports against the wrong site;
-- **disable or re-enable a terminal** — `active` and `DISABLED` exist in the
-  schema and are honoured by device auth, but nothing operator-facing sets them;
-- **force a resync** — `POST /api/v1/devices/{serial}/resync` exists but is
-  authenticated by the **site provisioning key**, which a browser must never
-  hold, so it is not reachable from the console.
-
-Two consequences worth stating plainly. **A stolen terminal cannot be revoked
-from the console** — the only lever is rotating the site key, which is
-site-wide and does not touch that unit's own device credential. And this is
-what makes site retirement a one-way door: `DELETE /console/sites/{id}` cascades
-to terminals precisely because there is no other way to deal with them.
-
-Recorded as a **product requirement rather than invented**. Any of these is a
-new authorized endpoint with its own tests; none is something the frontend may
-approximate. Phase 2.3 names the gap on the terminal detail page rather than
-leaving an operator hunting for a button that was never built.
-
-Needs a decision before commercial release, and the revocation case is the one
-I would treat as closest to a blocker.
-
-### MR-009 — The terminal list is unpaginated and unsearchable server-side — **Minor**
-
-*Found: 2026-08-14, while building the terminal inventory.*
-
-`GET /console/terminals` returns the caller's entire scoped fleet in one
-response. There is no `limit`, `offset` or `q` — unlike `GET /console/people`,
-which was paginated and given SQL search for exactly this reason.
-
-Phase 2.3 therefore filters and searches **in the browser**, which is *correct
-today*: the client holds the complete set, so narrowing it narrows everything
-rather than one page. That is a property of the current API, not a principle,
-and it stops being true the moment the endpoint is paginated — at which point
-the client-side filter silently becomes a page filter wearing a search box.
-
-It also does not scale: a customer with a few thousand terminals serialises all
-of them on every load. Not urgent at current fleet sizes; would need
-`limit`/`offset`/`q` and a matching frontend change before it is.
-
-### MR-010 — Frontend quality gaps carried forward — **Should fix before launch**
-
-*Recorded 2026-08-14, tracked here so they are not rediscovered at review.*
-
-- **No automated accessibility audit.** The primitives are built to explicit
-  contracts — focus entry and return, focus trapping, labels bound to controls,
-  errors announced, colour never the sole signal — and each is covered by a
-  test. None of that is the same as an axe/WCAG pass. **An automated audit is
-  still required**, plus a manual pass with an actual screen reader.
-- **No real-browser verification.** Everything is jsdom. jsdom does not lay out,
-  does not apply media queries, and only approximates focus behaviour — so the
-  responsive breakpoints (900px navigation, 680px table-to-card) and the dialog
-  focus trap are **proven in tests but unproven in a browser**. Needs a pass on
-  real desktop, tablet and phone before launch.
-- **No real-device verification.** Deliberately out of scope during the frontend
-  phases: nothing has been exercised against actual ESP32 hardware. Site
-  settings changes, application-mode assignment and key rotation all have
-  effects on terminals that only real hardware can confirm.
-
-### MR-007 — Site reads do not return the key prefix — **Minor**
-
-*Found: 2026-08-14, while building the Sites UI.*
-
-`sites.api_key_prefix` exists, is populated on creation and rotation, and is
-explicitly **not secret** — it identifies which key a site is on without being
-reconstructible. `database.SiteKeyPrefix` reads it. But `consoleSiteColumns` does
-not select it, so `GET /console/sites` and `GET /console/sites/{id}` never carry
-it.
-
-The consequence is small but real: after creating a site, an operator has no way
-to confirm which key a site is currently on — useful when several have been
-rotated, and the ordinary way to check that hardware was re-provisioned with the
-right one.
-
-The console is already built for it. `Site.api_key_prefix` is typed optional and
-both the list column and the detail card render it when present, degrading to
-"—"/"Not shown" when absent. **The fix is one line in the projection plus the
-field on `ConsoleSite`**, with nothing to change in the frontend.
-
-Deliberately not done in Phase 2.2, which was scoped to the frontend with the
-backend explicitly frozen.
-
-### MR-004 — Site settings have no schema, and the write is a full replacement — **Major**
-
-*Found: 2026-08-14, while building the frontend data layer for the site settings
-editor.*
-
-`settings` on a site is an open JSON object. The API validates only that it IS an
-object; it does not know the key set, the value types, or the ranges. Two
-consequences:
-
-- **A typo is accepted and reaches hardware.** `PUT` replaces the object
-  wholesale, so `{"unlock_duration_secnods": 5}` silently drops the real key and
-  queues a SETTINGS job carrying the mistake to every terminal at the site.
-- **Nothing bounds a value.** `unlock_duration_seconds` of 3600 is accepted, and
-  that is a door held open for an hour.
-
-The frontend mitigates this in 2.2 with a guided editor over the keys it
-recognises plus a raw editor that never discards an unrecognised key, but a
-console cannot be the only validation in front of a door. The authoritative
-schema belongs in the API.
-
-Classified Major rather than Blocker because the guided editor removes the
-realistic path to the typo; it stays open because the API still accepts one from
-any other client.
+1. **The event model precedes every application.** `APP-04` is a schema change
+   that `APP-01`, `APP-02`, `SEC-08` and all five unbuilt capabilities depend on.
+   Building an application first means building it twice.
+2. **The permission engine precedes access control.** `APP-02` supplies scope,
+   schedule and validity. `PPL-03` (validity windows) is the same work.
+3. **The credentials table precedes the biometric fix.** `HW-03` must land before
+   `FW-03`, or template distribution attaches to a column instead of an entity.
+4. **Roster scoping precedes the capacity fix.** `SEC-04` removes most of the
+   pressure that makes `FW-01` bite, and changes what capacity has to mean.
+5. **Terminal lifecycle precedes firmware revocation.** `SEC-01` has to define
+   the revoked state before `FW-07` can enforce it at the door.
+6. **Self-registration precedes removing legacy auth.** `FW-05` must land before
+   `SEC-05` can be removed without stranding terminals.
+7. **CI precedes nothing and protects everything.** `OPS-03` lands early so the
+   rest of the work is guarded as it happens.
 
 ---
 
-## Resolved
+## Compatibility policy
 
-### MR-006 — Site provisioning keys were stored in plaintext — **Blocker**
+Deployed terminals speak a contract. This remediation does not break it.
 
-*Found: 2026-08-14, while inspecting site credential storage before designing
-the site-management API. Fixed the same day.*
+**Frozen — no change permitted without a firmware migration path:**
 
-`sites.api_key` held the provisioning secret in plaintext, matched by exact
-comparison. That key registers terminals and rotates their device credentials,
-which makes it the highest-value secret on the platform — higher than any single
-device key, because it mints them.
+- `GET /api/v1/devices/jobs` envelope and job payload shapes
+- `POST /api/v1/devices/jobs/{id}/complete`
+- `POST /api/v1/devices/access/log`
+- `POST /api/v1/devices/enrollment/result`
+- `X-Device-Key` header authentication
+- `X-Protocol-Version: 1`
+- The `member_id` / `external_id` field name on the wire
 
-The consequence: anything that could read one row of `sites` — a backup, a
-replica, a support engineer with `SELECT`, an injection on any query touching the
-table — yielded a working provisioning credential for **every site in every
-company on the installation**. `deploy/README.md` even documented reading one
-back with `SELECT`.
+**How new capability is added without breaking the contract:**
 
-This was known and deferred. `005_device_identity.sql` moved *device* credentials
-to SHA-256 and said so explicitly: *"Note the asymmetry with sites.api_key, which
-is still plaintext… Hashing site keys belongs in its own migration with a
-rotation window."*
+Every device-facing addition is either an **additive optional field** inside an
+existing payload, or a **new job type** that older firmware reports as
+`kUnknown` and acknowledges — which the firmware already does correctly
+(`sync_engine.cpp`, `SyncJobType::kUnknown` → `kIgnored` → acked). That path is
+what makes the protocol extensible without a version bump, and it is why
+`SyncProtocolVersion` stays at 1 through this work.
 
-**Assessed as not acceptable for a commercial release**, and fixed by
-`011_site_credentials.sql`: SHA-256 hash, non-secret 12-character prefix for
-display, plaintext column dropped.
+**Where the wire name and the internal name now differ**, the internal model uses
+the general-purpose name and the wire keeps the legacy one, with the mapping in
+one place rather than scattered. Renaming a JSON field that deployed firmware
+parses is not a cosmetic change and is not done.
 
-**No rotation window was needed**, which is the finding that made this cheap.
-Unlike a password, the plaintext was sitting in the column at migration time, so
-every existing key's hash could be computed during the migration. The wire
-contract did not change by a byte — the same `X-API-Key: <same string>` — so
-every provisioned site, and every terminal still on the deprecated
-site-key-plus-serial path, keeps authenticating with the key it already holds. No
-firmware is aware of it. The migration refuses to run if any live site would be
-left without a hash.
+---
 
-What is deliberately lost: the key can no longer be read back out of the
-database. Rotation replaces that recovery path.
+## Findings
 
-Covered by `TestSiteKeyMigrationPreservesExistingCredentials` (builds a pre-011
-schema, seeds a plaintext key, migrates, proves the same key still resolves and
-the column is gone), `TestSiteKeyAuthenticationSurvivesHashedStorage`, and
-`TestNoPlaintextSiteKeyRemainsInTheDatabase`.
+Ordered by severity, then by subsystem. Each carries its root cause rather than
+only its symptom, because several findings share one.
 
-### MR-005 — No API to create, edit or retire a site — **Major**
+---
 
-*Found: 2026-08-14, while enumerating the console's endpoints against the plan.
-Fixed the same day.*
+### BLOCKER
 
-The console API exposed only `GET /console/sites`, `GET /console/sites/{id}` and
-the settings pair. A site could be created only by direct database access, which
-is how `deploy/README.md` step 6 described onboarding a customer — so a company
-could not add its second location without an operator holding database
-credentials. A genuine gap in customer onboarding, not merely a missing screen.
+#### GP-01 — No API creates a company
+**Subsystem** Tenancy · **Status** OPEN
 
-Resolved with a full lifecycle at ADMIN: create (returning the generated key
-once), update metadata, deactivate reversibly, retire irreversibly, and rotate
-the key. Onboarding in `deploy/README.md` now runs through the API.
+**Root cause.** Companies were introduced by migration 002 as the tenant every
+pre-existing row was adopted by. Nothing has ever needed to create a second one,
+so no code path does. `users.company_id` is `NOT NULL` and every console route is
+scoped by the authenticated operator's company, which means there is also no
+identity that could legitimately administer the installation rather than a tenant
+within it.
 
-Two design decisions worth recording for the final review:
+**Remediation.** A platform-administration surface separate from the tenant
+console: company create, read, update, activate/deactivate, and the ability to
+issue a first operator into a new company. This needs an identity that is not a
+tenant operator — the existing `users` table cannot express it, because every row
+belongs to exactly one company by construction.
 
-- **Retirement cascades to terminals**, in one transaction, and reports the
-  count. Refusing to retire a site that still holds hardware sounds safer and is
-  a dead end — there is no console route that removes a terminal, so such a site
-  could never be retired at all. Every terminal at a retired site stops
-  authenticating immediately, on its own device key as well as the site key.
-  `PUT active:false` is the reversible alternative.
-- **Rotation has no overlap window.** A window is a period during which a
-  credential believed to be revoked still provisions door hardware. The response
-  reports how many terminals at the site have never been issued a device
-  credential and therefore just lost access.
+**Migration/compatibility.** Additive. No existing route changes meaning.
 
-Covered by `console_sites_test.go` — authorized creation, role and CSRF gates,
-cross-company refusal, name uniqueness per company, key entropy and format, key
-returned only on creation, key absent from every subsequent read, rotation,
-deactivation, retirement cascade, and a sweep of the whole site surface for
-credential material.
+---
 
-### MR-002 — Timestamps were wall-clock readings mislabelled UTC — **Blocker**
+#### SEC-01 — No terminal revocation at any credential class
+**Subsystem** Terminals · **Status** OPEN
 
-*Found: 2026-08-14, while scoping the console's date/time rendering. Fixed the
-same day, as frontend step 2.0b.*
+**Root cause.** `DISABLED` is written in exactly one place in the entire codebase
+— `RetireSite` (`database/sites.go:249`). The device state machine has the state;
+nothing operator-facing reaches it. Site key rotation deliberately does not touch
+device credentials, which is correct in isolation and means there is no lever at
+all for one terminal.
 
-All **61 timestamp columns across 15 tables** were `TIMESTAMP WITHOUT TIME ZONE`,
-which stores a wall-clock reading and no record of which clock took it. `lib/pq`
-then labelled every value `Z` on the way out, so the API reported a confident,
-well-formed instant that was wrong by the database server's UTC offset — one hour
-on the deployment this was found on (`Africa/Lagos`).
+**Remediation.** Terminal lifecycle at the console: disable, re-enable, revoke
+credential, retire, reassign site. Revocation must clear `api_key_hash` so the
+credential stops resolving, not merely flip a status a future code path might
+ignore.
 
-**It was worse than a uniform offset.** Three writers reached the same columns
-from three different clocks, and PostgreSQL discarded the offset on the way into
-a naive column:
+**Migration/compatibility.** Additive routes. The device auth path already
+refuses `DISABLED`, so enforcement exists and only the control is missing.
 
-| Writer | What it actually stored |
-|---|---|
-| `CURRENT_TIMESTAMP` | the **database** server's wall clock |
-| a Go `time.Time` parameter | the **API process's** wall clock |
-| a device's RFC3339 `Z` | true UTC |
+---
 
-Measured, not inferred: a device reporting `17:00:00Z` and the server default
-firing at the same moment landed **an hour apart** in `access_logs.occurred_at`.
-So a single site's audit trail was internally inconsistent, and could order
-events wrongly, depending on whether the terminal had a working clock. That is
-the evidence a customer uses to answer "was this door released at 14:05".
+#### SEC-02 — The site provisioning key is a company-wide data credential
+**Subsystem** Security · **Status** OPEN
 
-Three places had already been written around this locally — account lockout,
-session expiry, and `session_expires_at` all compute a remaining duration in SQL
-rather than compare a stored timestamp to `time.Now()`. Correct in isolation, but
-three escapes from one global defect, and every other timestamp still carried it.
+**Root cause.** `AuthMiddleware` sets `company_id` from the authenticated site,
+and the handlers behind it were written before an operator identity existed — so
+they scope by company because that was the only scope available. The result is
+that a key installed at a door reads the whole company's roster (including the
+credential column), its audit trail and its fleet, and writes its firmware
+catalogue.
 
-**Fixed** by migration `010_timestamptz.sql`, which converts all 61 columns to
-`TIMESTAMPTZ`, plus pinning the connection pool's session time zone to UTC so the
-wire format stays `Z`-suffixed regardless of where the database sits.
+**Remediation.** Narrow the site key to provisioning. Roster, event and fleet
+reads move to operator sessions; the firmware catalogue moves to `ADMIN` console
+routes. The legacy `/api/v1/members` surface stays for deployed tooling but is
+scoped and marked deprecated.
 
-Pinning UTC alone was measured to make reads and writes *through the API pool*
-correct, and was deliberately **not** treated as sufficient: it does nothing for
-existing rows, protects only that one pool (psql, restores, BI connections and
-`migrate.sh` are all unpinned), and leaves the stored value ambiguous forever.
+**Migration/compatibility.** This one has real breakage risk for anything using
+the site key as an integration credential. Handled by keeping the legacy routes
+working, narrowed to the authenticated site rather than the whole company, and
+documenting the replacement.
 
-Covered by `TestSchemaHasNoNaiveTimestamps` (a regression guard against any
-future migration reintroducing a naive column), `TestPoolPinsUTC`,
-`TestWritePathsAgreeOnTheSameInstant`, `TestStoredTimestampsMatchTheInstantTheyClaim`, `TestChangesSinceHonoursAnOffset`,
-`TestConsoleTimestampsSerialiseAsUTCInstants`, and two migration tests that build
-a pre-010 schema, populate it, convert it and check the arithmetic.
+---
 
-**Carried forward to the final review:** the conversion is not automatically
-reversible and assumes the database server's zone has not changed since the data
-was written. Documented in `deploy/README.md` with an explicit
-`accesslink.legacy_timezone` override, and the migration raises a `WARNING`
-naming the zone it assumed whenever it converts a populated database. Worth
-re-checking against whatever data the staging deployment actually holds before
-that migration is applied to it.
+#### SEC-03 — No secure boot, no flash encryption
+**Subsystem** Hardware · **Status** OPEN
 
-### MR-003 — Terminals could not be joined to their site — **Major**
+**Root cause.** Never configured. `platformio.ini` sets neither, so the device
+credential and the local member table sit in readable NVS on a part that can be
+dumped over its own UART.
 
-*Found: 2026-08-14, while building the frontend data layer. Fixed the same day.*
+**Remediation.** Build configuration for flash encryption and secure boot v2, and
+a manufacturing procedure for the fuse burn. Verification requires hardware.
 
-A terminal carried the internal `site_id` (a row id) and `site_name`;
-`/console/sites` keys its entries by `public_id`. A browser holding both had
-nothing to match them on but the name — which is editable and not unique, so
-scoping a terminal list to the selected site, or linking a terminal to the site
-it stands at, would have been wrong exactly when two sites were named alike.
+**Migration/compatibility.** One-way per device. Cannot be applied to already-
+deployed units without reflashing them.
 
-Fixed by adding `site_public_id` to the inventory projection. Additive: the
-internal `site_id` is part of a contract terminals and existing tooling already
-speak, so it stays. Covered by `TestConsoleTerminalsCarryAJoinableSiteID`, which
-asserts the list and the detail agree and that the old field survived.
+---
 
-### MR-001 — Terminal detail and configuration ignored site grants — **Blocker**
+#### FW-01 — 64-person ceiling per terminal, failing silently
+**Subsystem** Firmware · **Status** OPEN
 
-*Found: 2026-08-14, while preparing to expose terminal operations in the
-console. Fixed the same day.*
+**Root cause.** Two independent decisions that compound. `kMaxMembers = 64` sizes
+the on-device table, and the server fans the entire **company** roster to every
+terminal regardless of site (SEC-04). Person 65 fails `applyPersonUpsert` as
+retryable, exhausts ten attempts and parks `FAILED`, and nothing surfaces it.
 
-`GET /console/terminals` was narrowed to the caller's site grants, but
-`GET /console/terminals/{serial}` and
-`PUT /console/terminals/{serial}/application-mode` were scoped to the company
-only. A MANAGER or VIEWER granted one site could not *see* another site's
-terminals in the list, and could still read one — and repoint what application it
-runs — by naming its serial directly. Serial numbers are printed on the hardware,
-so possession of one was never a control.
+**Remediation.** Both halves. Scope the roster to what a terminal actually needs
+(SEC-04), then establish a real capacity model bounded by the sensor, NVS and RAM
+rather than a constant, with the limit reported to operators and an alarm when it
+is approached.
 
-`GET /console/terminals/summary` additionally reported company-wide counts to a
-scoped operator, disclosing the size of a fleet they had deliberately not been
-granted, and would have rendered as an obviously-wrong figure above a narrowed
-list.
+**Migration/compatibility.** The on-device record layout is versioned already
+(`kMemberSchemaVersion`, with a v1 migration path), so growing the table follows
+the established pattern.
 
-Fixed by resolving the terminal's own site and applying the existing grant rule
-to it (`middleware.RequireTerminalGrant`), with the `404`/`403` split matching
-`RequireSiteGrant` so the API still never confirms that a serial is registered to
-another tenant. The grant rule itself is now a single function both gates call.
-The summary and the list are narrowed in SQL by the same scope.
+---
 
-Covered by `TestConsoleTerminalGrantEnforcement`.
+#### FW-02 — No OTA
+**Subsystem** Firmware · **Status** OPEN
+
+**Root cause.** Never built. The firmware catalogue was explicitly scoped as
+inventory only in Sprint 6 and nothing has changed since.
+
+**Remediation.** Signed OTA over the existing TLS transport, dual-partition with
+rollback, staged by release channel. The catalogue and its `is_current` target
+already exist to drive it.
+
+**Migration/compatibility.** Deployed units cannot receive an OTA that teaches
+them OTA. The first fleet needs one physical flash; everything after is remote.
+This has to be stated in the sales and installation documentation.
+
+---
+
+#### FW-03 — Fingerprints are terminal-local, non-portable, unbacked
+**Subsystem** Credentials · **Status** OPEN
+
+**Root cause.** Templates live in the sensor. The firmware uploads a locator
+(`terminal:<id>:slot:<n>`) and explicitly ignores `fingerprint_template` on the
+way down. A person enrolled at one terminal is a member row with no finger bound
+at every other terminal.
+
+**Remediation.** Server-mediated, **server-opaque** template distribution:
+sealed on the enrolling terminal, stored as ciphertext the server cannot read,
+distributed only to terminals where the person has permission. Raw templates
+never reach the cloud in readable form.
+
+**Migration/compatibility.** New credential entity and a new job type. Older
+firmware acknowledges the unknown job type and continues on the existing
+single-terminal behaviour, so the fleet is not stranded.
+
+---
+
+#### APP-01 — No application business logic
+**Subsystem** Applications · **Status** OPEN
+
+**Root cause.** The capability model was built in advance of the capabilities, on
+the reasoning that configuration should precede behaviour. It did — by a whole
+product. `company_applications` and `devices.application_mode` are read only by
+the console.
+
+**Remediation.** An application framework over real platform primitives, then one
+capability implemented end to end. Every capability not implemented stays
+honestly marked, and is not offered for sale.
+
+---
+
+#### APP-02 — No permission engine, schedules or event model
+**Subsystem** Access control · **Status** OPEN
+
+**Root cause.** `permissions` and `doors` were created by migration 002 with the
+note that the engine "lands in a later sprint". It did not. Zero lines of Go read
+either table.
+
+**Remediation.** Build the engine as a platform primitive: scope, level, day
+mask, time window, validity period — evaluated on the server and enforced on the
+device.
+
+---
+
+#### LEG-01 — No biometric data-protection posture
+**Subsystem** Documentation / compliance · **Status** OPEN
+
+**Root cause.** Never scoped. The platform processes special-category personal
+data with no consent record, no retention policy, no erasure path (soft delete
+retains the row indefinitely, `access_logs` is explicitly immutable), and no
+documentation of where template data lives.
+
+**Remediation.** The technical primitives — consent capture, retention windows
+with a purge task, a real erasure path, and a written data-flow statement. The
+legal instruments themselves are outside what can be built here.
+
+---
+
+### CRITICAL
+
+#### SEC-04 — Person changes fan out company-wide
+**Subsystem** Synchronization · **Status** OPEN
+
+**Root cause.** `enqueuePersonChangeTx` and `enqueueBootstrapJobs` join
+`people` to `devices` through `sites.company_id`. Written before sites mattered
+for people, and never revisited.
+
+**Remediation.** Scope the fan-out to the terminal's site, then to the permission
+set once APP-02 exists.
+
+---
+
+#### FW-04 — Firmware never heartbeats
+**Subsystem** Firmware · **Status** OPEN
+
+**Root cause.** The network task calls four endpoints; heartbeat is not one of
+them. `MarkDevicesOffline` requires `last_heartbeat_at IS NOT NULL`, so it never
+matches, and every registered terminal reads `ONLINE` permanently.
+
+**Remediation.** Heartbeat from the network task's probe cycle. The server side is
+complete and tested.
+
+---
+
+#### FW-05 — Firmware never self-registers
+**Subsystem** Firmware · **Status** OPEN
+
+**Root cause.** Provisioning was designed as an operator action and never moved
+into the device. The firmware has no `X-API-Key` path at all.
+
+**Remediation.** Firmware-side registration holding the site key transiently, or a
+claim-code flow that never puts the site key on a terminal. The second is
+preferable and is what the design should aim at.
+
+---
+
+#### SYN-01 — Table-full is a silent permanent failure
+**Subsystem** Synchronization · **Status** OPEN
+
+**Root cause.** `kRetryable` is the correct classification — a delete may free a
+row — but nothing distinguishes "retry, this may clear" from "this will never
+clear", and no failure count reaches an operator.
+
+**Remediation.** Surface per-terminal apply failures and backlog depth, alarm on
+them, and provide an operator-reachable requeue.
+
+---
+
+#### OPS-02 — The console has no deployment configuration
+**Subsystem** Deployment · **Status** OPEN
+
+**Root cause.** `render.yaml` was written for the API before the console existed.
+
+**Remediation.** Static site in the blueprint, an nginx site for the VPS target,
+a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
+
+---
+
+### MAJOR
+
+| ID | Finding | Root cause | Remediation | Status |
+|---|---|---|---|---|
+| SEC-05 | Legacy site-key + serial device auth still accepted | Kept for firmware predating per-device keys | Remove once FW-05 lands; gate behind an explicit opt-in until then | OPEN |
+| SEC-06 | Registration rotates credentials without limit | Rate limiting lives only in the VPS nginx config | Application-level limiter plus repeat-registration alerting | OPEN |
+| SEC-07 | No operator action audit log | Never built; sessions are logged, mutations are not | Append-only `audit_events`, written in the mutation's transaction | OPEN |
+| SEC-08 | Access logs unreachable from an operator session | The only log route predates the console | Grant-scoped `GET /console/events` over the typed event model | OPEN |
+| SEC-09 | Rate limiting in-process and credential-only | Written for a single-instance deployment | Shared store; extend to enumeration endpoints | OPEN |
+| SEC-10 | No operator password reset | Requires transactional email the platform lacks | Single-use short-lived reset tokens | OPEN |
+| PPL-01 | No operator API for biometric enrolment | Enrolment endpoints are device/site-key authenticated | Console enrolment lifecycle over the credentials entity | OPEN |
+| PPL-02 | No invitation flow, no forced first change | `password_changed_at` exists and is unread | Single-use invitations, `must_change_password` policy | OPEN |
+| GP-02 | `person_type` is a fixed four-value taxonomy | Legacy of the single-purpose product | De-taxonomise; per-company vocabulary | OPEN |
+| GP-03 | Capability codes are a closed SQL CHECK | Modelled as an enum before it was configuration | Promote capabilities to rows | OPEN |
+| APP-03 | Terminals are never told their application mode | Device protocol deliberately untouched in Sprint 9 | Additive optional field in the settings payload | OPEN |
+| APP-04 | No generic event model | `access_logs` predates every non-door capability | Typed `events` table: type, direction, subject, terminal, application | OPEN |
+| FW-06 | Pinned root CA does not match documented production target | Bundle generated for Render; nginx documents Let's Encrypt | Pin both root sets; the bundle format already supports it | OPEN |
+| FW-07 | Revocation has no firmware-side effect | 401/403 correctly treated as retryable for uploads, but no degraded state exists | Parse `offline_grace_minutes`; defined degraded policy on sustained 403 | OPEN |
+| FW-08 | Two of four exposed settings are inert | Console schema written ahead of firmware support | Implement both, or remove them from the console | OPEN |
+| FW-09 | Field truncation silently excludes people | `copyExact` correctly refuses rather than truncating, but nothing validates upstream | Server-side length validation with a clear error; surface apply failures | OPEN |
+| SYN-02 | Access-log queue is lossy | RAM-only ring, drops oldest on overflow | Persist to flash; upload a gap marker when entries are dropped | OPEN |
+| SYN-03 | Delivery failures consume the attempt budget | `AckJobFailed` cannot distinguish apply-failure from delivery-failure | Separate the two counters | OPEN |
+| SYN-04 | No sync visibility in the console | Terminal projection predates the sync engine's operational needs | Backlog and failure counts; console-authenticated resync | OPEN |
+| FE-01 | No accessibility, browser or device verification | All 349 tests are jsdom | axe pass, manual screen-reader pass, device matrix, hardware pass | OPEN |
+| OPS-03 | No CI of any kind | Never set up | Pipeline gating all three suites plus security scanning | OPEN |
+| DOC-01 | Documentation drift | README predates the rename and the console; three limitation lists disagree with the code | Rewrite and reconcile | OPEN |
+| DOC-02 | No customer-facing documentation | Never written | Install guide, operator manual, onboarding runbook | OPEN |
+
+---
+
+### MINOR
+
+| ID | Finding | Remediation | Status |
+|---|---|---|---|
+| SEC-11 | Metrics token compared with `==` | `subtle.ConstantTimeCompare` | OPEN |
+| SEC-12 | `/metrics` open when `METRICS_TOKEN` unset | Fail closed | OPEN |
+| SEC-13 | CSRF token derived, stable for session life | Accept as designed; revisit if bodies are ever logged | OPEN |
+| SEC-14 | `SameSite=Lax` assumes a shared registrable domain | Document as a deployment constraint | OPEN |
+| SEC-15 | Render database `ipAllowList` is `0.0.0.0/0` | Narrow; automate rather than rely on a comment | OPEN |
+| OPS-04 | Render free tier sleeps and expires | Paid plan or VPS before customer traffic | OPEN |
+| OPS-05 | Backups are a documented manual command | Scheduled, off-host, restore rehearsed | OPEN |
+| OPS-06 | `access_logs` has no retention policy | Configurable retention with a purge task | OPEN |
+| GP-04 | Two unvalidated open JSON settings objects | One declared-schema mechanism serving both | OPEN |
+| GP-05 | No capability dependency model | Model prerequisites when two capabilities first relate | OPEN |
+| GP-06 | Per-application settings unvalidated | Folds into GP-04 | OPEN |
+| PPL-03 | People API omits email, phone, validity window | Expose all four; enforce validity in the permission engine | OPEN |
+| PPL-04 | `category` can be replaced but never cleared | Pointer field, as `active` already uses | OPEN |
+| PPL-05 | People list has no filters beyond free text | Server-side filters | OPEN |
+| PPL-06 | Site grants persist through promotion | Clear on promotion, or surface explicitly | OPEN |
+| CON-01 | No API to update company details | Folds into GP-01 | OPEN |
+| CON-02 | Terminal list unpaginated | `limit`/`offset`/`q`, matching people | OPEN |
+| CON-03 | Site reads omit `api_key_prefix` | One line in the projection | OPEN |
+| CON-04 | No error boundary, no CSP | Route-level boundary; CSP with OPS-02 | OPEN |
+| SYN-05 | Bootstrap convergence takes ~13 poll cycles | Poll faster while a backlog exists | OPEN |
+| SYN-06 | New device seeded with people but not settings | Enqueue the settings snapshot in the registration transaction | OPEN |
+| HW-01 | No tamper detection | Tamper input plus an event | OPEN |
+| HW-02 | No REX, door sensor, forced/held-open, fire interlock | Scope against the target market | OPEN |
+| HW-03 | Single credential factor, modelled as a column | Credentials table | OPEN |
+| DOC-04 | Root CA bundle is gitignored | Commit it, or record its fingerprint | OPEN |
+
+---
+
+### NICE-TO-HAVE
+
+| ID | Finding | Remediation | Status |
+|---|---|---|---|
+| CON-05 | No internationalisation | Extract strings behind a lookup | OPEN |
+| SYN-07 | `EnqueueSettingsJob` is dead code | Remove, or use it for SYN-06 | OPEN |
+| DOC-03 | `docs/sync-protocol.md` has uncommitted changes | Commit it | OPEN |
+
+---
+
+## Application status
+
+Restated here because it is the question a buyer actually asks, and because the
+answer must not drift from the code.
+
+| Application | Status | May be sold? |
+|---|---|---|
+| ACCESS_CONTROL | PARTIAL | No — not until APP-02 governs the decision |
+| REGISTRATION | PARTIAL | No — not until PPL-01 and FW-03 |
+| ATTENDANCE | CONFIGURATION ONLY | No |
+| CHECK_IN | CONFIGURATION ONLY | No |
+| VERIFICATION | CONFIGURATION ONLY | No |
+| TIME_TRACKING | CONFIGURATION ONLY | No |
+| VISITOR_MANAGEMENT | CONFIGURATION ONLY | No |
+
+A capability is not marked `IMPLEMENTED` because its configuration exists, its
+terminal assignment works, or its navigation entry renders. It is marked
+implemented when a person can be affected by it end to end and an operator can
+see that they were.
+
+---
+
+## Verification baseline
+
+Measured at the start of remediation, so any regression is visible.
+
+| Suite | Count | Result |
+|---|---|---|
+| Go integration (real PostgreSQL) | 144 | Pass, 248s |
+| Frontend (vitest/jsdom + MSW) | 349 | Pass, 20s |
+| Firmware native (22 suites) | 550 | Pass, 137s |
+| **Total** | **1043** | **Pass** |
+
+No CI existed at the baseline, so this is the first run in which all three were
+executed together.
+
+---
+
+## What has not been verified, and will be claimed only when it is
+
+- **Real hardware.** Nothing in this remediation has been flashed to or exercised
+  on a physical ESP32.
+- **Real browser.** Every frontend test is jsdom.
+- **Production deployment.** Nothing has been deployed.
+- **Penetration testing.** No external security assessment has been performed.
+- **Compliance.** No legal review of the biometric processing posture.
+
+These are release gates, not caveats. They are listed in full at the end of the
+audit report.
