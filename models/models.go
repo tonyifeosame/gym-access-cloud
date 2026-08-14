@@ -285,10 +285,20 @@ type DeviceHeartbeatRequest struct {
 
 // DeviceInventory is a device as the dashboard sees it, including whether it is
 // behind the current build for its release channel.
+//
+// TWO SITE IDENTIFIERS, AND THE SECOND IS THE USEFUL ONE. SiteID is the internal
+// row id and predates the console; SitePublicID is the same site's public_id,
+// which is what /console/sites returns as its `id`. Without it a browser holding
+// a terminal and a site had nothing to match them on but site_name -- names are
+// editable and not unique, so scoping a terminal list to the selected site, or
+// linking a terminal to the site it stands at, was not something the console
+// could do correctly. Added rather than swapped: the internal id is part of a
+// contract terminals and existing tooling already speak.
 type DeviceInventory struct {
 	ID                     int64      `json:"id"`
 	PublicID               string     `json:"public_id"`
 	SiteID                 int64      `json:"site_id"`
+	SitePublicID           string     `json:"site_public_id"`
 	SiteName               string     `json:"site_name"`
 	SerialNumber           string     `json:"serial_number"`
 	DeviceName             string     `json:"device_name"`

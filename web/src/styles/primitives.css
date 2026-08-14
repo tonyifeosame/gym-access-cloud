@@ -1,0 +1,697 @@
+/*
+ * Shared furniture: tables, forms, dialogs, notifications, badges, paging.
+ *
+ * Kept apart from base.css, which dresses the shell and the login page. These
+ * are the pieces every resource screen is assembled from, and the layout rules
+ * live beside the component they serve rather than in one distant responsive
+ * block — so a change to a component cannot leave its small-screen behaviour
+ * behind.
+ *
+ * BREAKPOINTS. Two, and each marks a real change rather than a device name:
+ *
+ *   900px   the side navigation stops fitting beside the content
+ *   680px   a table stops fitting at all, and rows become cards
+ *
+ * This console is used standing in front of a door with a phone, so the second
+ * one is a requirement rather than a nicety.
+ */
+
+/* Available to screen readers, absent from the page. Behind required-field
+ * markers, live-region labels, and icon-only buttons. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A visible focus ring on everything interactive. Stated once here because
+ * resets remove the browser default often enough that assuming it is present
+ * is how keyboard users end up unable to see where they are. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* --- page ---------------------------------------------------------------- */
+
+.page__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.page__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.page__breadcrumb {
+  margin-bottom: var(--space-2);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.page__breadcrumb a {
+  color: inherit;
+}
+
+/* --- buttons ------------------------------------------------------------- */
+
+.button--danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--text-inverse);
+}
+
+.button--danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- table --------------------------------------------------------------- */
+
+.table-wrap {
+  /* The table scrolls inside its own box rather than pushing the page
+   * sideways; a horizontally scrolling document breaks every other screen. */
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+/* Names the table for assistive technology. The page heading already says it
+ * visually, so showing it again would be noise. */
+.table__caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.table th,
+.table td {
+  padding: var(--space-3) var(--space-4);
+  text-align: start;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.table thead th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child th,
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table__cell--end {
+  text-align: end;
+}
+
+.table__row--clickable {
+  cursor: pointer;
+}
+
+.table__row--clickable:hover {
+  background: var(--surface-raised);
+}
+
+.table__row--clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* --- forms --------------------------------------------------------------- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+
+.field__hint {
+  margin: 0 0 var(--space-1);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.field__hint--selection {
+  margin-top: var(--space-1);
+  margin-bottom: 0;
+}
+
+/* Reserved rather than conditional: a live region inserted at the same moment
+ * as its text is not reliably announced, so the element is always present and
+ * merely empty. */
+.field__error {
+  margin: var(--space-1) 0 0;
+  min-height: 1.25em;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.field--invalid .field__input {
+  border-color: var(--danger);
+}
+
+.field__required {
+  color: var(--danger);
+}
+
+.field__input--mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.field__select {
+  appearance: auto;
+}
+
+textarea.field__input {
+  resize: vertical;
+  min-height: 6em;
+}
+
+.fieldset {
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.fieldset__legend {
+  padding-inline: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fieldset__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.checkbox__input {
+  margin-top: 3px;
+  /* A target that can actually be hit on a phone. */
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.checkbox__label {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.checkbox__description {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.form__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.form__error {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.form__error p {
+  margin: 0;
+}
+
+/* --- dialog -------------------------------------------------------------- */
+
+.dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgba(16, 24, 40, 0.5);
+  overflow-y: auto;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100vh - var(--space-6));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.24);
+}
+
+.dialog--wide {
+  max-width: 760px;
+}
+
+.dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) 0;
+}
+
+.dialog__title {
+  margin: 0;
+  font-size: 17px;
+}
+
+.dialog--danger .dialog__title {
+  color: var(--danger);
+}
+
+.dialog__close {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.dialog__description {
+  margin: var(--space-2) 0 0;
+  padding-inline: var(--space-5);
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.dialog__body {
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  flex-wrap: wrap;
+}
+
+.confirm__detail {
+  margin: 0 0 var(--space-3);
+  font-size: 14px;
+}
+
+.confirm__error {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+/* --- notifications ------------------------------------------------------- */
+
+.notifications {
+  position: fixed;
+  z-index: 200;
+  bottom: var(--space-4);
+  inset-inline-end: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(380px, calc(100vw - var(--space-5)));
+  pointer-events: none;
+}
+
+.notifications > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.notification {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
+/* A coloured edge AND the text; colour never carries the meaning alone. */
+.notification--success {
+  border-inline-start: 4px solid var(--success);
+}
+
+.notification--error {
+  border-inline-start: 4px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.notification--info {
+  border-inline-start: 4px solid var(--accent);
+}
+
+.notification__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.notification__message {
+  margin: 0;
+}
+
+.notification__dismiss {
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+/* --- badges -------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge--positive {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.badge--warning {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.badge--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.badge--info {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.badge__note {
+  font-size: 12px;
+  color: var(--warning);
+}
+
+/* --- timestamps, search, pagination -------------------------------------- */
+
+.timestamp {
+  white-space: nowrap;
+}
+
+.timestamp--empty {
+  color: var(--text-muted);
+}
+
+.search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 380px;
+  flex: 1 1 240px;
+}
+
+.search__control {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.search__control .field__input {
+  flex: 1;
+}
+
+.spinner--inline {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+.refreshing {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: var(--space-2);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding-top: var(--space-3);
+  font-size: 14px;
+}
+
+.pagination__status {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.pagination__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.pagination__page {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+
+.restricted-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.notice--warning {
+  border-color: var(--warning);
+}
+
+/* --- responsive ---------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  /* The side navigation moves above the content and lies flat; below this
+   * width it would spend a third of the viewport on six links. */
+  .shell__body {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sidenav {
+    flex: none;
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .sidenav__section {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .sidenav__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .sidenav__title {
+    padding-inline: 0;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    row-gap: var(--space-2);
+  }
+
+  .topbar__context {
+    margin-inline-start: 0;
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .topbar__account {
+    margin-inline-start: auto;
+  }
+}
+
+@media (max-width: 680px) {
+  /* A table cannot shrink below its columns, so each row becomes a card and
+   * every cell carries its column name. Done with data-label and CSS rather
+   * than a second DOM, so tests and assistive technology see one tree. */
+  .table,
+  .table tbody,
+  .table tr,
+  .table th,
+  .table td {
+    display: block;
+  }
+
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .table__row {
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table th,
+  .table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-4);
+    padding: var(--space-1) 0;
+    border-bottom: 0;
+    text-align: start;
+  }
+
+  .table td::before,
+  .table tbody th::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  /* Detail that does not earn space on a phone. */
+  .table__cell--secondary {
+    display: none;
+  }
+
+  .table__cell--end {
+    text-align: end;
+  }
+
+  .dialog {
+    max-width: none;
+  }
+
+  .notifications {
+    inset-inline: var(--space-3);
+    width: auto;
+  }
+
+  .pagination {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pagination__controls {
+    justify-content: space-between;
+  }
+}

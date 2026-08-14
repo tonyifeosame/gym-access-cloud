@@ -728,6 +728,57 @@ func TestConsoleTerminalGrantEnforcement(t *testing.T) {
 	}
 }
 
+// TestConsoleTerminalsCarryAJoinableSiteID covers the identifier a console
+// needs to relate the two resources it shows side by side.
+//
+// A terminal used to carry only the internal site row id and the site's NAME.
+// /console/sites keys its entries by public_id, so a browser holding both had
+// nothing to match them on except the name -- which is editable and not unique,
+// so scoping terminals to the selected site would have been wrong precisely
+// when two sites were named alike.
+func TestConsoleTerminalsCarryAJoinableSiteID(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	mustCreateDevice(t, "Site A", "JOIN-1")
+
+	_, token, _ := consoleOperatorSession(t, env.router, one, "join@example.com", models.RoleOwner)
+
+	_, sitesBody := consoleCall(t, env.router, "GET", "/api/v1/console/sites", "", token, "")
+	siteIDs := map[string]string{}
+	for _, entry := range listOf(t, sitesBody, "sites") {
+		site := entry.(map[string]any)
+		siteIDs[site["name"].(string)] = site["id"].(string)
+	}
+	wantSiteID := siteIDs["Site A"]
+	if wantSiteID == "" {
+		t.Fatal("Site A has no public id in the sites listing")
+	}
+
+	// The list.
+	_, body := consoleCall(t, env.router, "GET", "/api/v1/console/terminals", "", token, "")
+	terminals := listOf(t, body, "terminals")
+	if len(terminals) != 1 {
+		t.Fatalf("expected one terminal, got %v", terminals)
+	}
+	listed := terminals[0].(map[string]any)
+	if got := listed["site_public_id"]; got != wantSiteID {
+		t.Errorf("terminal site_public_id = %v, want %v (the id /console/sites uses)", got, wantSiteID)
+	}
+
+	// And the detail, which must agree with the row it was opened from.
+	_, detail := consoleCall(t, env.router, "GET", "/api/v1/console/terminals/JOIN-1", "", token, "")
+	if got := detail["site_public_id"]; got != wantSiteID {
+		t.Errorf("terminal detail site_public_id = %v, want %v", got, wantSiteID)
+	}
+
+	// The internal id is still present -- this was additive, and terminals and
+	// existing tooling speak that contract.
+	if _, present := listed["site_id"]; !present {
+		t.Error("site_id disappeared from the inventory projection")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------

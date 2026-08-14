@@ -20,7 +20,8 @@ import (
 // deviceInventoryColumns is the shared projection for device inventory reads,
 // including the outdated determination.
 const deviceInventoryColumns = `
-	d.id, d.public_id, d.site_id, s.site_name, d.serial_number, d.device_name,
+	d.id, d.public_id, d.site_id, s.public_id AS site_public_id,
+	s.site_name, d.serial_number, d.device_name,
 	d.device_type, d.status, d.active, d.release_channel,
 	COALESCE(d.firmware_version, ''), COALESCE(d.hardware_revision, ''),
 	COALESCE(d.build_number, ''), d.boot_count,
@@ -83,7 +84,8 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 	for rows.Next() {
 		var d models.DeviceInventory
 		err := rows.Scan(
-			&d.ID, &d.PublicID, &d.SiteID, &d.SiteName, &d.SerialNumber, &d.DeviceName,
+			&d.ID, &d.PublicID, &d.SiteID, &d.SitePublicID,
+			&d.SiteName, &d.SerialNumber, &d.DeviceName,
 			&d.DeviceType, &d.Status, &d.Active, &d.ReleaseChannel,
 			&d.FirmwareVersion, &d.HardwareRevision, &d.BuildNumber, &d.BootCount,
 			&d.LastSeenAt, &d.LastSyncAt, &d.LastHeartbeatAt,

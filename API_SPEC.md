@@ -652,6 +652,7 @@ the current build for their release channel.
       "id": 1,
       "public_id": "185e129c-071b-4429-a2ee-8f364adc9b38",
       "site_id": 1,
+      "site_public_id": "6adb7321-5581-4287-96b4-dbe1dc922685",
       "site_name": "Main Site",
       "serial_number": "AT-0001",
       "device_name": "Front Door",
@@ -1390,7 +1391,8 @@ plus the application assignment:
 ```json
 {
   "public_id": "…", "serial_number": "TERM-1", "device_name": "Front Desk",
-  "site_id": 4, "site_name": "Lagos Depot", "device_type": "TERMINAL",
+  "site_id": 4, "site_public_id": "6adb7321-…", "site_name": "Lagos Depot",
+  "device_type": "TERMINAL",
   "status": "ONLINE", "active": true, "release_channel": "STABLE",
   "firmware_version": "1.2.0", "current_firmware_version": "1.3.0",
   "firmware_outdated": true, "hardware_revision": "rev-c", "build_number": "456",

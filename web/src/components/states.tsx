@@ -13,6 +13,80 @@ export function LoadingState({ label = 'Loading…' }: { label?: string }) {
   )
 }
 
+/**
+ * A page heading.
+ *
+ * Every screen gets exactly one `<h1>`, which is what a screen reader's document
+ * outline is built from and how "skip to content" lands somewhere useful.
+ * `actions` sits with the heading rather than floating above the content, so the
+ * tab order runs title → actions → content in the order they read.
+ */
+export function PageHeader({
+  title,
+  lead,
+  actions,
+  breadcrumb,
+}: {
+  title: string
+  lead?: ReactNode
+  actions?: ReactNode
+  breadcrumb?: ReactNode
+}) {
+  return (
+    <header className="page__header">
+      {breadcrumb ? <div className="page__breadcrumb">{breadcrumb}</div> : null}
+      <div className="page__heading">
+        <div>
+          <h1>{title}</h1>
+          {lead ? <p className="page__lead">{lead}</p> : null}
+        </div>
+        {actions ? <div className="page__actions">{actions}</div> : null}
+      </div>
+    </header>
+  )
+}
+
+/**
+ * A note that is not a failure.
+ *
+ * For the states that are legitimate but need explaining — a capability that is
+ * switched off, a scope the API cannot narrow. Distinct from ErrorState on
+ * purpose: presenting a working state as an error teaches operators to ignore
+ * error styling.
+ */
+export function InfoNote({
+  title,
+  children,
+  tone = 'muted',
+}: {
+  title?: string
+  children: ReactNode
+  tone?: 'muted' | 'warning'
+}) {
+  return (
+    <div className={`notice${tone === 'warning' ? ' notice--warning' : ' notice--muted'}`}>
+      {title ? <h2 className="notice__title">{title}</h2> : null}
+      <div>{children}</div>
+    </div>
+  )
+}
+
+/**
+ * A quiet indicator for a refetch that is NOT blanking the page.
+ *
+ * Paired with keeping stale content on screen: the operator sees the previous
+ * answer plus "updating", rather than a spinner where their data used to be.
+ */
+export function RefreshingIndicator({ active }: { active: boolean }) {
+  if (!active) return null
+  return (
+    <span className="refreshing" role="status">
+      <span className="spinner spinner--inline" aria-hidden="true" />
+      <span className="visually-hidden">Updating</span>
+    </span>
+  )
+}
+
 export function EmptyState({
   title,
   description,

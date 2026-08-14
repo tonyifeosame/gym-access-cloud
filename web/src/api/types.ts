@@ -123,3 +123,250 @@ export interface SitesResponse {
   count: number
   sites: Site[]
 }
+
+/**
+ * A site's device configuration.
+ *
+ * `settings` is an OPEN JSON object, deliberately. The platform does not fix the
+ * key set: firmware gains options over time and a console that only understood a
+ * closed list would silently drop whatever it had not been taught. The console
+ * therefore offers a guided editor over the keys it recognises AND a raw editor
+ * over the whole object, and never discards a key it did not expect.
+ *
+ * `settings_version` increments on every write and is the value a terminal uses
+ * to discard a stale push it receives after a newer one.
+ */
+export interface SiteSettings {
+  settings: Record<string, unknown>
+  settings_version: number
+}
+
+/**
+ * PUT /console/sites/:id/settings replaces the object WHOLESALE. Keys omitted
+ * are removed, not merged. Any editor must therefore send the complete object,
+ * which is why the guided form is built on top of the fetched settings rather
+ * than on its own idea of the shape.
+ */
+export type SiteSettingsRequest = Record<string, unknown>
+
+// ---------------------------------------------------------------------------
+// Terminals
+// ---------------------------------------------------------------------------
+
+/**
+ * Reported terminal states. `status` is a string on the wire and an unknown
+ * value must still render -- firmware may report a state this build predates.
+ */
+export type KnownTerminalStatus =
+  | 'ONLINE'
+  | 'OFFLINE'
+  | 'UPDATING'
+  | 'ERROR'
+  | 'DISABLED'
+  | 'PROVISIONING'
+
+export type TerminalStatus = KnownTerminalStatus | (string & {})
+
+/**
+ * A terminal as the console lists it.
+ *
+ * NO CREDENTIAL MATERIAL. Not the device key, not its hash, not the site key --
+ * the projection does not select them, so there is nothing here to leak.
+ *
+ * TWO SITE IDENTIFIERS. `site_id` is the internal row id and predates the
+ * console; `site_public_id` is what `/console/sites` calls `id`, and is the only
+ * one a browser can join on. Match on the public id, never on `site_name` --
+ * names are editable and not unique.
+ */
+export interface Terminal {
+  id: number
+  public_id: string
+  site_id: number
+  site_public_id: string
+  site_name: string
+  serial_number: string
+  device_name: string
+  device_type: string
+  status: TerminalStatus
+  active: boolean
+  release_channel: string
+  firmware_version: string
+  hardware_revision?: string
+  build_number?: string
+  boot_count?: number
+  last_seen_at?: string
+  last_sync_at?: string
+  last_heartbeat_at?: string
+  current_firmware_version: string
+  firmware_outdated: boolean
+}
+
+/**
+ * One terminal in full.
+ *
+ * `application_mode` is what the terminal is ASSIGNED to do;
+ * `effective_applications` is what that RESOLVES TO right now. They diverge when
+ * the company disables a capability a terminal is pointed at: the assignment is
+ * retained rather than rewritten, and effective goes empty. Showing only one of
+ * the two would be misleading in exactly that case.
+ *
+ * The mode may be MULTI_PURPOSE, which is a device mode and never a company
+ * capability.
+ */
+export interface TerminalDetail extends Terminal {
+  application_mode: ApplicationCode | typeof MULTI_PURPOSE
+  effective_applications: ApplicationCode[]
+}
+
+export interface TerminalsResponse {
+  count: number
+  terminals: Terminal[]
+}
+
+/** Counts for the fleet, narrowed to the caller's granted sites. */
+export interface FleetSummary {
+  total: number
+  online: number
+  offline: number
+  updating: number
+  error: number
+  disabled: number
+  provisioning: number
+  firmware_outdated: number
+}
+
+export interface TerminalModeRequest {
+  application_mode: ApplicationCode | typeof MULTI_PURPOSE
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+/**
+ * Someone the platform knows about.
+ *
+ * `biometric_enrolled` IS THE ENTIRE BIOMETRIC SURFACE -- a boolean. The
+ * credential itself is an abstraction the backend owns: no template, no locator,
+ * no sensor or vendor detail crosses this boundary, and none may be introduced
+ * here. That is what lets the storage change without the console noticing, and
+ * it is enforced by a lint rule as well as by this type.
+ *
+ * `category` is free text and optional. It maps to a legacy column and carries
+ * no meaning the platform assigns -- a company doing visitor management has no
+ * "category" worth requiring, and demanding one would be the product assuming a
+ * workflow it has no business assuming.
+ */
+export interface Person {
+  id: string
+  external_id: string
+  full_name: string
+  category?: string
+  active: boolean
+  biometric_enrolled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * A page of people.
+ *
+ * `count` is the size of THIS page; `total` is the size of the whole match.
+ * Both are needed: "showing 50 of 1,284" needs the pair, and `has_more` is what
+ * says whether to offer a next page.
+ */
+export interface PeoplePage {
+  count: number
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
+  people: Person[]
+}
+
+export interface PeopleQuery {
+  /** Matches external id or full name, anywhere, case-insensitively. */
+  search?: string
+  limit?: number
+  offset?: number
+}
+
+/**
+ * Create or update a person.
+ *
+ * `active` is optional so that "not supplied" differs from `false`: on update an
+ * omitted field leaves the value alone, and sending a plain `false` by accident
+ * would deactivate someone whose name was merely being corrected.
+ *
+ * There is deliberately no credential field in either direction. Enrolment
+ * happens at a terminal; the console does not write credentials.
+ */
+export interface PersonRequest {
+  external_id?: string
+  full_name: string
+  category?: string
+  active?: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Operators
+// ---------------------------------------------------------------------------
+
+/**
+ * An operator account.
+ *
+ * `all_sites` again distinguishes "not scoped" from "no access": an empty
+ * `sites` array with this set means EVERY site in the company. OWNER and ADMIN
+ * always have it, and so does anyone holding no grants.
+ */
+export interface OperatorAccount {
+  id: string
+  email: string
+  full_name: string
+  role: Role
+  active: boolean
+  last_login_at?: string
+  sites?: SiteGrant[]
+  all_sites: boolean
+  created_at: string
+}
+
+export interface OperatorsResponse {
+  count: number
+  operators: OperatorAccount[]
+}
+
+export interface OperatorSitesResponse {
+  count: number
+  sites: SiteGrant[]
+  all_sites: boolean
+}
+
+export interface CreateOperatorRequest {
+  email: string
+  full_name: string
+  password: string
+  role: Role
+  site_ids?: string[]
+}
+
+/** Every field optional; only what is supplied is applied. */
+export interface UpdateOperatorRequest {
+  role?: Role
+  active?: boolean
+  password?: string
+}
+
+/** Replaces grants wholesale. An empty list means "not scoped" — every site. */
+export interface SiteGrantsRequest {
+  site_ids: string[]
+}
+
+// ---------------------------------------------------------------------------
+// Applications
+// ---------------------------------------------------------------------------
+
+export interface ApplicationRequest {
+  enabled?: boolean
+  settings?: Record<string, unknown>
+}

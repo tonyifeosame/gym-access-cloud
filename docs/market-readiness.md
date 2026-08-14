@@ -36,7 +36,47 @@ severity so the final pass has something to sort by:
 
 ## Open
 
-*Nothing open. Items are added here as they are found.*
+### MR-004 — Site settings have no schema, and the write is a full replacement — **Major**
+
+*Found: 2026-08-14, while building the frontend data layer for the site settings
+editor.*
+
+`settings` on a site is an open JSON object. The API validates only that it IS an
+object; it does not know the key set, the value types, or the ranges. Two
+consequences:
+
+- **A typo is accepted and reaches hardware.** `PUT` replaces the object
+  wholesale, so `{"unlock_duration_secnods": 5}` silently drops the real key and
+  queues a SETTINGS job carrying the mistake to every terminal at the site.
+- **Nothing bounds a value.** `unlock_duration_seconds` of 3600 is accepted, and
+  that is a door held open for an hour.
+
+The frontend mitigates this in 2.2 with a guided editor over the keys it
+recognises plus a raw editor that never discards an unrecognised key, but a
+console cannot be the only validation in front of a door. The authoritative
+schema belongs in the API.
+
+Classified Major rather than Blocker because the guided editor removes the
+realistic path to the typo; it stays open because the API still accepts one from
+any other client.
+
+### MR-005 — No API to create, edit or retire a site — **Major**
+
+*Found: 2026-08-14, while enumerating the console's endpoints against the plan.*
+
+Phase 2.2 calls for site creation and editing. The console API exposes
+`GET /console/sites`, `GET /console/sites/{id}` and the settings pair — there is
+no `POST`, `PUT` or `DELETE` for a site itself. A site is currently created only
+by direct database access, which is how `deploy/README.md` step 6 describes
+onboarding a customer.
+
+This is a genuine gap in customer onboarding, not merely a missing screen: a
+company cannot add its second location without an operator with database access.
+
+Needs an API decision before 2.2 can deliver site creation. Noted here rather
+than fixed inline, because it also raises where the site API key comes from on
+creation — and that key must never reach the browser, so "create a site" cannot
+simply return one.
 
 ---
 
@@ -96,6 +136,21 @@ was written. Documented in `deploy/README.md` with an explicit
 naming the zone it assumed whenever it converts a populated database. Worth
 re-checking against whatever data the staging deployment actually holds before
 that migration is applied to it.
+
+### MR-003 — Terminals could not be joined to their site — **Major**
+
+*Found: 2026-08-14, while building the frontend data layer. Fixed the same day.*
+
+A terminal carried the internal `site_id` (a row id) and `site_name`;
+`/console/sites` keys its entries by `public_id`. A browser holding both had
+nothing to match them on but the name — which is editable and not unique, so
+scoping a terminal list to the selected site, or linking a terminal to the site
+it stands at, would have been wrong exactly when two sites were named alike.
+
+Fixed by adding `site_public_id` to the inventory projection. Additive: the
+internal `site_id` is part of a contract terminals and existing tooling already
+speak, so it stays. Covered by `TestConsoleTerminalsCarryAJoinableSiteID`, which
+asserts the list and the detail agree and that the old field survived.
 
 ### MR-001 — Terminal detail and configuration ignored site grants — **Blocker**
 
