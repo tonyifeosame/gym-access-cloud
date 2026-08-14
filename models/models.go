@@ -192,6 +192,11 @@ var ErrDeviceSiteMismatch = errors.New("device serial is registered to another s
 // stopped, and be issued a working credential for it in the same call.
 var ErrDeviceDisabled = errors.New("device is administratively disabled")
 
+// ErrDeviceNotFound is returned when a serial number does not resolve within the
+// caller's company. Reported rather than 403 for the usual reason: the API must
+// not confirm that a serial exists in someone else's account.
+var ErrDeviceNotFound = errors.New("device not found")
+
 // Device represents a terminal installed at a site
 type Device struct {
 	ID           int64  `json:"id"`

@@ -38,16 +38,22 @@ import (
 // gets at login is exactly what it will get on the next reload, so there is no
 // second shape to keep in step.
 //
-// DELIBERATELY AN OBJECT, AND DELIBERATELY EXTENSIBLE. `applications` -- which
-// modules this company has enabled -- is not here yet and is what the dashboard
-// will eventually render its navigation from. Adding a field to a JSON object is
-// non-breaking; that is the whole reason this is not a bare array or a flat set
-// of top-level keys.
+// DELIBERATELY AN OBJECT, AND DELIBERATELY EXTENSIBLE. That is what let
+// `applications` be added here without breaking a client, and the same holds for
+// whatever comes next.
 type sessionResponse struct {
 	Operator operatorSummary    `json:"operator"`
 	Company  companySummary     `json:"company"`
 	Role     string             `json:"role"`
 	Sites    []models.SiteGrant `json:"sites"`
+
+	// Applications is what this company has enabled, and what the dashboard
+	// builds its navigation from. It is the answer to "what is this deployment
+	// for", and the platform has no opinion about it: an EMPTY array is a
+	// legitimate, common state, not an error and not a reason to fall back to a
+	// default set. A console that assumes a workflow when this is empty has
+	// reintroduced exactly the single-purpose product this model removed.
+	Applications []models.EnabledApplication `json:"applications"`
 
 	// AllSites distinguishes "granted no sites" from "unrestricted". An empty
 	// Sites array means the operator is not scoped to particular sites, which
@@ -85,10 +91,15 @@ type companySummary struct {
 
 // buildSessionResponse assembles the body login and /me share.
 func buildSessionResponse(identity *models.OperatorIdentity,
-	grants []models.SiteGrant) sessionResponse {
+	grants []models.SiteGrant, applications []models.EnabledApplication) sessionResponse {
 
+	// Empty arrays rather than null: a client should be able to iterate both
+	// unconditionally, which is the convention every list endpoint here follows.
 	if grants == nil {
 		grants = []models.SiteGrant{}
+	}
+	if applications == nil {
+		applications = []models.EnabledApplication{}
 	}
 
 	// OWNER and ADMIN reach every site in their company regardless of grants,
@@ -111,6 +122,7 @@ func buildSessionResponse(identity *models.OperatorIdentity,
 		},
 		Role:                    identity.Role,
 		Sites:                   grants,
+		Applications:            applications,
 		AllSites:                allSites,
 		CSRFToken:               identity.CSRFToken,
 		SessionExpiresAt:        time.Now().UTC().Add(time.Duration(identity.ExpiresInSeconds) * time.Second),
@@ -229,10 +241,8 @@ func OperatorLogin(c *gin.Context) {
 		return
 	}
 
-	grants, err := database.ListSiteGrants(identity.UserID)
-	if err != nil {
-		logError(c, "list operator site grants", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Authentication unavailable"})
+	grants, applications, ok := loadSessionContext(c, identity, "Authentication unavailable")
+	if !ok {
 		return
 	}
 
@@ -240,7 +250,32 @@ func OperatorLogin(c *gin.Context) {
 	log.Printf("request_id=%s auth=success operator=%s company=%s ip=%s",
 		middleware.RequestID(c), identity.UserPublicID, identity.CompanySlug, c.ClientIP())
 
-	c.JSON(http.StatusOK, buildSessionResponse(identity, grants))
+	c.JSON(http.StatusOK, buildSessionResponse(identity, grants, applications))
+}
+
+// loadSessionContext gathers what the session body needs beyond the identity:
+// the operator's site grants and the company's enabled capabilities.
+//
+// Shared so login and /me cannot answer differently. Reports false once it has
+// written an error response.
+func loadSessionContext(c *gin.Context, identity *models.OperatorIdentity,
+	failureMessage string) ([]models.SiteGrant, []models.EnabledApplication, bool) {
+
+	grants, err := database.ListSiteGrants(identity.UserID)
+	if err != nil {
+		logError(c, "list operator site grants", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failureMessage})
+		return nil, nil, false
+	}
+
+	applications, err := database.EnabledApplications(identity.CompanyID)
+	if err != nil {
+		logError(c, "list enabled applications", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failureMessage})
+		return nil, nil, false
+	}
+
+	return grants, applications, true
 }
 
 // OperatorMe handles GET /api/v1/auth/me
@@ -257,14 +292,12 @@ func OperatorMe(c *gin.Context) {
 		return
 	}
 
-	grants, err := database.ListSiteGrants(identity.UserID)
-	if err != nil {
-		logError(c, "list operator site grants", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve session"})
+	grants, applications, ok := loadSessionContext(c, identity, "Failed to retrieve session")
+	if !ok {
 		return
 	}
 
-	c.JSON(http.StatusOK, buildSessionResponse(identity, grants))
+	c.JSON(http.StatusOK, buildSessionResponse(identity, grants, applications))
 }
 
 // OperatorLogout handles POST /api/v1/auth/logout
