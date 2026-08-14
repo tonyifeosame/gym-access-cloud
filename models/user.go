@@ -67,6 +67,15 @@ var (
 	ErrInvalidRole      = errors.New("role must be one of OWNER, ADMIN, MANAGER, VIEWER")
 	ErrUserNotFound     = errors.New("operator not found")
 	ErrSiteNotFound     = errors.New("site not found in this company")
+
+	// ErrOperatorsExist reports that the system already has at least one live
+	// operator. Returned by the first-operator bootstrap, where it is a normal
+	// outcome rather than a failure: it is what makes the bootstrap incapable of
+	// overwriting an account that already exists.
+	ErrOperatorsExist = errors.New("an operator account already exists")
+
+	// ErrCompanyNotFound reports that a company slug did not resolve.
+	ErrCompanyNotFound = errors.New("company not found")
 )
 
 // AccountLockedError reports that an account is temporarily locked after

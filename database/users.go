@@ -164,6 +164,25 @@ func timingDummyHash() []byte {
 // A duplicate address surfaces as a unique violation for the caller to map to
 // 409; IsUniqueViolation reports it.
 func CreateUser(companyID int64, in models.NewUser) (*models.User, error) {
+	return createUser(DB, companyID, in)
+}
+
+// queryRower is whatever can run a query returning one row -- *sql.DB or
+// *sql.Tx. It exists for the same reason execer does: so a helper can be called
+// on its own or as part of a caller's transaction without knowing which. The
+// bootstrap path needs the insert to happen inside the transaction that holds
+// the advisory lock.
+type queryRower interface {
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+// createUser validates and inserts, against a connection or a transaction.
+//
+// Kept as one function so the bootstrap path cannot drift from the ordinary
+// one: the same address normalisation, the same password policy, the same role
+// check and the same hashing apply to the first OWNER as to every account
+// created afterwards.
+func createUser(q queryRower, companyID int64, in models.NewUser) (*models.User, error) {
 	email := NormalizeEmail(in.Email)
 	if err := ValidateEmail(email); err != nil {
 		return nil, err
@@ -190,7 +209,7 @@ func CreateUser(companyID int64, in models.NewUser) (*models.User, error) {
 		return nil, err
 	}
 
-	row := DB.QueryRow(`
+	row := q.QueryRow(`
 		INSERT INTO users (company_id, email, full_name, password_hash, role)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING `+userColumns,

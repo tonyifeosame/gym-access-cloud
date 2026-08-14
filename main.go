@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"access-terminal-cloud-api/bootstrap"
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/maintenance"
@@ -110,6 +111,19 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// Create the first operator, if this system has none and the environment
+	// says who it should be.
+	//
+	// Before the server listens, and fatal on error: a half-configured or
+	// invalid bootstrap is a deployment mistake, and starting anyway would leave
+	// a console nobody can sign in to while reporting itself healthy. It is only
+	// ever fatal in the case where the bootstrap would actually run -- on a
+	// system that already has an operator the variables are not read for their
+	// content at all, so a stale value cannot stop the API starting.
+	if _, err := bootstrap.EnsureFirstOperator(); err != nil {
+		log.Fatalf("Operator bootstrap: %v", err)
+	}
 
 	r := NewRouter()
 
