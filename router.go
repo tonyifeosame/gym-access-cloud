@@ -7,6 +7,7 @@ import (
 
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -125,6 +126,86 @@ func NewRouter() *gin.Engine {
 			session.POST("/logout", middleware.RequireCSRF(), handlers.OperatorLogout)
 			session.POST("/password", credentialLimit, middleware.RequireCSRF(),
 				handlers.OperatorChangePassword)
+		}
+	}
+
+	// Operator console, /api/v1/console/*.
+	//
+	// The dashboard's API. Session-authenticated like /api/v1/auth above, and
+	// like it, entirely separate from the site-key and device trees below --
+	// nothing here reads X-API-Key, and nothing here returns one.
+	//
+	// The chain on every route: a session, then CSRF on anything unsafe, then
+	// the minimum role, then a site grant where the path names a site. Routes
+	// are grouped by the role they require so that a new route cannot be added
+	// without landing inside one of those groups.
+	console := r.Group("/api/v1/console")
+	console.Use(middleware.OperatorAuthMiddleware())
+	{
+		// Reads: any authenticated operator in the company.
+		read := console.Group("")
+		read.Use(middleware.RequireRole(models.RoleViewer))
+		{
+			read.GET("/company", handlers.ConsoleGetCompany)
+			read.GET("/sites", handlers.ConsoleListSites)
+			read.GET("/applications", handlers.ConsoleListApplications)
+
+			read.GET("/terminals", handlers.ConsoleListTerminals)
+			read.GET("/terminals/summary", handlers.ConsoleTerminalSummary)
+			read.GET("/terminals/:serial", handlers.ConsoleGetTerminal)
+
+			read.GET("/people", handlers.ConsoleListPeople)
+			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
+
+			// Site-scoped reads. RequireSiteGrant resolves :site_id inside the
+			// operator's company and puts it in the context, so a site in
+			// another tenant is a 404 and one they are not scoped to is a 403.
+			read.GET("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleGetSite)
+			read.GET("/sites/:site_id/settings", middleware.RequireSiteGrant("site_id"),
+				handlers.GetSiteSettings)
+		}
+
+		// Day-to-day writes.
+		write := console.Group("")
+		write.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleManager))
+		{
+			write.POST("/people", handlers.ConsoleCreatePerson)
+			write.PUT("/people/:external_id", handlers.ConsoleUpdatePerson)
+			write.DELETE("/people/:external_id", handlers.ConsoleDeletePerson)
+
+			write.PUT("/terminals/:serial/application-mode", handlers.ConsoleSetTerminalMode)
+
+			// GetSiteSettings/UpdateSiteSettings are the SAME handlers the
+			// site-key API uses. Both read site_id from the context, which
+			// RequireSiteGrant sets to an authorized site exactly as the
+			// site-key middleware sets it to the credential's own site. The
+			// write also enqueues a SETTINGS sync job for every terminal at
+			// that site -- business logic worth reusing, not restating.
+			write.PUT("/sites/:site_id/settings", middleware.RequireSiteGrant("site_id"),
+				handlers.UpdateSiteSettings)
+		}
+
+		// Operator administration.
+		admin := console.Group("")
+		admin.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleAdmin))
+		{
+			admin.GET("/operators", handlers.ConsoleListOperators)
+			admin.GET("/operators/:operator_id", handlers.ConsoleGetOperator)
+			admin.GET("/operators/:operator_id/sites", handlers.ConsoleGetOperatorSites)
+			admin.POST("/operators", handlers.ConsoleCreateOperator)
+			admin.PUT("/operators/:operator_id", handlers.ConsoleUpdateOperator)
+			admin.PUT("/operators/:operator_id/sites", handlers.ConsoleSetOperatorSites)
+			admin.DELETE("/operators/:operator_id", handlers.ConsoleDeleteOperator)
+		}
+
+		// Which capabilities the company has at all. OWNER only: this decides
+		// what the whole company's deployment is for, which is a different kind
+		// of decision from running it day to day.
+		owner := console.Group("")
+		owner.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleOwner))
+		{
+			owner.PUT("/applications/:code", handlers.ConsoleSetApplication)
 		}
 	}
 
