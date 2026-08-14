@@ -234,9 +234,23 @@ func truncate(s string, n int) string {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
+	// CASCADE reaches everything that references companies, people or devices,
+	// which is every entity table added since -- credentials, placements,
+	// permissions, schedules, events, audit_events, person_categories and
+	// company_applications all hang off one of those three.
+	//
+	// TWO TABLES ARE NAMED EXPLICITLY because nothing references them:
+	// platform_admins and platform_sessions are outside the tenancy model
+	// deliberately, so no foreign key drags them in.
+	//
+	// `applications` is DELIBERATELY ABSENT. It is the platform's own catalogue,
+	// seeded by migration 015, and truncating it between tests would empty the
+	// capability list every company_applications row and every terminal's
+	// application_mode resolves against.
 	_, err := database.DB.Exec(`
 		TRUNCATE sync_jobs, access_logs, enrollment_requests, people,
-		         devices, doors, firmware_versions, sites, companies
+		         devices, doors, firmware_versions, sites, companies,
+		         platform_admins
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("resetting tables: %v", err)
