@@ -186,6 +186,12 @@ func NewRouter() *gin.Engine {
 			write.PUT("/terminals/:serial/application-mode",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleSetTerminalMode)
 
+			// Forcing a resync is day-to-day: it queues a snapshot and changes
+			// no state an operator has to reason about afterwards. The
+			// destructive terminal operations are ADMIN, below.
+			write.POST("/terminals/:serial/resync",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleResyncTerminal)
+
 			// GetSiteSettings/UpdateSiteSettings are the SAME handlers the
 			// site-key API uses. Both read site_id from the context, which
 			// RequireSiteGrant sets to an authorized site exactly as the
@@ -222,6 +228,36 @@ func NewRouter() *gin.Engine {
 			// client to send it twice.
 			admin.POST("/sites/:site_id/api-key", middleware.RequireSiteGrant("site_id"),
 				handlers.ConsoleRotateSiteAPIKey)
+
+			// Terminal lifecycle. ADMIN rather than MANAGER for the same reason
+			// site lifecycle is: revoking a credential stops a door working and
+			// retiring a terminal is one-way. Neither is day-to-day work.
+			//
+			// All four go through RequireTerminalGrant, so a terminal in another
+			// tenant is a 404 and one at an ungranted site is a 403 -- the same
+			// rule the read and the mode change already apply.
+			admin.PUT("/terminals/:serial/state",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleSetTerminalState)
+			admin.POST("/terminals/:serial/revoke",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRevokeTerminalCredential)
+			admin.DELETE("/terminals/:serial",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRetireTerminal)
+			admin.PUT("/terminals/:serial/site",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleMoveTerminal)
+
+			// The firmware catalogue. MOVED HERE from the site-key tree, where
+			// any terminal's provisioning key could add a build and move the
+			// `is_current` target every "is this terminal outdated" report is
+			// measured against. A key installed at a door had control of the
+			// company's firmware deployment target.
+			admin.GET("/firmware", handlers.ConsoleListFirmware)
+			admin.POST("/firmware", handlers.ConsoleCreateFirmware)
+			admin.PUT("/firmware/:id/current", handlers.ConsoleSetCurrentFirmware)
+
+			// Who changed what. ADMIN because an audit trail names which
+			// operators did what, which is administrative information rather
+			// than something every viewer needs.
+			admin.GET("/audit", handlers.ConsoleListAuditEvents)
 
 			admin.GET("/operators", handlers.ConsoleListOperators)
 			admin.GET("/operators/:operator_id", handlers.ConsoleGetOperator)
@@ -285,18 +321,25 @@ func NewRouter() *gin.Engine {
 		// device does not have a credential of its own yet.
 		v1.POST("/devices/register", handlers.RegisterDevice)
 
-		// Fleet inventory and operator actions
-		v1.GET("/devices", handlers.ListDevices)
-		v1.GET("/devices/summary", handlers.GetFleetSummary)
+		// Fleet inventory, NARROWED TO THE AUTHENTICATED SITE.
+		//
+		// These used to report the whole company. A site key is installed on
+		// hardware at one location; it has no business enumerating terminals at
+		// every other one, and the console -- which has an operator identity and
+		// a grant model -- is where a company-wide view belongs.
+		v1.GET("/devices", handlers.ListSiteDevices)
+		v1.GET("/devices/summary", handlers.GetSiteFleetSummary)
 		v1.POST("/devices/:serial/resync", handlers.ResyncDevice)
 
-		// Firmware catalog (inventory only -- no OTA)
-		firmware := v1.Group("/firmware")
-		{
-			firmware.GET("", handlers.ListFirmwareVersions)
-			firmware.POST("", handlers.CreateFirmwareVersion)
-			firmware.PUT("/:id/current", handlers.SetCurrentFirmware)
-		}
+		// Firmware catalogue: READ ONLY on this credential, and narrowed to what
+		// a terminal at this site would be measured against.
+		//
+		// The writes moved to /console/firmware under ADMIN. Any site key could
+		// previously add a build and flip `is_current`, which is the target every
+		// "is this terminal outdated" report is measured against -- and once OTA
+		// exists, the row a terminal would be pointed at. A provisioning key
+		// installed at a door must not control that.
+		v1.GET("/firmware", handlers.ListFirmwareVersions)
 	}
 
 	// Device endpoints authenticate as the device itself, not as the site

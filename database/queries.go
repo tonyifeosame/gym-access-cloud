@@ -433,13 +433,39 @@ func CreateDeviceAccessLog(companyID, siteID, deviceID int64, eventID string,
 	return affected > 0, nil
 }
 
-// GetAccessLogs retrieves access logs for a company
+// GetAccessLogs retrieves access logs for a company.
+//
+// Company-wide, and therefore reachable only from an operator session. The
+// site-key surface uses GetSiteAccessLogs below.
 func GetAccessLogs(companyID int64, limit int, offset int) ([]models.AccessLog, error) {
 	query := `SELECT ` + accessLogColumns + `
 	          FROM access_logs WHERE company_id = $1
 	          ORDER BY occurred_at DESC LIMIT $2 OFFSET $3`
 
 	rows, err := DB.Query(query, companyID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return scanAccessLogs(rows)
+}
+
+// GetSiteAccessLogs retrieves access logs for ONE site within a company.
+//
+// The site filter is what the site-key surface needs and did not have: that
+// credential is installed on hardware at one location, and returning the whole
+// company's audit trail to it meant a key at the smallest site could read who
+// entered every other one.
+//
+// Both filters are applied. company_id is the tenancy boundary and site_id is
+// the scope; keeping the tenancy filter even though site_id already implies it
+// means this query is still correct if it is ever called with a site resolved
+// some other way.
+func GetSiteAccessLogs(companyID, siteID int64, limit, offset int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs WHERE company_id = $1 AND site_id = $2
+	          ORDER BY occurred_at DESC LIMIT $3 OFFSET $4`
+
+	rows, err := DB.Query(query, companyID, siteID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -453,6 +479,25 @@ func GetAccessLogsByMember(companyID int64, memberID string, limit int) ([]model
 	          ORDER BY occurred_at DESC LIMIT $3`
 
 	rows, err := DB.Query(query, companyID, memberID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return scanAccessLogs(rows)
+}
+
+// GetSiteAccessLogsByMember is the same read, scoped to one site.
+//
+// The site-key surface uses this rather than the company-wide version above,
+// for the same reason GetSiteAccessLogs exists: a credential installed at one
+// location must not be able to reconstruct a person's movements across every
+// other location the company operates.
+func GetSiteAccessLogsByMember(companyID, siteID int64, memberID string, limit int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs
+	         WHERE company_id = $1 AND site_id = $2 AND person_external_id = $3
+	          ORDER BY occurred_at DESC LIMIT $4`
+
+	rows, err := DB.Query(query, companyID, siteID, memberID, limit)
 	if err != nil {
 		return nil, err
 	}

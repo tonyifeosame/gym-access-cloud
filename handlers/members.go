@@ -11,6 +11,23 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// The legacy people surface, /api/v1/members, authenticated by the site key.
+//
+// DEPRECATED but not removed: existing tooling speaks this contract, and the
+// console's /console/people is the replacement. What changed is what it
+// discloses.
+//
+// NO RESPONSE HERE CARRIES CREDENTIAL MATERIAL. The projection below drops
+// fingerprint_template, which this endpoint used to return for every person in
+// the company to anyone holding any site key. That field is a credential
+// locator today and was designed to hold a template; either way a provisioning
+// secret installed on hardware at one location must not be able to read it for
+// the whole tenant.
+//
+// Credentials are reachable through the console, per person, behind an operator
+// session -- see handlers/console_credentials.go. Sealed biometric material
+// reaches devices over the sync path and reaches nothing else, ever.
+
 // GetMembers handles GET /members
 func GetMembers(c *gin.Context) {
 	members, err := database.GetAllMembers(c.GetInt64("company_id"))
@@ -19,12 +36,14 @@ func GetMembers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve members"})
 		return
 	}
+
 	// A nil slice marshals to `null`, which a strict client parser will reject
 	// where it expects an array. Empty results must still be an empty array.
-	if members == nil {
-		members = []models.Member{}
+	out := make([]models.MemberResponse, 0, len(members))
+	for _, m := range members {
+		out = append(out, models.NewMemberResponse(m))
 	}
-	c.JSON(http.StatusOK, members)
+	c.JSON(http.StatusOK, out)
 }
 
 // GetMember handles GET /members/:id
@@ -43,7 +62,7 @@ func GetMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member"})
 		return
 	}
-	c.JSON(http.StatusOK, member)
+	c.JSON(http.StatusOK, models.NewMemberResponse(*member))
 }
 
 // CreateMember handles POST /members
@@ -68,7 +87,7 @@ func CreateMember(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, member)
+	c.JSON(http.StatusCreated, models.NewMemberResponse(member))
 }
 
 // UpdateMember handles PUT /members/:id
@@ -101,7 +120,7 @@ func UpdateMember(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, member)
+	c.JSON(http.StatusOK, models.NewMemberResponse(member))
 }
 
 // DeleteMember handles DELETE /members/:id
@@ -131,9 +150,16 @@ func GetMemberChanges(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member changes"})
 		return
 	}
-	if members == nil {
-		members = []models.Member{}
-	}
 
-	c.JSON(http.StatusOK, members)
+	// Projected like every other read here. This is a CHANGES FEED, not the sync
+	// path: terminals receive credentials as sync jobs, which carry sealed
+	// material to the device that needs it. Nothing in the field reads this
+	// endpoint -- the deployed firmware calls four device routes and this is not
+	// one of them -- so the template it used to disclose served no client and
+	// exposed every person in the company to any site key.
+	out := make([]models.MemberResponse, 0, len(members))
+	for _, m := range members {
+		out = append(out, models.NewMemberResponse(m))
+	}
+	c.JSON(http.StatusOK, out)
 }

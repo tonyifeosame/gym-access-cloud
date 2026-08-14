@@ -1,10 +1,7 @@
 package handlers
 
 import (
-	"database/sql"
-	"errors"
 	"net/http"
-	"strconv"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/models"
@@ -12,22 +9,35 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Firmware catalog and fleet inventory endpoints.
+// Firmware catalogue reads and site-scoped fleet inventory, on the SITE KEY.
 //
 // Inventory and reporting only. Marking a build current changes what "outdated"
 // means; it does not push anything to any device. OTA is not implemented.
-
-// ListDevices handles GET /devices
 //
-// The fleet inventory. `?outdated=true` narrows it to devices not running the
-// current build for their release channel.
-func ListDevices(c *gin.Context) {
+// EVERYTHING HERE IS NOW SCOPED TO THE AUTHENTICATED SITE, and the writes have
+// moved to an operator session. See the note at the bottom of this file.
+
+// ListSiteDevices handles GET /devices, on the site-key credential.
+//
+// NARROWED TO THE AUTHENTICATED SITE. This previously reported the whole
+// company on the reasoning that "the holder of a site key is trusted with the
+// company's inventory by construction". That reasoning does not survive
+// contact with what a site key physically is: a secret installed on hardware
+// bolted to a wall at one location, handled by whoever installs terminals.
+//
+// A key at the smallest site enumerating every terminal at every other one is
+// disclosure with no corresponding need -- a terminal does not read this, and an
+// operator wanting a company-wide view has /console/terminals, which has an
+// identity and a grant model behind it.
+//
+// The scope is taken from the authenticated context, never from a parameter, so
+// there is no argument through which a caller could widen it.
+func ListSiteDevices(c *gin.Context) {
 	outdatedOnly := c.Query("outdated") == "true"
 
-	// nil scope: unnarrowed. Site grants are an OPERATOR concept and there is no
-	// operator here -- this route authenticates with a site API key, whose
-	// holder is trusted with the whole company's inventory by construction.
-	devices, err := database.ListDevices(c.GetInt64("company_id"), outdatedOnly, nil)
+	siteScope := []int64{c.GetInt64("site_id")}
+
+	devices, err := database.ListDevices(c.GetInt64("company_id"), outdatedOnly, siteScope)
 	if err != nil {
 		logError(c, "list devices", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve devices"})
@@ -40,10 +50,16 @@ func ListDevices(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"count": len(devices), "devices": devices})
 }
 
-// GetFleetSummary handles GET /devices/summary
-func GetFleetSummary(c *gin.Context) {
-	// nil scope, for the same reason as ListDevices above: no operator, no grants.
-	summary, err := database.GetFleetSummary(c.GetInt64("company_id"), nil)
+// GetSiteFleetSummary handles GET /devices/summary, on the site-key credential.
+//
+// Narrowed to the authenticated site for the same reason the list is. A rollup
+// an operator cannot drill into, describing hardware at locations this
+// credential has nothing to do with, is not a summary of anything actionable --
+// it is a count of somebody else's estate.
+func GetSiteFleetSummary(c *gin.Context) {
+	siteScope := []int64{c.GetInt64("site_id")}
+
+	summary, err := database.GetFleetSummary(c.GetInt64("company_id"), siteScope)
 	if err != nil {
 		logError(c, "fleet summary", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve fleet summary"})
@@ -66,54 +82,18 @@ func ListFirmwareVersions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"count": len(versions), "firmware_versions": versions})
 }
 
-// CreateFirmwareVersion handles POST /firmware
+// The firmware WRITES used to live here, on the site-key credential, and have
+// moved to /api/v1/console/firmware under an ADMIN operator session --
+// handlers/console_firmware.go.
 //
-// Adds a build to the catalog. It does not become the deployment target until
-// it is explicitly marked current.
-func CreateFirmwareVersion(c *gin.Context) {
-	var req models.CreateFirmwareRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	version, err := database.CreateFirmwareVersion(c.GetInt64("company_id"), req)
-	if database.IsUniqueViolation(err) {
-		c.JSON(http.StatusConflict, gin.H{"error": "That version already exists for this device type"})
-		return
-	}
-	if err != nil {
-		logError(c, "create firmware version", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create firmware version"})
-		return
-	}
-	c.JSON(http.StatusCreated, version)
-}
-
-// SetCurrentFirmware handles PUT /firmware/:id/current
+// Kept as a note rather than deleted silently: `POST /firmware` and
+// `PUT /firmware/{id}/current` were reachable with any site provisioning key,
+// so a secret installed on hardware at one location could add a build to the
+// company catalogue and move the `is_current` target. That target is what every
+// "is this terminal outdated" report is measured against, and once OTA exists it
+// is the row a terminal would be pointed at.
 //
-// Makes a build the deployment target for its device type and release channel.
-// Devices running anything else are then reported as outdated. Nothing is
-// pushed -- this only moves the target.
-func SetCurrentFirmware(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid firmware id"})
-		return
-	}
-
-	// A firmware id belonging to another company is reported as not found rather
-	// than forbidden, so the endpoint does not confirm that the id exists.
-	version, err := database.SetCurrentFirmware(c.GetInt64("company_id"), id)
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Firmware version not found"})
-		return
-	}
-	if err != nil {
-		logError(c, "set current firmware", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to set current firmware"})
-		return
-	}
-
-	c.JSON(http.StatusOK, version)
-}
+// Anything still calling the old paths receives 404 and should move to the
+// console routes. The read above is unchanged and stays on this credential,
+// because a terminal checking what it should be running is a legitimate use of
+// a device-adjacent secret.

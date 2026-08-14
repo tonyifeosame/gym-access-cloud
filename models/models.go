@@ -65,6 +65,59 @@ type Member struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
+// MemberResponse is a person as the LEGACY site-key API returns them.
+//
+// THE DIFFERENCE FROM Member IS THE POINT: there is no FingerprintTemplate
+// field, and there must never be one.
+//
+// GET /members and GET /members/{id} used to return the template column for
+// every person in the COMPANY to anyone holding ANY site key. A site key is a
+// provisioning secret installed on hardware bolted to a wall at one location; it
+// is handled by whoever installs terminals, and it should not be able to read a
+// tenant's credential material at all, let alone across every site.
+//
+// The field carries a credential locator today rather than a template, but the
+// column was designed to hold a template and the enrolment endpoint still writes
+// to it, so the exposure is about what the endpoint is permitted to disclose
+// rather than about what happens to be in the column this month.
+//
+// A type that cannot carry the value cannot leak it, which is the same
+// construction models.Site uses to keep the site key out of responses.
+//
+// BiometricEnrolled replaces it with the only fact a caller legitimately needs:
+// whether a credential exists. That is what the console shows and what an
+// integration checking enrolment status is actually asking.
+type MemberResponse struct {
+	ID             int64  `json:"id"`
+	PublicID       string `json:"public_id"`
+	MemberID       string `json:"member_id"`
+	FullName       string `json:"full_name"`
+	MembershipType string `json:"membership_type"`
+	Active         bool   `json:"active"`
+
+	// Whether this person has a credential, never which one or what it holds.
+	BiometricEnrolled bool `json:"biometric_enrolled"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NewMemberResponse projects a person for the legacy API, dropping the
+// credential column.
+func NewMemberResponse(m Member) MemberResponse {
+	return MemberResponse{
+		ID:                m.ID,
+		PublicID:          m.PublicID,
+		MemberID:          m.MemberID,
+		FullName:          m.FullName,
+		MembershipType:    m.MembershipType,
+		Active:            m.Active,
+		BiometricEnrolled: m.FingerprintTemplate != "",
+		CreatedAt:         m.CreatedAt,
+		UpdatedAt:         m.UpdatedAt,
+	}
+}
+
 // EnrollmentRequest represents a fingerprint enrollment request
 type EnrollmentRequest struct {
 	ID          int64      `json:"id"`

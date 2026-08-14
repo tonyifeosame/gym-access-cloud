@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 )
 
 // Authorization boundaries.
@@ -159,50 +160,108 @@ func TestMemberDataIsScopedToTheTenant(t *testing.T) {
 	}
 }
 
+// The firmware catalogue tenancy tests exercise /console/firmware rather than
+// the site-key routes they were written against.
+//
+// The WRITES moved there deliberately (SEC-02): any site provisioning key could
+// publish a build and move the `is_current` target, which is what every "is this
+// terminal outdated" report is measured against and, once OTA exists, the row a
+// terminal would be pointed at. A secret installed on hardware at one location
+// must not control that.
+//
+// The PROPERTY under test is unchanged and is the one that matters: one tenant
+// must not be able to read, publish into, or retarget another's catalogue. Only
+// the door has moved.
+
 func TestFirmwareCatalogIsScopedToTheTenant(t *testing.T) {
 	env := newTestEnv(t)
 
+	two := companyIDBySlug(t, "two")
+	_, twoToken, twoCSRF := consoleOperatorSession(t, env.router, two,
+		"two-fw@example.com", models.RoleAdmin)
+
 	// Company two publishes a build.
-	created := env.do(http.MethodPost, "/api/v1/firmware", map[string]any{
-		"version": "9.9.9", "device_type": "TERMINAL", "release_channel": "STABLE",
-		"download_url": "http://example.invalid/firmware.bin",
-	}, siteAuth(env.siteCKey))
-	if created.Code != http.StatusCreated {
-		t.Fatalf("creating firmware got %d, want 201 (body %s)", created.Code, created.Raw)
+	code, created := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"9.9.9","device_type":"TERMINAL","release_channel":"STABLE",
+		  "download_url":"http://example.invalid/firmware.bin"}`, twoToken, twoCSRF)
+	if code != http.StatusCreated {
+		t.Fatalf("creating firmware got %d, want 201 (body %v)", code, created)
 	}
 
-	// Company one must not see it. The catalog carries download URLs and
+	// Company one must not see it. The catalogue carries download URLs and
 	// checksums, and once OTA exists it is what a terminal would be pointed at.
+	one := companyIDBySlug(t, "one")
+	_, oneToken, oneCSRF := consoleOperatorSession(t, env.router, one,
+		"one-fw@example.com", models.RoleAdmin)
+
+	code, listing := consoleCall(t, env.router, "GET", "/api/v1/console/firmware",
+		``, oneToken, oneCSRF)
+	if code != http.StatusOK {
+		t.Fatalf("listing firmware got %d, want 200", code)
+	}
+	if got := listing["count"]; got != float64(0) {
+		t.Errorf("company one sees %v firmware versions belonging to company two (body %v)", got, listing)
+	}
+
+	// The site-key read is likewise scoped, and is the one path a terminal uses.
 	res := env.do(http.MethodGet, "/api/v1/firmware", nil, siteAuth(env.siteAKey))
 	if res.Code != http.StatusOK {
-		t.Fatalf("listing firmware got %d, want 200", res.Code)
+		t.Fatalf("site-key firmware read got %d, want 200", res.Code)
 	}
 	if got := res.Body["count"]; got != float64(0) {
-		t.Errorf("company one sees %v firmware versions belonging to company two (body %s)", got, res.Raw)
+		t.Errorf("company one's site key sees %v of company two's builds (body %s)", got, res.Raw)
 	}
 }
 
 func TestTenantCannotRetargetAnotherTenantsFleet(t *testing.T) {
 	env := newTestEnv(t)
 
-	created := env.do(http.MethodPost, "/api/v1/firmware", map[string]any{
-		"version": "9.9.9", "device_type": "TERMINAL", "release_channel": "STABLE",
-	}, siteAuth(env.siteCKey))
-	id, _ := created.Body["id"].(float64)
+	two := companyIDBySlug(t, "two")
+	_, twoToken, twoCSRF := consoleOperatorSession(t, env.router, two,
+		"two-target@example.com", models.RoleAdmin)
+
+	code, created := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"9.9.9","device_type":"TERMINAL","release_channel":"STABLE"}`,
+		twoToken, twoCSRF)
+	if code != http.StatusCreated {
+		t.Fatalf("creating firmware got %d, want 201 (body %v)", code, created)
+	}
+	id, _ := created["id"].(float64)
 	if id == 0 {
-		t.Fatalf("firmware id missing from %s", created.Raw)
+		t.Fatalf("firmware id missing from %v", created)
 	}
 
 	// `is_current` defines what "outdated" means for a fleet. If one tenant can
 	// set another's, it can misreport every terminal they own -- and once OTA
 	// exists, choose what they install.
-	res := env.do(http.MethodPut, "/api/v1/firmware/"+itoa(int64(id))+"/current", nil, siteAuth(env.siteAKey))
-	if res.Code != http.StatusNotFound {
-		t.Errorf("cross-tenant retarget got %d, want 404 (body %s)", res.Code, res.Raw)
+	one := companyIDBySlug(t, "one")
+	_, oneToken, oneCSRF := consoleOperatorSession(t, env.router, one,
+		"one-target@example.com", models.RoleAdmin)
+
+	code, body := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/firmware/"+itoa(int64(id))+"/current", ``, oneToken, oneCSRF)
+	if code != http.StatusNotFound {
+		t.Errorf("cross-tenant retarget got %d, want 404 (body %v)", code, body)
 	}
 
 	if queryBool(t, `SELECT is_current FROM firmware_versions WHERE version = '9.9.9'`) {
 		t.Error("another tenant's build was marked current")
+	}
+}
+
+// TestFirmwareWritesRequireAnOperator proves the capability MOVED rather than
+// being deleted, and that a lower role cannot reach it.
+func TestFirmwareWritesRequireAnOperator(t *testing.T) {
+	env := newTestEnv(t)
+	one := companyIDBySlug(t, "one")
+
+	_, mgrToken, mgrCSRF := consoleOperatorSession(t, env.router, one,
+		"fw-manager@example.com", models.RoleManager)
+
+	code, _ := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"1.2.3","device_type":"TERMINAL"}`, mgrToken, mgrCSRF)
+	if code != http.StatusForbidden {
+		t.Errorf("MANAGER publishing firmware got %d, want 403", code)
 	}
 }
 

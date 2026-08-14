@@ -97,7 +97,15 @@ func GetAccessLogs(c *gin.Context) {
 		}
 	}
 
-	logs, err := database.GetAccessLogs(c.GetInt64("company_id"), limit, offset)
+	// NARROWED TO THE AUTHENTICATED SITE. This returned the whole company's
+	// audit trail to any site key -- a secret installed on hardware at one
+	// location reading who entered every other location. The console's
+	// grant-scoped event history is where a company-wide view belongs.
+	//
+	// The scope comes from the authenticated context, so there is no parameter
+	// through which a caller could widen it.
+	logs, err := database.GetSiteAccessLogs(c.GetInt64("company_id"), c.GetInt64("site_id"),
+		limit, offset)
 	if err != nil {
 		logError(c, "list access logs", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
@@ -116,7 +124,11 @@ func GetMemberAccessLogs(c *gin.Context) {
 	memberID := c.Param("member_id")
 	limit := clampLogLimit(c.Query("limit"))
 
-	logs, err := database.GetAccessLogsByMember(c.GetInt64("company_id"), memberID, limit)
+	// Site-scoped, like the list above. Reconstructing one person's movements
+	// across every location a company operates is exactly what a credential
+	// installed at one of them must not be able to do.
+	logs, err := database.GetSiteAccessLogsByMember(c.GetInt64("company_id"),
+		c.GetInt64("site_id"), memberID, limit)
 	if err != nil {
 		logError(c, "list member access logs", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve access logs"})
