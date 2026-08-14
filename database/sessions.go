@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -333,11 +334,25 @@ func ListUserSessions(userID int64) ([]models.SessionInfo, error) {
 // the moment they expire, because "when did this operator last sign in, and from
 // where" is a question worth being able to answer after an incident.
 func PurgeExpiredSessions(retentionDays int) (int, error) {
+	affected, err := PurgeExpiredSessionsContext(context.Background(), retentionDays)
+	return int(affected), err
+}
+
+// PurgeExpiredSessionsContext is the same sweep, cancellable, for the scheduled
+// maintenance task.
+//
+// A LIVE SESSION IS NEVER TOUCHED. The predicate matches only rows that are
+// already dead -- past their absolute expiry, or revoked -- and then only after
+// the retention window on top of that. There is deliberately no clause about
+// idle expiry: an idle-expired session can still be resurrected by nothing, but
+// its row is what an incident review reads to answer "who signed in, from
+// where", and the absolute expiry will collect it soon enough anyway.
+func PurgeExpiredSessionsContext(ctx context.Context, retentionDays int) (int64, error) {
 	if retentionDays < 0 {
 		retentionDays = 0
 	}
 
-	result, err := DB.Exec(`
+	result, err := DB.ExecContext(ctx, `
 		DELETE FROM user_sessions
 		 WHERE (absolute_expires_at < CURRENT_TIMESTAMP - make_interval(days => $1))
 		    OR (revoked_at IS NOT NULL
@@ -346,8 +361,7 @@ func PurgeExpiredSessions(retentionDays int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	affected, err := result.RowsAffected()
-	return int(affected), err
+	return result.RowsAffected()
 }
 
 // truncate bounds a value to what its column can hold. A user agent longer than

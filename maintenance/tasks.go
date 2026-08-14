@@ -24,27 +24,38 @@ const (
 	defaultPruneInterval   = 6 * time.Hour
 	defaultRetentionDays   = 90
 	defaultShutdownTimeout = 10 * time.Second
+
+	// Dead operator sessions are kept for a month before being deleted. They
+	// are not credentials by then -- expired and revoked rows authenticate
+	// nothing -- but "who signed in, when, and from where" is a question worth
+	// being able to answer after an incident.
+	defaultSessionRetentionDays = 30
+	defaultSessionPurgeInterval = 6 * time.Hour
 )
 
 // Config holds the maintenance settings resolved from the environment
 type Config struct {
-	Enabled         bool
-	OfflineAfter    time.Duration
-	SweepInterval   time.Duration
-	PruneInterval   time.Duration
-	RetentionDays   int
-	ShutdownTimeout time.Duration
+	Enabled              bool
+	OfflineAfter         time.Duration
+	SweepInterval        time.Duration
+	PruneInterval        time.Duration
+	RetentionDays        int
+	SessionPurgeInterval time.Duration
+	SessionRetentionDays int
+	ShutdownTimeout      time.Duration
 }
 
 // LoadConfig reads maintenance settings from the environment
 func LoadConfig() Config {
 	return Config{
-		Enabled:         envBool("MAINTENANCE_ENABLED", true),
-		OfflineAfter:    envDuration("DEVICE_OFFLINE_AFTER_SECONDS", defaultOfflineAfter),
-		SweepInterval:   envDuration("OFFLINE_SWEEP_INTERVAL_SECONDS", defaultSweepInterval),
-		PruneInterval:   envDuration("SYNC_JOB_PRUNE_INTERVAL_SECONDS", defaultPruneInterval),
-		RetentionDays:   envInt("SYNC_JOB_RETENTION_DAYS", defaultRetentionDays),
-		ShutdownTimeout: envDuration("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeout),
+		Enabled:              envBool("MAINTENANCE_ENABLED", true),
+		OfflineAfter:         envDuration("DEVICE_OFFLINE_AFTER_SECONDS", defaultOfflineAfter),
+		SweepInterval:        envDuration("OFFLINE_SWEEP_INTERVAL_SECONDS", defaultSweepInterval),
+		PruneInterval:        envDuration("SYNC_JOB_PRUNE_INTERVAL_SECONDS", defaultPruneInterval),
+		RetentionDays:        envInt("SYNC_JOB_RETENTION_DAYS", defaultRetentionDays),
+		SessionPurgeInterval: envDuration("SESSION_PURGE_INTERVAL_SECONDS", defaultSessionPurgeInterval),
+		SessionRetentionDays: envInt("SESSION_RETENTION_DAYS", defaultSessionRetentionDays),
+		ShutdownTimeout:      envDuration("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeout),
 	}
 }
 
@@ -89,6 +100,32 @@ func (c Config) Tasks() []Task {
 		})
 	}
 
+	// Operator sessions. Nothing else deletes these rows: revoking or expiring
+	// a session leaves it in place, so without this sweep user_sessions grows
+	// by one row per login forever.
+	//
+	// This CANNOT log anybody out. The delete matches only rows that are
+	// already dead -- past their absolute expiry, or revoked -- and then only
+	// after the retention window on top of that. A live session is not
+	// reachable by the predicate at any retention setting, including 0.
+	if c.SessionRetentionDays >= 0 {
+		tasks = append(tasks, Task{
+			Name:     "session_purge",
+			Interval: c.SessionPurgeInterval,
+			Run: func(ctx context.Context) (string, error) {
+				n, err := database.PurgeExpiredSessionsContext(ctx, c.SessionRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				if n == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("purged %d dead operator session(s) older than %dd",
+					n, c.SessionRetentionDays), nil
+			},
+		})
+	}
+
 	return tasks
 }
 
@@ -107,6 +144,8 @@ func (c Config) Describe() {
 	} else {
 		log.Println("maintenance: sync job pruning disabled (SYNC_JOB_RETENTION_DAYS=0)")
 	}
+	log.Printf("maintenance: operator session purge every %s (retain dead sessions %d days)",
+		c.SessionPurgeInterval, c.SessionRetentionDays)
 }
 
 func envBool(key string, fallback bool) bool {

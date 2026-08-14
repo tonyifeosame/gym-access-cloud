@@ -30,13 +30,29 @@ written by hand.
 9. [Devices — device-authenticated](#9-devices--device-authenticated)
 10. [Health and monitoring](#10-health-and-monitoring)
 11. [Endpoint index](#11-endpoint-index)
+12. [Operator authentication](#12-operator-authentication)
+13. [Operator console](#13-operator-console)
+14. [Applications and modules](#14-applications-and-modules)
 
 ---
 
 ## 1. Authentication
 
-There are three authentication modes. Which one applies is stated on every
+There are four authentication modes. Which one applies is stated on every
 endpoint below.
+
+| Mode | Credential | Who uses it |
+|---|---|---|
+| Site API key | `X-API-Key` | provisioning and server-to-server tooling |
+| Device key | `X-Device-Key` | one terminal |
+| Site key + serial | `X-API-Key` + `X-Device-Serial` | deprecated terminal fallback |
+| **Operator session** | `__Host-al_session` cookie | the browser dashboard |
+
+**A browser must use an operator session, never a site API key.** The site key
+is the *provisioning secret*: whoever holds it can register a terminal and rotate
+any device credential at that site. It is never returned by any operator-session
+endpoint, and it authenticates nothing under `/api/v1/auth` or
+`/api/v1/console`. See [section 12](#12-operator-authentication).
 
 ### Site API key
 
@@ -44,9 +60,9 @@ endpoint below.
 X-API-Key: main-site-api-key-123
 ```
 
-Identifies a **site**, and through it a company. Used by the dashboard and by
-operator tooling. Every query is scoped to that site's company — a key issued to
-one tenant cannot reach another's data.
+Identifies a **site**, and through it a company. Used for provisioning and by
+server-to-server tooling — not by a browser. Every query is scoped to that site's
+company — a key issued to one tenant cannot reach another's data.
 
 The site key is also the **provisioning secret**: it is what authorises
 `POST /devices/register`, which mints device credentials. Treat it accordingly —
@@ -1092,6 +1108,438 @@ exactly as documented in [section 5](#5-enrollment), differing only in which
 credential opens them and in reading their tenant from the device rather than
 from the site key.
 
+### Operator session routes
+
+The dashboard's surface. None of these accept a site API key, and none returns
+one. CSRF is required on every unsafe method.
+
+| Method | Path | Auth | Min role |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | none | — |
+| `GET` | `/api/v1/auth/me` | session | any |
+| `POST` | `/api/v1/auth/logout` | session + CSRF | any |
+| `POST` | `/api/v1/auth/password` | session + CSRF | any |
+| `GET` | `/api/v1/console/company` | session | VIEWER |
+| `GET` | `/api/v1/console/sites` | session | VIEWER |
+| `GET` | `/api/v1/console/sites/{site_id}` | session | VIEWER |
+| `GET` | `/api/v1/console/sites/{site_id}/settings` | session | VIEWER |
+| `PUT` | `/api/v1/console/sites/{site_id}/settings` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/applications` | session | VIEWER |
+| `PUT` | `/api/v1/console/applications/{code}` | session + CSRF | OWNER |
+| `GET` | `/api/v1/console/terminals` | session | VIEWER |
+| `GET` | `/api/v1/console/terminals/summary` | session | VIEWER |
+| `GET` | `/api/v1/console/terminals/{serial}` | session | VIEWER |
+| `PUT` | `/api/v1/console/terminals/{serial}/application-mode` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/people` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}` | session | VIEWER |
+| `POST` | `/api/v1/console/people` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/operators` | session | ADMIN |
+| `POST` | `/api/v1/console/operators` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/operators/{operator_id}` | session | ADMIN |
+| `PUT` | `/api/v1/console/operators/{operator_id}` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/operators/{operator_id}` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/operators/{operator_id}/sites` | session | ADMIN |
+| `PUT` | `/api/v1/console/operators/{operator_id}/sites` | session + CSRF | ADMIN |
+
+---
+
+## 12. Operator authentication
+
+`/api/v1/auth/*` — how a human signs in to the dashboard. A separate credential
+class from everything above: **no route in this section or the next reads
+`X-API-Key`, and none returns one.**
+
+### The session cookie
+
+```
+Set-Cookie: __Host-al_session=ats_<64 hex>; Path=/; HttpOnly; Secure; SameSite=Lax
+```
+
+Fixed, and not configurable. The `__Host-` prefix is enforced by the browser: it
+refuses the cookie unless `Secure` and `Path=/` are set and `Domain` is absent,
+which makes it host-only and un-settable by any sibling subdomain of the API.
+There is no `Max-Age` — the session's real lifetime is the server-side row.
+
+The token is opaque, 256 bits from `crypto/rand`, and stored only as a SHA-256
+hash. **It never appears in a response body.**
+
+Two expiries. The idle window (12h by default) slides forward as the session is
+used; the absolute cap (7d) never moves. Both are enforced server-side on every
+request, so logout, disabling an account, changing a role and changing a password
+all take effect on the *next* request.
+
+**Deployment constraint.** `SameSite=Lax` sends the cookie only on *same-site*
+requests. `app.accesslink.store` → `api.accesslink.store` works because both
+share the registrable domain `accesslink.store`. A dashboard on an unrelated
+domain would never receive the cookie. `CORS_ALLOWED_ORIGINS` must additionally
+name the dashboard's exact origin, or the browser will not send credentials
+cross-origin — both halves are required and neither substitutes for the other.
+
+For local development without TLS, `SESSION_COOKIE_INSECURE=1` drops `Secure`
+**and renames the cookie to `al_session`** — a `__Host-` cookie without `Secure`
+is rejected outright, so the prefix has to go with it. Exactly one name is
+accepted at a time.
+
+### CSRF
+
+Every unsafe method (anything but `GET`, `HEAD`, `OPTIONS`) under
+`/api/v1/auth` and `/api/v1/console` requires:
+
+```
+X-CSRF-Token: <csrf_token from login or /me>
+```
+
+The token is per-session, returned in the **body** of `login` and `/me` — not as
+a second cookie, because a dashboard on another origin cannot read a cookie
+scoped to the API host. Hold it in memory and re-fetch it from `/me` after a page
+reload. Comparison is by hash, in constant time. Missing → `403 CSRF token
+required`; wrong → `403 Invalid CSRF token`.
+
+### `POST /api/v1/auth/login`
+
+Unauthenticated. Requires `Content-Type: application/json` — an HTML form cannot
+send JSON, so a cross-site form post cannot reach this endpoint.
+
+```json
+{"email": "ops@example.com", "password": "..."}
+```
+
+`200` sets the cookie and returns the session body ([below](#the-session-body)).
+
+| Code | When |
+|---|---|
+| `400` | missing `email` or `password` |
+| `401` | **any** credential failure — unknown address, wrong password, disabled account, disabled company. One message for all of them, and an unknown address still costs a bcrypt comparison so timing does not answer what the message will not |
+| `415` | body was not `application/json` |
+| `429` | too many attempts (per address) **or** the account is temporarily locked (5 failures → 1 min, doubling to a 15 min cap). Carries `Retry-After` |
+| `500` | database unavailable — never reported as a credential failure |
+
+### `GET /api/v1/auth/me`
+
+Session required. Returns the same body as `login`, so a dashboard can restore
+its whole state after a reload with one request. `401` when the session is
+missing, unknown, revoked, expired, or belongs to a disabled account or company.
+
+### The session body
+
+Returned identically by `login` and `/me`:
+
+```json
+{
+  "operator": {
+    "id": "1f0c…", "email": "ops@example.com",
+    "full_name": "Ops Person", "role": "OWNER"
+  },
+  "company": { "id": "9b2a…", "name": "Acme", "slug": "acme" },
+  "role": "OWNER",
+  "sites": [ { "site_id": "5120…", "site_name": "Site A" } ],
+  "all_sites": true,
+  "applications": [
+    { "code": "ATTENDANCE", "settings": { "grace_minutes": 5 } }
+  ],
+  "csrf_token": "…",
+  "session_expires_at": "2026-08-21T09:12:33Z",
+  "session_expires_in_seconds": 604800
+}
+```
+
+- `sites` — the operator's explicit site grants, possibly empty.
+- **`all_sites`** — an empty `sites` array means *not scoped to particular
+  sites*, which is **every site in the company**, not none. This flag says which.
+  It is true for OWNER and ADMIN always, and for anyone holding no grants.
+- `applications` — the capabilities this company has **enabled**, in a stable
+  order, and what the dashboard should build its navigation from. An empty array
+  is a legitimate, common state; see [section 14](#14-applications-and-modules).
+- `session_expires_in_seconds` — a duration, resolved server-side. Prefer it over
+  the absolute timestamp when scheduling anything.
+
+An object, deliberately: new fields are added without breaking clients.
+
+### `POST /api/v1/auth/logout`
+
+Session + CSRF. Revokes the row **and** clears the cookie, then `204`. Idempotent
+in effect; a copy of the cookie is worthless afterwards.
+
+### `POST /api/v1/auth/password`
+
+Session + CSRF, and rate-limited on the same allowance as `login`.
+
+```json
+{"current_password": "...", "new_password": "..."}
+```
+
+`204` on success. The current password is required even though the caller is
+signed in — a session proves possession of the browser, not knowledge of the
+secret. **Every other session for that operator is revoked** in the same
+transaction; the calling session survives.
+
+| Code | When |
+|---|---|
+| `400` | new password fails the policy (minimum 12 characters, maximum 72 bytes) |
+| `403` | current password is wrong, or CSRF failed |
+| `415` | body was not `application/json` |
+
+---
+
+## 13. Operator console
+
+`/api/v1/console/*` — the dashboard's API. Operator session on every route, CSRF
+on every unsafe method, a minimum role per route, and a site-grant check wherever
+the path names a site.
+
+**Roles are ordered:** `OWNER > ADMIN > MANAGER > VIEWER`. A route names the
+lowest role that may reach it and everyone above inherits. An insufficient role is
+`403`; no session at all is `401`.
+
+**Site grants.** An operator may hold grants to specific sites. OWNER and ADMIN
+are never scoped, and an operator with *no* grants is not scoped either — absence
+means every site in the company. On a site-scoped route:
+
+- a site in another company → **`404`** (never `403`; the API does not confirm an
+  id exists in someone else's account)
+- a site in your company you are not granted → **`403`**
+
+Lists are narrowed by the same rule, so the console never shows a site the detail
+route would then refuse.
+
+**Tenancy.** Every query is scoped to the caller's company. A resource in another
+tenant is `404`.
+
+### Company and sites
+
+| Method | Path | Role | Returns |
+|---|---|---|---|
+| `GET` | `/console/company` | VIEWER | `{id, name, slug, contact_email, active, created_at}` |
+| `GET` | `/console/sites` | VIEWER | `{count, sites: [...]}` |
+| `GET` | `/console/sites/{site_id}` | VIEWER | one site |
+| `GET` | `/console/sites/{site_id}/settings` | VIEWER | `{settings, settings_version}` |
+| `PUT` | `/console/sites/{site_id}/settings` | MANAGER | updated settings |
+
+A site:
+
+```json
+{
+  "id": "5120…", "name": "Site A", "address": "…", "timezone": "UTC",
+  "active": true, "terminal_count": 3, "created_at": "…"
+}
+```
+
+**There is no `api_key` field.** The column is never selected for these
+endpoints. `{site_id}` is a site's `public_id` (a UUID); a malformed one is
+`404`, not a `500`.
+
+Writing settings replaces the object wholesale and enqueues a `SETTINGS` sync job
+for every terminal at that site — the same handler and the same behaviour as
+[section 6](#6-site-settings).
+
+### Terminals
+
+| Method | Path | Role | Returns |
+|---|---|---|---|
+| `GET` | `/console/terminals` | VIEWER | `{count, terminals: [...]}` |
+| `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
+| `GET` | `/console/terminals/{serial}` | VIEWER | application configuration |
+| `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | application configuration |
+
+`terminals` entries are the inventory objects from
+[section 7](#get-apiv1devicesoutdatedtrue). They carry **no credential material**
+— not the device key, not its hash, not the site key. `?outdated=true` filters as
+it does there. The list is narrowed by site grants; the summary is company-wide,
+because a partial rollup presented as the whole fleet would mislead.
+
+Application configuration:
+
+```json
+{
+  "serial_number": "TERM-1",
+  "application_mode": "CHECK_IN",
+  "effective_applications": ["CHECK_IN"]
+}
+```
+
+```json
+PUT {"application_mode": "CHECK_IN"}
+```
+
+| Code | When |
+|---|---|
+| `400` | not a known mode (the response lists the accepted values) |
+| `404` | no such terminal in this company |
+| `409` | that capability is not enabled for the company |
+
+**Registering a terminal is not a console operation.** It stays on
+`POST /api/v1/devices/register` behind the site API key, which is the only place a
+device credential is ever issued, exactly once, at registration.
+
+### People
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/people` | VIEWER |
+| `GET` | `/console/people/{external_id}` | VIEWER |
+| `POST` | `/console/people` | MANAGER |
+| `PUT` | `/console/people/{external_id}` | MANAGER |
+| `DELETE` | `/console/people/{external_id}` | MANAGER |
+
+```json
+{
+  "id": "7ac1…", "external_id": "P-100", "full_name": "Sam Taylor",
+  "category": "STANDARD", "active": true,
+  "biometric_enrolled": true,
+  "created_at": "…", "updated_at": "…"
+}
+```
+
+- `external_id` is the identifier a terminal reads. Unique per company. Required
+  on create, taken from the path on update.
+- `category` is **optional** and free text, defaulting to `STANDARD`. It maps to a
+  legacy column; the platform has no opinion about what class of person a company
+  records.
+- **`biometric_enrolled` is the entire biometric surface.** No template, locator
+  or credential detail is ever returned. Biometrics are an abstraction the backend
+  owns — do not model a person as *having a fingerprint*, model them as having
+  zero or more credentials whose details the API will describe when that resource
+  exists.
+- An update **never** alters a person's biometric enrolment. Enrolment happens at
+  a terminal, through the enrolment flow.
+
+`POST` → `201`. `409` if the `external_id` is taken. `PUT`/`DELETE` → `200`/`204`,
+and deleting is idempotent. Person writes enqueue the `CREATE`/`UPDATE`/`DELETE`
+sync jobs that keep terminals in step.
+
+People are company-wide in this schema, so **site grants do not narrow the people
+list** — see the known limitations.
+
+### Operators
+
+All ADMIN. `{operator_id}` is an operator's `public_id`.
+
+| Method | Path |
+|---|---|
+| `GET` | `/console/operators` |
+| `POST` | `/console/operators` |
+| `GET` | `/console/operators/{operator_id}` |
+| `PUT` | `/console/operators/{operator_id}` |
+| `DELETE` | `/console/operators/{operator_id}` |
+| `GET` | `/console/operators/{operator_id}/sites` |
+| `PUT` | `/console/operators/{operator_id}/sites` |
+
+```json
+POST {"email": "…", "full_name": "…", "password": "…", "role": "MANAGER",
+      "site_ids": ["5120…"]}
+
+PUT  {"role": "ADMIN", "active": false, "password": "…"}   // all optional
+PUT  /sites {"site_ids": ["5120…", "80e5…"]}               // replaces wholesale
+```
+
+Guards, each a `403`:
+
+- an **ADMIN cannot create, promote to, or modify an OWNER** — otherwise ADMIN is
+  a synonym for OWNER one request later;
+- nobody may change **their own** role, disable themselves, or delete themselves —
+  a sole OWNER demoting themselves would leave nobody able to manage operators.
+
+`409` on a duplicate address, `400` on a password below the policy. An
+administrative password reset revokes **every** session the target holds. Site
+grants are resolved inside the caller's company: an unknown or foreign site fails
+the whole call with `400` and changes nothing.
+
+### Applications
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/applications` | VIEWER |
+| `PUT` | `/console/applications/{code}` | OWNER |
+
+See [section 14](#14-applications-and-modules).
+
+---
+
+## 14. Applications and modules
+
+AccessLink is a **general-purpose biometric terminal platform**. The same
+hardware and the same API serve a company running door access, one recording
+attendance, and one doing nothing but identity verification. What a deployment is
+*for* is configuration, not a property of the product.
+
+An **application** is a capability the platform offers:
+
+| Code | Capability |
+|---|---|
+| `ACCESS_CONTROL` | decide whether to release a door, barrier or lock |
+| `ATTENDANCE` | record presence against a schedule |
+| `REGISTRATION` | enrol people and their credentials |
+| `CHECK_IN` | record arrival at an event or appointment |
+| `VERIFICATION` | confirm a person is who they claim, and report it |
+| `TIME_TRACKING` | accumulate worked time from arrivals and departures |
+| `VISITOR_MANAGEMENT` | admit and record people who are not on the roster |
+
+**Nothing is enabled by default.** A company with no capabilities enabled is a
+legitimate, fully-working state, and it is the state every company starts in. A
+client must render that rather than fall back to a default set — assuming a
+workflow is precisely what this model exists to prevent. Read the catalog from
+`available` rather than hard-coding it, so a capability added to the platform
+appears without a client change.
+
+### `GET /api/v1/console/applications`
+
+```json
+{
+  "configured": [
+    { "id": "…", "code": "ATTENDANCE", "enabled": true,
+      "settings": {"grace_minutes": 5},
+      "created_at": "…", "updated_at": "…" }
+  ],
+  "enabled": ["ATTENDANCE"],
+  "available": ["ACCESS_CONTROL", "ATTENDANCE", "REGISTRATION", "CHECK_IN",
+                "VERIFICATION", "TIME_TRACKING", "VISITOR_MANAGEMENT"]
+}
+```
+
+`configured` holds every row the company has, enabled or not; `enabled` is the
+subset currently on. **A disabled capability is never reported as enabled** — but
+its row and its settings are retained, so turning it back on restores what was
+configured rather than starting over.
+
+### `PUT /api/v1/console/applications/{code}`
+
+OWNER + CSRF.
+
+```json
+{"enabled": true, "settings": {"grace_minutes": 5}}
+```
+
+Both fields optional: omitting `enabled` enables, and omitting `settings` leaves
+the existing configuration alone, so a toggle does not discard it. `settings` must
+be a **JSON object**. `400` for an unknown code, a lowercase code, a non-object
+`settings`, or `MULTI_PURPOSE`.
+
+### Terminal application mode
+
+Separate from company capabilities, and per **terminal** — one site routinely
+mixes purposes, such as a door terminal at the entrance and a registration desk
+in the office.
+
+`application_mode` is one capability code **or** `MULTI_PURPOSE`:
+
+- **`MULTI_PURPOSE`** is the default for every terminal, and means the terminal
+  serves whatever its company has enabled. It is a **device mode, never a company
+  capability** — `PUT /console/applications/MULTI_PURPOSE` is a `400`.
+- A specific mode may only be assigned while the company has that capability
+  enabled (`409` otherwise).
+- If the company later disables it, the assignment is **retained** and
+  `effective_applications` goes empty. Re-enabling restores it; the terminal's
+  configuration is never silently rewritten.
+
+`effective_applications` is what the terminal actually serves right now, and is
+empty for a company that has enabled nothing.
+
+**The device protocol is unaffected.** No device-facing endpoint reports an
+application mode, and no terminal is told anything new — a terminal in the field
+cannot tell whether any of this is configured.
+
 ---
 
 ## Known limitations
@@ -1101,8 +1549,11 @@ Behaviour a client must design around today:
 1. **Access checks ignore permissions.** `GET /access/{member_id}` tests
    membership status only — no door scope, schedule, or validity window.
 2. **`GET /members` is unpaginated.**
-3. **No rate limiting** on any endpoint, including authentication. A leaked site
-   key can be brute-forced against `/devices/register` without resistance, and
+3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`
+   and `POST /auth/password` share a per-address allowance and a per-account
+   lockout; the limiter is in-process, so with more than one instance the
+   effective rate multiplies by the instance count. Nothing else is limited — a
+   leaked site key can still be brute-forced against `/devices/register`, and
    nothing bounds how many terminals one key may enrol.
 4. **Site API keys are stored in plaintext**, and are compared with a plain SQL
    equality. Device keys are hashed with SHA-256 and never stored in the clear.
@@ -1119,5 +1570,18 @@ Behaviour a client must design around today:
    set.** It exposes counts across all tenants. Keep it off the public network
    or set the token.
 8. **Response envelopes are inconsistent** — bare arrays for members, access
-   logs, and enrollment; `{count, ...}` objects for devices and firmware.
+   logs, and enrollment; `{count, ...}` objects for devices, firmware, and every
+   console list.
 9. **Error message strings are not stable.** Branch on status codes.
+10. **`GET /console/people` is unpaginated**, inheriting limitation 2, and site
+    grants do not narrow it — people are company-wide (limitation 6), so the
+    console reports the scope the API can actually enforce rather than implying
+    one it cannot.
+11. **No application business logic exists yet.** The applications model records
+    which capabilities a company has enabled and what each terminal is assigned
+    to; nothing evaluates attendance, access decisions or check-in on top of it.
+    Enabling a capability changes what the dashboard should offer, not what the
+    platform does at a door.
+12. **Terminals are not told their application mode.** The device protocol is
+    unchanged, so a mode is operator-facing configuration until a module needs
+    to deliver it — which will be an additive field in the settings payload.
