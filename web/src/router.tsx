@@ -5,6 +5,8 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
+import { OperatorsListPage } from './pages/operators/OperatorsListPage'
 import { PeopleListPage } from './pages/people/PeopleListPage'
 import { PersonDetailPage } from './pages/people/PersonDetailPage'
 import { SiteDetailPage } from './pages/sites/SiteDetailPage'
@@ -50,14 +52,21 @@ export const router = createBrowserRouter([
       // screens are ADMIN-gated in the UI and enforced by the API regardless.
       { path: 'sites', element: <SitesListPage /> },
       { path: 'sites/:siteId', element: <SiteDetailPage /> },
+      // ADMIN, matching the server's route group. RequireRole is a courtesy --
+      // the API refuses every one of these regardless of what the router allows.
       {
         path: 'operators',
         element: (
           <RequireRole minimum="ADMIN">
-            <NotImplemented
-              title="Operators"
-              description="Who can sign in to this console, and what they may do."
-            />
+            <OperatorsListPage />
+          </RequireRole>
+        ),
+      },
+      {
+        path: 'operators/:operatorId',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <OperatorDetailPage />
           </RequireRole>
         ),
       },

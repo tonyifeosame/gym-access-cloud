@@ -563,6 +563,10 @@ export const handlers = [
   http.get('*/api/v1/console/operators', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
+
+    const failure = takeFailure('operators-list')
+    if (failure) return json({ error: 'Failed to retrieve operators' }, failure)
+
     return json({ count: state.operators.length, operators: state.operators })
   }),
 
@@ -645,9 +649,13 @@ export const handlers = [
     const operator = state.operators.find((entry) => entry.id === operatorId)
     if (!operator) return json({ error: 'Operator not found' }, 404)
 
+    const failure = takeFailure('update-operator')
+    if (failure) return json({ error: 'Failed to update operator' }, failure)
+
     const body = (await request.json()) as {
       role?: OperatorAccount['role']
       active?: boolean
+      password?: string
     }
 
     // Mirrors the server: nobody may change their own role or disable

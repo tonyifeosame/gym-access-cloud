@@ -967,3 +967,41 @@ textarea.field__input {
     padding-bottom: 0;
   }
 }
+
+/* ===========================================================================
+ * Operators module
+ * ======================================================================== */
+
+.operator-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Site grants, as a list of links rather than a sentence -- each one is
+ * somewhere the reader may want to go. */
+.chip-list {
+  list-style: none;
+  margin: var(--space-2) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: inherit;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

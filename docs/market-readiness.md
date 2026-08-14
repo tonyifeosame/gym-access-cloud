@@ -36,6 +36,48 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-015 — No invitation or credential-handover flow for operators — **Major**
+
+*Found: 2026-08-14, building operator creation in Phase 2.5.*
+
+`POST /console/operators` requires the caller to **choose the new operator's
+password** and hand it over themselves. There is no invitation email, no
+single-use setup link, and no "must change password at first sign-in" flag —
+`users.password_changed_at` exists but nothing reads it as a policy.
+
+The realistic consequence is that initial credentials travel by chat or email in
+plain text, and typically stay unchanged. The administrator who created the
+account also knows the password indefinitely, with nothing recording that they
+do.
+
+Phase 2.5 says so on the form — that AccessLink sends no invitations, that the
+password must be communicated separately, and that it cannot be shown again —
+which is the honest handling of a gap the frontend cannot close.
+
+Needs an invitation flow, a forced first-change flag, or both, before this is
+comfortable for a commercial customer onboarding staff at scale.
+
+### MR-016 — Site grants persist through a promotion and silently reapply — **Minor**
+
+*Found: 2026-08-14, reading `SetUserRole` while building the role dialog.*
+
+Site grants are stored per operator and **ignored for ADMIN and OWNER**, which
+reach every site by role. `SetUserRole` does not clear them.
+
+So: a MANAGER restricted to one site is promoted to ADMIN and correctly reaches
+everything; if they are later moved back to MANAGER, **the old restriction
+silently reapplies** — possibly months later, naming a site that may since have
+been retired. Nobody involved is likely to remember it was ever set.
+
+Not a security hole — the grant is narrowing, not widening, and the server is
+consistent throughout. It is a surprise, and the surprising direction is the one
+that removes access unexpectedly.
+
+Phase 2.5 warns at both points: the role dialog says restrictions will stop
+applying and would return on demotion, and the detail page says stored
+restrictions exist on a role that ignores them. A backend fix would be to clear
+grants on promotion, or to surface them as an explicit part of the role change.
+
 ### MR-011 — No operator API for biometric enrolment — **Major**
 
 *Found: 2026-08-14, auditing the People API before Phase 2.4.*
