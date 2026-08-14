@@ -613,6 +613,61 @@ func ReplaceSiteGrants(companyID, userID int64, sitePublicIDs []string) error {
 	return tx.Commit()
 }
 
+// SiteAccess is what the authorization layer needs to know about one operator
+// and one site, resolved in a single round trip.
+//
+// GrantCount counts EVERY grant row, including grants to retired sites --
+// unlike ListSiteGrants, which filters them out for display. The asymmetry is
+// deliberate and the safe direction: grant count answers "is this operator
+// scoped at all", and an operator granted one site that is later retired must
+// stay scoped to nothing rather than silently widen to the whole company.
+type SiteAccess struct {
+	SiteID     int64
+	SiteName   string
+	Granted    bool
+	GrantCount int
+}
+
+// ResolveSiteAccess looks up a site inside one company and reports whether an
+// operator holds a grant to it.
+//
+// The company filter is the load-bearing part. Whether a role is allowed to
+// bypass grants is a policy question answered in the middleware, but NO role
+// may reach a site belonging to another tenant -- so the site is resolved
+// company-scoped here rather than being looked up globally and checked
+// afterwards. A site in another company is reported as ErrSiteNotFound, the same
+// way every other cross-tenant read is, so the API does not confirm that an id
+// exists elsewhere.
+//
+// This decides nothing on its own; it only reports facts.
+func ResolveSiteAccess(companyID, userID int64, sitePublicID string) (*SiteAccess, error) {
+	if !looksLikeUUID(sitePublicID) {
+		return nil, models.ErrSiteNotFound
+	}
+
+	var access SiteAccess
+	err := DB.QueryRow(`
+		SELECT s.id,
+		       s.site_name,
+		       EXISTS (SELECT 1 FROM user_site_grants g
+		                WHERE g.user_id = $3 AND g.site_id = s.id) AS granted,
+		       (SELECT count(*) FROM user_site_grants g2
+		         WHERE g2.user_id = $3) AS grant_count
+		  FROM sites s
+		 WHERE s.public_id = $1
+		   AND s.company_id = $2
+		   AND s.deleted_at IS NULL`,
+		sitePublicID, companyID, userID).
+		Scan(&access.SiteID, &access.SiteName, &access.Granted, &access.GrantCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrSiteNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &access, nil
+}
+
 // looksLikeUUID reports whether s is shaped like the UUIDs public_id holds.
 //
 // Checked in Go because the column is typed `uuid`: PostgreSQL raises a syntax
