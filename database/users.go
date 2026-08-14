@@ -717,6 +717,53 @@ func ResolveSiteAccess(companyID, userID int64, sitePublicID string) (*SiteAcces
 	return &access, nil
 }
 
+// ResolveDeviceAccess looks up a terminal inside one company and reports
+// whether an operator holds a grant to the SITE THAT TERMINAL IS AT.
+//
+// The counterpart to ResolveSiteAccess for the routes that name a serial rather
+// than a site. A terminal is not a company-wide object -- it is bolted to a door
+// at exactly one site -- so the grant that governs it is the grant on that site,
+// and there is no second rule to invent here.
+//
+// The company filter is again the load-bearing part, and the tenancy join goes
+// through sites for the same reason every other device read does: devices carry
+// no company_id of their own. A serial belonging to another tenant is reported
+// as ErrDeviceNotFound rather than as a grant failure, so the API never confirms
+// that a serial exists elsewhere. Serial numbers are printed on the hardware and
+// are guessable by anyone who has seen one, which is precisely why this must not
+// answer differently for "exists in another company" and "does not exist".
+//
+// Like ResolveSiteAccess this decides nothing; it only reports facts.
+func ResolveDeviceAccess(companyID, userID int64, serialNumber string) (*SiteAccess, error) {
+	if serialNumber == "" {
+		return nil, models.ErrDeviceNotFound
+	}
+
+	var access SiteAccess
+	err := DB.QueryRow(`
+		SELECT s.id,
+		       s.site_name,
+		       EXISTS (SELECT 1 FROM user_site_grants g
+		                WHERE g.user_id = $3 AND g.site_id = s.id) AS granted,
+		       (SELECT count(*) FROM user_site_grants g2
+		         WHERE g2.user_id = $3) AS grant_count
+		  FROM devices d
+		  JOIN sites s ON s.id = d.site_id
+		 WHERE d.serial_number = $1
+		   AND s.company_id = $2
+		   AND d.deleted_at IS NULL
+		   AND s.deleted_at IS NULL`,
+		serialNumber, companyID, userID).
+		Scan(&access.SiteID, &access.SiteName, &access.Granted, &access.GrantCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrDeviceNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &access, nil
+}
+
 // looksLikeUUID reports whether s is shaped like the UUIDs public_id holds.
 //
 // Checked in Go because the column is typed `uuid`: PostgreSQL raises a syntax

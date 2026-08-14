@@ -1304,6 +1304,12 @@ means every site in the company. On a site-scoped route:
 Lists are narrowed by the same rule, so the console never shows a site the detail
 route would then refuse.
 
+**Terminals are governed by the grant on the site they stand at.** A route that
+names a `{serial}` rather than a `{site_id}` resolves the terminal's own site and
+applies exactly the rule above — another company's serial is `404`, an ungranted
+site's serial is `403`. A serial is printed on the hardware and is not a secret,
+so knowing one has never been a substitute for a grant.
+
 **Tenancy.** Every query is scoped to the caller's company. A resource in another
 tenant is `404`.
 
@@ -1340,14 +1346,22 @@ for every terminal at that site — the same handler and the same behaviour as
 |---|---|---|---|
 | `GET` | `/console/terminals` | VIEWER | `{count, terminals: [...]}` |
 | `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
-| `GET` | `/console/terminals/{serial}` | VIEWER | application configuration |
-| `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | application configuration |
+| `GET` | `/console/terminals/{serial}` | VIEWER | inventory row + application configuration |
+| `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | inventory row + application configuration |
 
 `terminals` entries are the inventory objects from
 [section 7](#get-apiv1devicesoutdatedtrue). They carry **no credential material**
 — not the device key, not its hash, not the site key. `?outdated=true` filters as
-it does there. The list is narrowed by site grants; the summary is company-wide,
-because a partial rollup presented as the whole fleet would mislead.
+it does there.
+
+**All four are narrowed by site grants**, including the summary: the counts sit
+above a list that is itself narrowed, so a company-wide rollup would both misread
+to a scoped operator and disclose how much hardware stands at sites they were
+deliberately not given. The two `{serial}` routes are gated on the grant to that
+terminal's own site — `403` for an ungranted site in your company, `404` for
+another tenant's serial or one that does not exist. The gate runs **before** the
+handler, so a malformed body against a terminal you may not reach is still `403`
+rather than a `400` that would confirm the serial exists.
 
 `GET /console/terminals/{serial}` returns the **same inventory row as the list**,
 plus the application assignment:

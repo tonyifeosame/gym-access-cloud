@@ -65,6 +65,7 @@ var consoleRoutes = []struct {
 	{"GET", "/api/v1/console/applications", models.RoleViewer, ""},
 	{"GET", "/api/v1/console/terminals", models.RoleViewer, ""},
 	{"GET", "/api/v1/console/terminals/summary", models.RoleViewer, ""},
+	{"GET", "/api/v1/console/terminals/TERM-1", models.RoleViewer, ""},
 	{"GET", "/api/v1/console/people", models.RoleViewer, ""},
 	{"POST", "/api/v1/console/people", models.RoleManager,
 		`{"external_id":"P-NEW","full_name":"New Person"}`},
@@ -608,6 +609,122 @@ func TestConsoleTerminalListingAndConfiguration(t *testing.T) {
 	}
 	if code, _ := consoleCall(t, env.router, "GET", "/api/v1/console/terminals/NO-SUCH-SERIAL", "", token, ""); code != http.StatusNotFound {
 		t.Error("reading an unknown terminal was not a 404")
+	}
+}
+
+// TestConsoleTerminalGrantEnforcement covers the routes that name ONE terminal.
+//
+// The list was always narrowed to the caller's grants; the detail and the
+// application-mode write were company-scoped only, so a scoped operator could
+// not see another site's terminal in the list and could still read it -- and
+// repoint it -- by naming its serial. Serials are printed on the hardware, so
+// "they would have to know the serial" was never a control.
+//
+// The 404/403 split is asserted in both directions here, because getting it
+// backwards leaks tenancy: 403 on another company's serial would confirm that
+// the serial is registered to somebody.
+func TestConsoleTerminalGrantEnforcement(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	siteA := operatorSitePublicID(t, "Site A")
+
+	mustCreateDevice(t, "Site A", "GRANT-A-1")
+	mustCreateDevice(t, "Site B", "GRANT-B-1")
+	mustCreateDevice(t, "Site C", "GRANT-C-1") // company two
+
+	scoped, token, csrf := consoleOperatorSession(t, env.router, one,
+		"terminal-scoped@example.com", models.RoleManager)
+	if err := database.ReplaceSiteGrants(one, scoped.ID, []string{siteA}); err != nil {
+		t.Fatalf("granting: %v", err)
+	}
+
+	// The list is narrowed, and the detail route agrees with it.
+	_, body := consoleCall(t, env.router, "GET", "/api/v1/console/terminals", "", token, "")
+	terminals := listOf(t, body, "terminals")
+	if len(terminals) != 1 || terminals[0].(map[string]any)["serial_number"] != "GRANT-A-1" {
+		t.Fatalf("scoped list = %v, want only GRANT-A-1", terminals)
+	}
+
+	if code, body := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/GRANT-A-1", "", token, ""); code != http.StatusOK {
+		t.Errorf("granted terminal = %d, want 200 (%v)", code, body)
+	}
+
+	// Same company, ungranted site: it exists and they may know it does.
+	if code, _ := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/GRANT-B-1", "", token, ""); code != http.StatusForbidden {
+		t.Errorf("reading an ungranted terminal = %d, want 403", code)
+	}
+
+	// Another company: not found, never forbidden.
+	if code, _ := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/GRANT-C-1", "", token, ""); code != http.StatusNotFound {
+		t.Errorf("reading another tenant's terminal = %d, want 404", code)
+	}
+	if code, _ := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/NO-SUCH-SERIAL", "", token, ""); code != http.StatusNotFound {
+		t.Errorf("reading an unknown terminal = %d, want 404", code)
+	}
+
+	// The write obeys the same gate.
+	if code, _ := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/terminals/GRANT-A-1/application-mode",
+		`{"application_mode":"MULTI_PURPOSE"}`, token, csrf); code != http.StatusOK {
+		t.Error("configuring a granted terminal was refused")
+	}
+	if code, _ := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/terminals/GRANT-B-1/application-mode",
+		`{"application_mode":"MULTI_PURPOSE"}`, token, csrf); code != http.StatusForbidden {
+		t.Error("configuring an ungranted terminal was allowed")
+	}
+	if code, _ := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/terminals/GRANT-C-1/application-mode",
+		`{"application_mode":"MULTI_PURPOSE"}`, token, csrf); code != http.StatusNotFound {
+		t.Error("configuring another tenant's terminal did not report 404")
+	}
+
+	// The mode really did not change on the terminal the write was refused for.
+	if mode := queryString(t,
+		`SELECT application_mode FROM devices WHERE serial_number = 'GRANT-B-1'`); mode != models.AppMultiPurpose {
+		t.Errorf("ungranted terminal mode = %q, want it untouched", mode)
+	}
+
+	// THE GATE RUNS BEFORE THE HANDLER. A malformed body against an ungranted
+	// terminal must be refused as forbidden, not validated -- otherwise the
+	// error message becomes an oracle for which serials exist.
+	if code, _ := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/terminals/GRANT-B-1/application-mode",
+		`{"application_mode":"NONSENSE"}`, token, csrf); code != http.StatusForbidden {
+		t.Error("an ungranted terminal validated its body before checking the grant")
+	}
+
+	// The summary is narrowed to the same scope as the list. A company-wide
+	// rollup over a scoped list both misreads and discloses the wider fleet.
+	_, body = consoleCall(t, env.router, "GET", "/api/v1/console/terminals/summary", "", token, "")
+	if total := body["total"].(float64); total != 1 {
+		t.Errorf("scoped summary total = %v, want 1 (only Site A's terminal)", total)
+	}
+
+	// An ADMIN is never scoped by grants, and still cannot cross the tenant.
+	_, adminToken, adminCSRF := consoleOperatorSession(t, env.router, one,
+		"terminal-admin@example.com", models.RoleAdmin)
+	if code, _ := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/GRANT-B-1", "", adminToken, ""); code != http.StatusOK {
+		t.Error("an ADMIN was refused a terminal in its own company")
+	}
+	if code, _ := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/terminals/GRANT-B-1/application-mode",
+		`{"application_mode":"MULTI_PURPOSE"}`, adminToken, adminCSRF); code != http.StatusOK {
+		t.Error("an ADMIN was refused a terminal write in its own company")
+	}
+	if code, _ := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/GRANT-C-1", "", adminToken, ""); code != http.StatusNotFound {
+		t.Error("an ADMIN reached another company's terminal")
+	}
+	_, body = consoleCall(t, env.router, "GET", "/api/v1/console/terminals/summary", "", adminToken, "")
+	if total := body["total"].(float64); total != 2 {
+		t.Errorf("unscoped summary total = %v, want 2 (the company's own terminals)", total)
 	}
 }
 

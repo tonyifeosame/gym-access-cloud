@@ -24,7 +24,10 @@ import (
 func ListDevices(c *gin.Context) {
 	outdatedOnly := c.Query("outdated") == "true"
 
-	devices, err := database.ListDevices(c.GetInt64("company_id"), outdatedOnly)
+	// nil scope: unnarrowed. Site grants are an OPERATOR concept and there is no
+	// operator here -- this route authenticates with a site API key, whose
+	// holder is trusted with the whole company's inventory by construction.
+	devices, err := database.ListDevices(c.GetInt64("company_id"), outdatedOnly, nil)
 	if err != nil {
 		logError(c, "list devices", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve devices"})
@@ -39,7 +42,8 @@ func ListDevices(c *gin.Context) {
 
 // GetFleetSummary handles GET /devices/summary
 func GetFleetSummary(c *gin.Context) {
-	summary, err := database.GetFleetSummary(c.GetInt64("company_id"))
+	// nil scope, for the same reason as ListDevices above: no operator, no grants.
+	summary, err := database.GetFleetSummary(c.GetInt64("company_id"), nil)
 	if err != nil {
 		logError(c, "fleet summary", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve fleet summary"})

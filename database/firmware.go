@@ -4,6 +4,8 @@ import (
 	"database/sql"
 
 	"access-terminal-cloud-api/models"
+
+	"github.com/lib/pq"
 )
 
 // Firmware catalog and device inventory (migrations/006_device_firmware_state.sql).
@@ -95,10 +97,33 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 	return devices, rows.Err()
 }
 
-// ListDevices returns the company's device inventory. When outdatedOnly is set,
-// only devices not running the current build for their channel are returned.
-func ListDevices(companyID int64, outdatedOnly bool) ([]models.DeviceInventory, error) {
-	query := `SELECT ` + deviceInventoryColumns + deviceInventoryFrom
+// siteScopeClause narrows a device read to a set of sites.
+//
+// nil means "every site in the company" -- what an unscoped operator, every
+// ADMIN and OWNER, and every site-key caller gets. An EMPTY-but-non-nil slice
+// means "no sites at all", and the two are deliberately not conflated: the
+// caller has to ask for nothing on purpose. Same convention as
+// ListConsoleSites, so a reader who has learned one has learned both.
+//
+// The scope is applied in SQL rather than by filtering the result in Go. A
+// filter after the fact still reads the whole company's fleet out of the
+// database before discarding most of it, and -- for the summary -- there is no
+// row-by-row result to filter at all, because the counts are computed by the
+// query.
+func siteScopeClause(siteIDs []int64) (clause string, args []any) {
+	if siteIDs == nil {
+		return "", nil
+	}
+	return ` AND d.site_id = ANY($2)`, []any{pq.Array(siteIDs)}
+}
+
+// ListDevices returns the company's device inventory, optionally narrowed to a
+// set of sites. When outdatedOnly is set, only devices not running the current
+// build for their channel are returned.
+func ListDevices(companyID int64, outdatedOnly bool, siteIDs []int64) ([]models.DeviceInventory, error) {
+	scope, scopeArgs := siteScopeClause(siteIDs)
+
+	query := `SELECT ` + deviceInventoryColumns + deviceInventoryFrom + scope
 	if outdatedOnly {
 		query += `
 	  AND fv.version IS NOT NULL
@@ -106,7 +131,7 @@ func ListDevices(companyID int64, outdatedOnly bool) ([]models.DeviceInventory, 
 	}
 	query += ` ORDER BY s.site_name, d.serial_number`
 
-	rows, err := DB.Query(query, companyID)
+	rows, err := DB.Query(query, append([]any{companyID}, scopeArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -114,8 +139,18 @@ func ListDevices(companyID int64, outdatedOnly bool) ([]models.DeviceInventory, 
 }
 
 // GetFleetSummary reports device counts by state and how many are behind on
-// firmware -- the numbers a dashboard header shows.
-func GetFleetSummary(companyID int64) (*models.FleetSummary, error) {
+// firmware -- the numbers a dashboard header shows -- optionally narrowed to a
+// set of sites.
+//
+// The scope parameter exists because these counts are rendered ABOVE a terminal
+// list that is itself narrowed by the caller's grants. A company-wide rollup
+// over a scoped list reads as a bug to the operator looking at it ("12 online"
+// above a list of one), and it discloses how much hardware exists at sites they
+// were deliberately not given. Both callers therefore pass the same scope they
+// pass to ListDevices.
+func GetFleetSummary(companyID int64, siteIDs []int64) (*models.FleetSummary, error) {
+	scope, scopeArgs := siteScopeClause(siteIDs)
+
 	var s models.FleetSummary
 	err := DB.QueryRow(`
 		SELECT count(*),
@@ -134,9 +169,10 @@ func GetFleetSummary(companyID int64) (*models.FleetSummary, error) {
 		        AND fv.device_type = d.device_type
 		        AND fv.release_channel = d.release_channel
 		        AND fv.is_current AND fv.deleted_at IS NULL
-		 WHERE s.company_id = $1 AND d.deleted_at IS NULL AND s.deleted_at IS NULL`,
-		companyID).Scan(&s.Total, &s.Online, &s.Offline, &s.Updating, &s.Error,
-		&s.Disabled, &s.Provisioning, &s.FirmwareOutdated)
+		 WHERE s.company_id = $1 AND d.deleted_at IS NULL AND s.deleted_at IS NULL`+scope,
+		append([]any{companyID}, scopeArgs...)...).
+		Scan(&s.Total, &s.Online, &s.Offline, &s.Updating, &s.Error,
+			&s.Disabled, &s.Provisioning, &s.FirmwareOutdated)
 	if err != nil {
 		return nil, err
 	}

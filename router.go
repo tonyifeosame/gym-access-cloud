@@ -152,7 +152,14 @@ func NewRouter() *gin.Engine {
 
 			read.GET("/terminals", handlers.ConsoleListTerminals)
 			read.GET("/terminals/summary", handlers.ConsoleTerminalSummary)
-			read.GET("/terminals/:serial", handlers.ConsoleGetTerminal)
+
+			// RequireTerminalGrant resolves :serial to the site the terminal
+			// is at and applies the same rule RequireSiteGrant does. Without
+			// it a scoped operator could not SEE another site's terminal in
+			// the list but could still read it by naming its serial, which is
+			// printed on the hardware.
+			read.GET("/terminals/:serial", middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleGetTerminal)
 
 			read.GET("/people", handlers.ConsoleListPeople)
 			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
@@ -174,7 +181,10 @@ func NewRouter() *gin.Engine {
 			write.PUT("/people/:external_id", handlers.ConsoleUpdatePerson)
 			write.DELETE("/people/:external_id", handlers.ConsoleDeletePerson)
 
-			write.PUT("/terminals/:serial/application-mode", handlers.ConsoleSetTerminalMode)
+			// Changing what a terminal does is a site operation, gated on the
+			// grant to that terminal's site exactly as the read above is.
+			write.PUT("/terminals/:serial/application-mode",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleSetTerminalMode)
 
 			// GetSiteSettings/UpdateSiteSettings are the SAME handlers the
 			// site-key API uses. Both read site_id from the context, which

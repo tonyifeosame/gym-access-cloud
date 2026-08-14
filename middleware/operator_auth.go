@@ -30,10 +30,11 @@ import (
 //
 // The chain a console route uses:
 //
-//	OperatorAuthMiddleware()      resolve the session, populate the context
-//	RequireCSRF()                 unsafe methods must carry X-CSRF-Token
-//	RequireRole(models.RoleAdmin) minimum role for this route
-//	RequireSiteGrant("site_id")   the :site_id in the path must be reachable
+//	OperatorAuthMiddleware()        resolve the session, populate the context
+//	RequireCSRF()                   unsafe methods must carry X-CSRF-Token
+//	RequireRole(models.RoleAdmin)   minimum role for this route
+//	RequireSiteGrant("site_id")     the :site_id in the path must be reachable
+//	RequireTerminalGrant("serial")  ...or the site the :serial sits at
 
 // SessionCookieName is the cookie the dashboard authenticates with.
 //
@@ -308,10 +309,81 @@ func RequireSiteGrant(param string) gin.HandlerFunc {
 			return
 		}
 
-		allowed := RoleAtLeast(identity.Role, models.RoleAdmin) ||
-			access.GrantCount == 0 ||
-			access.Granted
-		if !allowed {
+		if !grantAllows(identity, access) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Site access denied"})
+			c.Abort()
+			return
+		}
+
+		c.Set("site_id", access.SiteID)
+		c.Set("site_name", access.SiteName)
+
+		c.Next()
+	}
+}
+
+// grantAllows applies THE GRANT RULE described on RequireSiteGrant to one
+// resolved site.
+//
+// Factored out because it is now applied at two entry points -- a path naming a
+// site and a path naming a terminal -- and two copies of an authorization rule
+// is two places for it to be relaxed. Every gate that consults grants goes
+// through this function.
+func grantAllows(identity *models.OperatorIdentity, access *database.SiteAccess) bool {
+	return RoleAtLeast(identity.Role, models.RoleAdmin) ||
+		access.GrantCount == 0 ||
+		access.Granted
+}
+
+// RequireTerminalGrant authorizes a route that names a TERMINAL by serial, and
+// puts the site that terminal belongs to in the context for the handler.
+//
+// param is the path parameter holding the serial, i.e. "serial" for
+// /api/v1/console/terminals/:serial/application-mode.
+//
+// WHY THIS EXISTS. The terminal LIST was already narrowed to the caller's
+// grants, but the routes that name one terminal were company-scoped only. A
+// MANAGER granted Site A could therefore not see Site B's terminals in the list
+// and still read one, and change what application it runs, by asking for its
+// serial directly -- and a serial is printed on the device rather than being a
+// secret. The list and the detail must answer the same question, so the detail
+// routes now resolve the terminal's site and apply the same rule.
+//
+// The outcomes mirror RequireSiteGrant exactly, including the 404/403 split:
+//
+//   - The terminal is in another company, retired, or does not exist: 404. Never
+//     403, which would confirm that a serial is registered to somebody else.
+//   - The terminal is at a site in the caller's company that they hold no grant
+//     to: 403. They may know it exists; they are not scoped to it.
+//   - Otherwise site_id and site_name are set from THE TERMINAL'S OWN SITE and
+//     the handler runs.
+//
+// Setting site_id from the resolved terminal is deliberate: it means a handler
+// behind this gate has the same context a handler behind RequireSiteGrant has,
+// and cannot be tricked into acting on a site the caller merely named.
+func RequireTerminalGrant(param string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		identity := Operator(c)
+		if identity == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+			c.Abort()
+			return
+		}
+
+		access, err := database.ResolveDeviceAccess(identity.CompanyID, identity.UserID, c.Param(param))
+		if errors.Is(err, models.ErrDeviceNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
+			c.Abort()
+			return
+		}
+		if err != nil {
+			log.Printf("request_id=%s error op=\"resolve terminal access\": %v", RequestID(c), err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Authorization unavailable"})
+			c.Abort()
+			return
+		}
+
+		if !grantAllows(identity, access) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Site access denied"})
 			c.Abort()
 			return

@@ -269,9 +269,9 @@ func ConsoleSetApplication(c *gin.Context) {
 
 // ConsoleListTerminals handles GET /console/terminals
 //
-// Reuses the fleet inventory query, then narrows it to the caller's granted
-// sites. DeviceInventory carries no credential material -- not the device key,
-// not its hash, not the site key -- so there is nothing to strip.
+// Reuses the fleet inventory query, narrowed to the caller's granted sites in
+// SQL. DeviceInventory carries no credential material -- not the device key, not
+// its hash, not the site key -- so there is nothing to strip.
 func ConsoleListTerminals(c *gin.Context) {
 	scope, err := operatorSiteScope(c)
 	if err != nil {
@@ -280,39 +280,39 @@ func ConsoleListTerminals(c *gin.Context) {
 		return
 	}
 
-	devices, err := database.ListDevices(c.GetInt64("company_id"), c.Query("outdated") == "true")
+	terminals, err := database.ListDevices(c.GetInt64("company_id"),
+		c.Query("outdated") == "true", scope)
 	if err != nil {
 		logError(c, "console list terminals", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminals"})
 		return
 	}
-
-	terminals := make([]models.DeviceInventory, 0, len(devices))
-	for _, device := range devices {
-		if scope == nil || containsSiteID(scope, device.SiteID) {
-			terminals = append(terminals, device)
-		}
+	if terminals == nil {
+		terminals = []models.DeviceInventory{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"count": len(terminals), "terminals": terminals})
 }
 
-func containsSiteID(ids []int64, id int64) bool {
-	for _, candidate := range ids {
-		if candidate == id {
-			return true
-		}
-	}
-	return false
-}
-
 // ConsoleTerminalSummary handles GET /console/terminals/summary
 //
-// Company-wide counts. Not narrowed by grants: the summary is a rollup of the
-// fleet, and a partial one attributed to the whole company would be misleading.
-// A site-scoped operator sees the same header figures as their colleagues.
+// NARROWED BY GRANTS, to the same scope the list uses. This previously reported
+// company-wide counts on the reasoning that a rollup should describe the whole
+// fleet. That was wrong in two ways once the console actually renders it: the
+// figures sit directly above a terminal list that IS narrowed, so a scoped
+// operator would read "12 online" over a list of one and conclude the console
+// was broken; and the counts disclose how much hardware stands at sites they
+// were deliberately not granted. A summary an operator cannot drill into is not
+// a summary of anything they can act on.
 func ConsoleTerminalSummary(c *gin.Context) {
-	summary, err := database.GetFleetSummary(c.GetInt64("company_id"))
+	scope, err := operatorSiteScope(c)
+	if err != nil {
+		logError(c, "console resolve site scope", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve summary"})
+		return
+	}
+
+	summary, err := database.GetFleetSummary(c.GetInt64("company_id"), scope)
 	if err != nil {
 		logError(c, "console terminal summary", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve summary"})
@@ -329,6 +329,14 @@ func ConsoleTerminalSummary(c *gin.Context) {
 // It used to return only the application fields, which meant a detail view held
 // LESS than the list row it was opened from. The three original fields are still
 // present at the same paths; everything else is additive.
+//
+// AUTHORIZATION IS UPSTREAM. RequireTerminalGrant has already resolved this
+// serial inside the caller's company and checked the grant on the site it sits
+// at, so a terminal in another tenant never reaches here (404) and neither does
+// one at an ungranted site (403). The company filter below is retained anyway --
+// defence in depth costs one join condition, and a handler that would read
+// across tenants if it were ever mounted without its gate is a handler waiting
+// to be mounted wrongly.
 func ConsoleGetTerminal(c *gin.Context) {
 	detail, err := loadTerminalDetail(c.GetInt64("company_id"), c.Param("serial"))
 	if errors.Is(err, models.ErrDeviceNotFound) {
