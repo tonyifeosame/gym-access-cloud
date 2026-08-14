@@ -327,15 +327,24 @@ describe('applications', () => {
     signIn(makeSession({ role: 'OWNER', applications: [] }))
     seed({ sites: SITES, terminals: TERMINALS, applications: [] })
 
-    const client = makeTestQueryClient()
+    // A gcTime window: the session entry below has no observer, and the
+    // terminals query is awaited before the assertions.
+    const client = makeTestQueryClient({ gcTime: 60_000 })
     const wrapper = queryWrapper(client)
     client.setQueryData(['session'], makeSession())
+
+    // A REAL terminals query, so the assertion below is about an entry that
+    // exists rather than passing vacuously on a missing one.
+    const terminals = renderHook(() => useTerminals(), { wrapper })
+    await waitFor(() => expect(terminals.result.current.isSuccess).toBe(true))
 
     const update = renderHook(() => useUpdateApplication(), { wrapper })
     await update.result.current.mutateAsync({ code: 'ATTENDANCE', body: { enabled: true } })
 
     expect(client.getQueryState(['session'])?.isInvalidated).toBe(true)
-    expect(client.getQueryState(keys.terminals.list())?.isInvalidated ?? true).toBe(true)
+    // effective_applications is computed against what the company has enabled,
+    // so every terminal's resolution just changed.
+    expect(client.getQueryState(keys.terminals.list())?.isInvalidated).toBe(true)
   })
 
   it('reports the catalog so a new capability appears without a frontend release', async () => {

@@ -101,8 +101,13 @@ describe('platform navigation', () => {
     expect(platformNav('MANAGER').map((item) => item.id)).not.toContain('operators')
     expect(platformNav('ADMIN').map((item) => item.id)).toContain('operators')
 
-    // Enabling a capability is a company-level decision: OWNER only.
-    expect(platformNav('ADMIN').map((item) => item.id)).not.toContain('applications')
+    // Applications are ADMIN to SEE and OWNER to CHANGE, so the nav entry
+    // appears for both. The write gate lives on the controls rather than on the
+    // route: what a company is configured for is administrative context an
+    // administrator needs, while deciding it stays a company-level decision.
+    // Below ADMIN it is not offered at all.
+    expect(platformNav('MANAGER').map((item) => item.id)).not.toContain('applications')
+    expect(platformNav('ADMIN').map((item) => item.id)).toContain('applications')
     expect(platformNav('OWNER').map((item) => item.id)).toContain('applications')
   })
 })

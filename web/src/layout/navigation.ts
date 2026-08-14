@@ -42,7 +42,9 @@ export const PLATFORM_NAV: NavItem[] = [
     id: 'applications',
     label: 'Applications',
     path: '/settings/applications',
-    minimumRole: 'OWNER',
+    // ADMIN sees what the company is configured for; only OWNER may change it,
+    // and that gate is on the controls rather than the route.
+    minimumRole: 'ADMIN',
   },
 ]
 

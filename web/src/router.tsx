@@ -5,6 +5,8 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { ApplicationDetailPage } from './pages/applications/ApplicationDetailPage'
+import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
 import { OperatorsListPage } from './pages/operators/OperatorsListPage'
 import { PeopleListPage } from './pages/people/PeopleListPage'
@@ -70,14 +72,23 @@ export const router = createBrowserRouter([
           </RequireRole>
         ),
       },
+      // ADMIN to READ, OWNER to change -- the write gate lives on the controls
+      // rather than the route, so an administrator can see what the company is
+      // configured for without being able to decide it. The API is looser still
+      // (any operator may read), so this is the stricter of the two.
       {
         path: 'settings/applications',
         element: (
-          <RequireRole minimum="OWNER">
-            <NotImplemented
-              title="Applications"
-              description="Which capabilities this company has enabled."
-            />
+          <RequireRole minimum="ADMIN">
+            <ApplicationsPage />
+          </RequireRole>
+        ),
+      },
+      {
+        path: 'settings/applications/:slug',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <ApplicationDetailPage />
           </RequireRole>
         ),
       },

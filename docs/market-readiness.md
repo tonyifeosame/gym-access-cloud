@@ -36,6 +36,71 @@ severity so the final pass has something to sort by:
 
 ## Open
 
+### MR-017 — Applications are configuration with no behaviour behind them — **Blocker**
+
+*Found: 2026-08-14, building the Applications module. Previously noted as
+limitation 11 in `API_SPEC.md`; promoted here because it is a commercial
+blocker rather than an API footnote.*
+
+`company_applications` records which capabilities a company has enabled, and
+`devices.application_mode` records what each terminal is assigned to. **Nothing
+in the platform evaluates any of it.** No attendance is computed, no access
+decision is made against a capability, no check-in is recorded, no worked time
+accumulates. Enabling ACCESS_CONTROL changes what the console offers and what a
+terminal may be pointed at, and nothing else.
+
+The device protocol is also unchanged: terminals are **not told their
+application mode** (limitation 12), so even a terminal correctly assigned to
+ATTENDANCE has no idea it is.
+
+This is the gap between what the product can be *sold* as and what it currently
+*does*. Every other item in this document is a defect or a missing control;
+this one is missing product. AccessLink today is a general-purpose identity and
+terminal-management platform with a capability model bolted on in advance of the
+capabilities.
+
+Phase 2.6 states it plainly on both the catalog and the detail page rather than
+letting an owner infer that enabling something switches it on. That is the
+honest handling, not a fix.
+
+**Nothing should be sold as ACCESS_CONTROL, ATTENDANCE, CHECK_IN, TIME_TRACKING,
+VERIFICATION, REGISTRATION or VISITOR_MANAGEMENT until the corresponding logic
+exists.** Which capability ships first is a product decision.
+
+### MR-018 — No dependency or conflict model between capabilities — **Minor**
+
+*Found: 2026-08-14, building the Applications module.*
+
+Nothing records that one capability requires another, or that two cannot run
+together. `models.Applications` is a flat set; `company_applications` has one
+row per capability with no relationships.
+
+Plausibly fine today, because none of them do anything (MR-017). It stops being
+fine as soon as they do: TIME_TRACKING computed from arrivals and departures
+plainly depends on whatever records those, and REGISTRATION enrolling
+credentials is arguably a prerequisite for anything biometric. Enabling a
+capability whose prerequisite is off would then fail at a terminal rather than
+at the point of configuration.
+
+Phase 2.6 says on the detail page that relationships are not modelled, rather
+than showing an empty "Dependencies" heading that implies the answer is "none".
+
+### MR-019 — Per-application settings have no schema and nothing reads them — **Minor**
+
+*Found: 2026-08-14, building the Applications module.*
+
+`company_applications.settings` is an open JSON object, validated only as being
+an object — the same shape of problem as MR-004 for site settings, and with the
+same consequence: a typo is stored silently.
+
+It is currently less severe only because **nothing consumes the value**. When a
+capability gains behaviour, its settings become load-bearing and will need a
+declared schema, per-capability validation, and guided controls in the console.
+Until then Phase 2.6 offers a raw JSON editor labelled as unread.
+
+Worth deciding alongside MR-004: one settings-schema mechanism should serve
+sites and applications rather than two being invented separately.
+
 ### MR-015 — No invitation or credential-handover flow for operators — **Major**
 
 *Found: 2026-08-14, building operator creation in Phase 2.5.*

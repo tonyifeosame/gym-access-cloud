@@ -14,10 +14,18 @@ import { SessionProvider } from '../session/SessionProvider'
  * failures look like flakiness rather than like the configuration mistakes they
  * are.
  */
-export function makeTestQueryClient(): QueryClient {
+export function makeTestQueryClient(overrides: { gcTime?: number } = {}): QueryClient {
   return new QueryClient({
     defaultOptions: {
-      queries: { retry: false, gcTime: 0, staleTime: 0 },
+      queries: {
+        retry: false,
+        // Zero by default so one test's cache cannot leak into the next. A test
+        // that seeds an OBSERVER-LESS entry with setQueryData and then awaits
+        // something before asserting on it needs a window, because an entry
+        // nothing is watching is collected on the next tick.
+        gcTime: overrides.gcTime ?? 0,
+        staleTime: 0,
+      },
       mutations: { retry: false },
     },
   })

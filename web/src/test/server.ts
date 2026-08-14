@@ -700,6 +700,10 @@ export const handlers = [
   http.get('*/api/v1/console/applications', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
+
+    const failure = takeFailure('applications')
+    if (failure) return json({ error: 'Failed to retrieve applications' }, failure)
+
     return json({
       configured: state.applications,
       enabled: state.applications.filter((app) => app.enabled).map((app) => app.code),
@@ -721,6 +725,9 @@ export const handlers = [
     if (!state.available.includes(code)) {
       return json({ error: 'Unknown application', available: state.available }, 400)
     }
+
+    const failure = takeFailure('set-application')
+    if (failure) return json({ error: 'Failed to update application' }, failure)
 
     const body = (await request.json()) as { enabled?: boolean; settings?: Record<string, unknown> }
     const existing = state.applications.find((app) => app.code === code)
