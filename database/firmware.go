@@ -46,6 +46,34 @@ const deviceInventoryFrom = `
 	  AND d.deleted_at IS NULL
 	  AND s.deleted_at IS NULL`
 
+// GetDeviceInventoryBySerial returns one terminal's inventory row.
+//
+// The SAME projection the list uses, filtered to one serial, so a detail view
+// cannot drift from the list it was opened from -- and so the outdated
+// determination is made the one way it is made everywhere else, against the
+// company's own current build.
+//
+// Company-scoped through the join on sites, like every other console read: a
+// terminal in another tenant is reported as not found.
+func GetDeviceInventoryBySerial(companyID int64, serialNumber string) (*models.DeviceInventory, error) {
+	rows, err := DB.Query(`
+		SELECT `+deviceInventoryColumns+deviceInventoryFrom+`
+		  AND d.serial_number = $2`,
+		companyID, serialNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	devices, err := scanDeviceInventory(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(devices) == 0 {
+		return nil, models.ErrDeviceNotFound
+	}
+	return &devices[0], nil
+}
+
 func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 	defer rows.Close()
 

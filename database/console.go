@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"errors"
+	"strings"
 
 	"access-terminal-cloud-api/models"
 
@@ -90,6 +91,86 @@ func ListConsoleSites(companyID int64, siteIDs []int64) ([]models.ConsoleSite, e
 		return nil, err
 	}
 	return scanConsoleSites(rows)
+}
+
+// People, paginated and searchable.
+//
+// The console needs this and the site-key API deliberately does not get it:
+// GET /api/v1/members is a contract terminals and existing tooling already
+// speak, and quietly bounding it would silently truncate a roster somebody is
+// relying on being complete. This is a separate query for a separate caller.
+
+// PeopleQuery is one page of a people search.
+type PeopleQuery struct {
+	// Search matches the external id or the full name, case-insensitively and
+	// anywhere in the value. Empty matches everything.
+	Search string
+	Limit  int
+	Offset int
+}
+
+// PeoplePage is a page of results plus what a caller needs to ask for the next
+// one. Total is the size of the whole match, not of this page.
+type PeoplePage struct {
+	People []models.Member
+	Total  int
+}
+
+// ListConsolePeople returns one page of a company's people, newest first.
+//
+// Ordered by created_at DESC with an id tiebreak. The tiebreak is not cosmetic:
+// people created in the same transaction share a created_at to the microsecond,
+// and without a second sort key the same row can appear on two consecutive
+// pages while another is skipped entirely.
+func ListConsolePeople(companyID int64, query PeopleQuery) (*PeoplePage, error) {
+	pattern := "%" + escapeLikePattern(query.Search) + "%"
+	searching := query.Search != ""
+
+	var page PeoplePage
+	err := DB.QueryRow(`
+		SELECT count(*)
+		  FROM people
+		 WHERE company_id = $1
+		   AND deleted_at IS NULL
+		   AND (NOT $2 OR external_id ILIKE $3 ESCAPE '\' OR full_name ILIKE $3 ESCAPE '\')`,
+		companyID, searching, pattern).Scan(&page.Total)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := DB.Query(`
+		SELECT `+memberColumns+`
+		  FROM people
+		 WHERE company_id = $1
+		   AND deleted_at IS NULL
+		   AND (NOT $2 OR external_id ILIKE $3 ESCAPE '\' OR full_name ILIKE $3 ESCAPE '\')
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT $4 OFFSET $5`,
+		companyID, searching, pattern, query.Limit, query.Offset)
+	if err != nil {
+		return nil, err
+	}
+
+	people, err := scanMembers(rows)
+	if err != nil {
+		return nil, err
+	}
+	if people == nil {
+		people = []models.Member{}
+	}
+	page.People = people
+
+	return &page, nil
+}
+
+// escapeLikePattern neutralises the wildcards in a user's search term.
+//
+// Without this, searching for "100%" matches every person whose id starts with
+// 100, and a lone "_" matches everyone. The escape character is itself escaped
+// first, or escaping would corrupt a term containing a backslash.
+func escapeLikePattern(term string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(term)
 }
 
 // GetConsoleSite returns one site, scoped to the company.

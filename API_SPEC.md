@@ -1349,15 +1349,28 @@ for every terminal at that site — the same handler and the same behaviour as
 it does there. The list is narrowed by site grants; the summary is company-wide,
 because a partial rollup presented as the whole fleet would mislead.
 
-Application configuration:
+`GET /console/terminals/{serial}` returns the **same inventory row as the list**,
+plus the application assignment:
 
 ```json
 {
-  "serial_number": "TERM-1",
+  "public_id": "…", "serial_number": "TERM-1", "device_name": "Front Desk",
+  "site_id": 4, "site_name": "Lagos Depot", "device_type": "TERMINAL",
+  "status": "ONLINE", "active": true, "release_channel": "STABLE",
+  "firmware_version": "1.2.0", "current_firmware_version": "1.3.0",
+  "firmware_outdated": true, "hardware_revision": "rev-c", "build_number": "456",
+  "boot_count": 12, "last_heartbeat_at": "…", "last_seen_at": "…",
+
   "application_mode": "CHECK_IN",
   "effective_applications": ["CHECK_IN"]
 }
 ```
+
+`application_mode` is what the terminal is **assigned**;
+`effective_applications` is what that **resolves to now**, and goes empty when
+the company disables the capability — the assignment is retained, not rewritten.
+`PUT …/application-mode` returns this same shape, so a client can use the
+response instead of refetching.
 
 ```json
 PUT {"application_mode": "CHECK_IN"}
@@ -1377,11 +1390,44 @@ device credential is ever issued, exactly once, at registration.
 
 | Method | Path | Role |
 |---|---|---|
-| `GET` | `/console/people` | VIEWER |
+| `GET` | `/console/people?limit=&offset=&q=` | VIEWER |
 | `GET` | `/console/people/{external_id}` | VIEWER |
 | `POST` | `/console/people` | MANAGER |
 | `PUT` | `/console/people/{external_id}` | MANAGER |
 | `DELETE` | `/console/people/{external_id}` | MANAGER |
+
+The list is **paginated and searchable**:
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `limit` | 50 | 1–200 | page size |
+| `offset` | 0 | ≥ 0 | rows to skip |
+| `q` | — | ≤ 100 chars | matches `external_id` **or** `full_name`, anywhere, case-insensitively |
+
+Out-of-range and unparseable values are **clamped, not rejected** — a `limit` of
+5000 is a caller asking for as much as it can have, and `limit=abc` falls back to
+the default rather than failing the request.
+
+`%`, `_` and `\` in `q` are matched **literally**. Without that, `%` would select
+the whole roster, `_` would match any single character, and a trailing `\` would
+produce a malformed pattern; a search box can pass any of them safely. `q` is
+trimmed and truncated to 100 characters — a term longer than any stored value
+cannot match anything.
+
+```json
+{
+  "count": 50, "total": 1284, "limit": 50, "offset": 0, "has_more": true,
+  "people": [ … ]
+}
+```
+
+`count` is this page; `total` is the size of the whole match, so `total` reflects
+the search rather than the roster. Ordering is newest first with a stable
+tiebreak, so paging visits every row exactly once.
+
+**`GET /api/v1/members` (site key) is deliberately unchanged** — it still returns
+a bare array of everyone. Terminals and existing tooling speak that contract, and
+bounding it would silently truncate a roster somebody depends on being complete.
 
 ```json
 {
@@ -1573,10 +1619,10 @@ Behaviour a client must design around today:
    logs, and enrollment; `{count, ...}` objects for devices, firmware, and every
    console list.
 9. **Error message strings are not stable.** Branch on status codes.
-10. **`GET /console/people` is unpaginated**, inheriting limitation 2, and site
-    grants do not narrow it — people are company-wide (limitation 6), so the
-    console reports the scope the API can actually enforce rather than implying
-    one it cannot.
+10. **Site grants do not narrow `GET /console/people`** — people are company-wide
+    (limitation 6), so the console reports the scope the API can actually
+    enforce rather than implying one it cannot. The list itself is paginated and
+    searchable; `GET /members` (site key) is still unpaginated per limitation 2.
 11. **No application business logic exists yet.** The applications model records
     which capabilities a company has enabled and what each terminal is assigned
     to; nothing evaluates attendance, access decisions or check-in on top of it.

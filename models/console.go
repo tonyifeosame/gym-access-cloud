@@ -69,6 +69,40 @@ type ConsolePerson struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// TerminalDetail is one terminal, in full.
+//
+// DeviceInventory is embedded ANONYMOUSLY, so its fields marshal at the top
+// level exactly as they do in the list. That is what makes this addition
+// backwards compatible: the three fields the endpoint returned before --
+// serial_number, application_mode, effective_applications -- are all still
+// present at the same paths, and everything else is new alongside them.
+//
+// The two concepts stay distinct and are both needed to read a terminal
+// honestly. Mode is what the terminal is ASSIGNED to do; Effective is what that
+// resolves to right now, and it goes empty when the company disables the
+// capability. The assignment is retained rather than rewritten, so a detail view
+// showing only one of the two would be misleading in exactly the case that
+// matters.
+type TerminalDetail struct {
+	DeviceInventory
+	ApplicationMode       string   `json:"application_mode"`
+	EffectiveApplications []string `json:"effective_applications"`
+}
+
+// ConsolePeoplePage is a page of people.
+//
+// Count is the size of THIS page and Total the size of the whole match, which
+// is the pair a client needs to render "showing 50 of 1,284" and to know when
+// to stop paging. Count keeps the meaning it had before pagination existed.
+type ConsolePeoplePage struct {
+	Count   int             `json:"count"`
+	Total   int             `json:"total"`
+	Limit   int             `json:"limit"`
+	Offset  int             `json:"offset"`
+	HasMore bool            `json:"has_more"`
+	People  []ConsolePerson `json:"people"`
+}
+
 // ConsoleOperator is an operator account as the console lists it.
 type ConsoleOperator struct {
 	ID          string      `json:"id"`

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/middleware"
@@ -321,11 +323,14 @@ func ConsoleTerminalSummary(c *gin.Context) {
 
 // ConsoleGetTerminal handles GET /console/terminals/:serial
 //
-// Reports what the terminal is configured to do and what that currently
-// resolves to. A specific mode stops resolving when its capability is disabled
-// at the company, and the assignment is retained rather than rewritten.
+// The full inventory row -- the same projection the list uses -- plus what the
+// terminal is assigned to do and what that currently resolves to.
+//
+// It used to return only the application fields, which meant a detail view held
+// LESS than the list row it was opened from. The three original fields are still
+// present at the same paths; everything else is additive.
 func ConsoleGetTerminal(c *gin.Context) {
-	application, err := database.GetDeviceApplication(c.GetInt64("company_id"), c.Param("serial"))
+	detail, err := loadTerminalDetail(c.GetInt64("company_id"), c.Param("serial"))
 	if errors.Is(err, models.ErrDeviceNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
 		return
@@ -335,7 +340,32 @@ func ConsoleGetTerminal(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminal"})
 		return
 	}
-	c.JSON(http.StatusOK, application)
+	c.JSON(http.StatusOK, detail)
+}
+
+// loadTerminalDetail composes the inventory row with the application assignment.
+//
+// Two reads rather than one join: the inventory projection already carries a
+// firmware join whose correctness matters, and the application resolution needs
+// the company's enabled capabilities. Keeping them apart means neither has to
+// know about the other, and both stay the single definition used everywhere
+// else.
+func loadTerminalDetail(companyID int64, serial string) (*models.TerminalDetail, error) {
+	inventory, err := database.GetDeviceInventoryBySerial(companyID, serial)
+	if err != nil {
+		return nil, err
+	}
+
+	application, err := database.GetDeviceApplication(companyID, serial)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.TerminalDetail{
+		DeviceInventory:       *inventory,
+		ApplicationMode:       application.Mode,
+		EffectiveApplications: application.Effective,
+	}, nil
 }
 
 // ConsoleSetTerminalMode handles PUT /console/terminals/:serial/application-mode
@@ -373,39 +403,109 @@ func ConsoleSetTerminalMode(c *gin.Context) {
 		return
 	}
 
-	application, err := database.GetDeviceApplication(companyID, c.Param("serial"))
+	// Returns the same shape as the detail read, so a client can replace what it
+	// is holding with the response rather than refetching.
+	detail, err := loadTerminalDetail(companyID, c.Param("serial"))
 	if err != nil {
 		logError(c, "console reload terminal", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update terminal"})
 		return
 	}
-	c.JSON(http.StatusOK, application)
+	c.JSON(http.StatusOK, detail)
 }
 
 // ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
-// ConsoleListPeople handles GET /console/people
+// Paging bounds.
+//
+// A default is applied rather than returning everything: a console list is
+// rendered into a browser, and a company with tens of thousands of people would
+// otherwise serialise the lot on every page load. The ceiling exists so a
+// caller cannot ask for that anyway by passing a large limit.
+const (
+	defaultPeopleLimit = 50
+	maxPeopleLimit     = 200
+	maxSearchLength    = 100
+)
+
+// ConsoleListPeople handles GET /console/people?limit=&offset=&q=
 //
 // People are company-wide in this schema, not site-scoped, so site grants do
 // not narrow this list. That is a documented limitation of the data model
 // rather than an oversight here, and the console reports what the API can
 // actually enforce instead of pretending to a scope it cannot apply.
+//
+// `q` matches the external id or the full name, anywhere and case-insensitively.
+// The search runs in SQL rather than in the browser precisely because the list
+// is bounded: filtering one page of fifty would search the page, not the roster.
+//
+// The site-key API's GET /api/v1/members is deliberately NOT changed to match.
+// Terminals and existing tooling speak that contract, and quietly bounding it
+// would silently truncate a roster somebody depends on being complete.
 func ConsoleListPeople(c *gin.Context) {
-	members, err := database.GetAllMembers(c.GetInt64("company_id"))
+	query := database.PeopleQuery{
+		Search: truncateSearch(strings.TrimSpace(c.Query("q"))),
+		Limit:  boundedQueryInt(c, "limit", defaultPeopleLimit, 1, maxPeopleLimit),
+		Offset: boundedQueryInt(c, "offset", 0, 0, 0),
+	}
+
+	page, err := database.ListConsolePeople(c.GetInt64("company_id"), query)
 	if err != nil {
 		logError(c, "console list people", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve people"})
 		return
 	}
 
-	people := make([]models.ConsolePerson, 0, len(members))
-	for _, member := range members {
+	people := make([]models.ConsolePerson, 0, len(page.People))
+	for _, member := range page.People {
 		people = append(people, consolePerson(member))
 	}
 
-	c.JSON(http.StatusOK, gin.H{"count": len(people), "people": people})
+	c.JSON(http.StatusOK, models.ConsolePeoplePage{
+		Count:   len(people),
+		Total:   page.Total,
+		Limit:   query.Limit,
+		Offset:  query.Offset,
+		HasMore: query.Offset+len(people) < page.Total,
+		People:  people,
+	})
+}
+
+// boundedQueryInt reads a query parameter and clamps it.
+//
+// Clamps rather than rejects: a limit of 5000 is a caller asking for as much as
+// it can have, not a malformed request, and failing it would be less useful than
+// answering with the maximum. Anything unparseable falls back to the default for
+// the same reason. A max of 0 means unbounded above, for offset.
+func boundedQueryInt(c *gin.Context, name string, fallback, min, max int) int {
+	raw := c.Query(name)
+	if raw == "" {
+		return fallback
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if max > 0 && value > max {
+		return max
+	}
+	return value
+}
+
+// truncateSearch bounds the search term. A term longer than any stored value
+// cannot match anything, so there is nothing to gain by passing it to the
+// database.
+func truncateSearch(term string) string {
+	if len(term) > maxSearchLength {
+		return term[:maxSearchLength]
+	}
+	return term
 }
 
 // ConsoleGetPerson handles GET /console/people/:external_id
