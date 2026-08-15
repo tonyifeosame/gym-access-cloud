@@ -68,6 +68,38 @@ func hashDeviceKey(key string) string {
 // Returns the device, its plaintext key, and how many bootstrap jobs were
 // queued.
 func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
+	tx, err := DB.Begin()
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer tx.Rollback()
+
+	device, key, bootstrapped, err := registerDeviceTx(tx, siteID, req)
+	if err != nil {
+		return nil, "", 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, "", 0, err
+	}
+	return device, key, bootstrapped, nil
+}
+
+// registerDeviceTx is the whole of registration, on the caller's transaction.
+//
+// Factored out for the CLAIM path (database/claim.go), which has to mark a code
+// redeemed in the same transaction that issues the credential -- a code marked
+// used with no key issued strands the installer, and a key issued with the code
+// still live leaves a reusable code behind.
+//
+// A claimed terminal therefore goes through EXACTLY this lifecycle: the same
+// upsert, the same refusal to resurrect a DISABLED unit, the same site-mismatch
+// check, the same bootstrap seeding. A second registration path that drifted
+// from this one is how a claimed device would quietly become a device with
+// different rules.
+func registerDeviceTx(tx *sql.Tx, siteID int64,
+	req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
+
 	key, hash, prefix, err := generateDeviceKey()
 	if err != nil {
 		return nil, "", 0, err
@@ -81,12 +113,6 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 	if deviceName == "" {
 		deviceName = req.SerialNumber
 	}
-
-	tx, err := DB.Begin()
-	if err != nil {
-		return nil, "", 0, err
-	}
-	defer tx.Rollback()
 
 	// Re-registration must not resurrect a device that was deliberately
 	// retired, so the conflict target excludes soft-deleted rows via the
@@ -160,10 +186,6 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 	// Inside the transaction. See the note on this function.
 	bootstrapped, err := enqueueBootstrapJobs(tx, device.ID)
 	if err != nil {
-		return nil, "", 0, err
-	}
-
-	if err := tx.Commit(); err != nil {
 		return nil, "", 0, err
 	}
 

@@ -41,6 +41,13 @@ const (
 	auditTerminalResynced = "TERMINAL_RESYNCED"
 	auditTerminalModeSet  = "TERMINAL_MODE_SET"
 
+	// Claim codes. Two actions, because they are performed by two different
+	// identities: an operator issues, and a terminal with no credential at all
+	// redeems. The redemption record carries the address it came from, which is
+	// the only identity there is on that path.
+	auditDeviceClaimCodeIssued = "DEVICE_CLAIM_CODE_ISSUED"
+	auditDeviceClaimed         = "DEVICE_CLAIMED"
+
 	auditPersonCreated = "PERSON_CREATED"
 	auditPersonUpdated = "PERSON_UPDATED"
 	auditPersonDeleted = "PERSON_DELETED"

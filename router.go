@@ -101,6 +101,25 @@ func NewRouter() *gin.Engine {
 	r.GET("/health/maintenance", handlers.HealthMaintenance)
 	r.GET("/metrics", handlers.Metrics)
 
+	// Device claim, /api/v1/devices/claim.
+	//
+	// UNAUTHENTICATED, AND MOUNTED HERE RATHER THAN IN EITHER DEVICE GROUP
+	// BELOW, because it is the one device route whose caller has no credential:
+	// obtaining one is what it is for. Putting it inside the site-key group
+	// would defeat the entire purpose -- the point is that the installer does
+	// NOT hold the site's provisioning secret.
+	//
+	// Its OWN limiter instance, not the login one. An installer standing at a
+	// door retrying a mistyped code must not exhaust the allowance an operator
+	// needs to sign in and fix it, and an attacker hammering login must not lock
+	// out a commissioning engineer.
+	//
+	// The security of an unauthenticated endpoint rests on the record, not on
+	// the route: single use, serial-bound, short-lived, hashed at rest, with
+	// every failure returning one indistinguishable answer. See
+	// database/claim.go.
+	r.POST("/api/v1/devices/claim", middleware.LoginRateLimiter(), handlers.ClaimDevice)
+
 	// Operator authentication, /api/v1/auth/*.
 	//
 	// A SEPARATE group from the v1 tree below, which authenticates with the site
@@ -333,6 +352,16 @@ func NewRouter() *gin.Engine {
 			// client to send it twice.
 			admin.POST("/sites/:site_id/api-key", middleware.RequireSiteGrant("site_id"),
 				handlers.ConsoleRotateSiteAPIKey)
+
+			// Claim codes: the replacement for putting the site key on an
+			// installer's laptop.
+			//
+			// ADMIN, matching key rotation above, and for the same reason --
+			// issuing one authorises hardware to join this site and be handed a
+			// credential. The code is returned ONCE and no read endpoint gives
+			// it back.
+			admin.POST("/sites/:site_id/claim-codes", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleIssueClaimCode)
 
 			// Terminal lifecycle. ADMIN rather than MANAGER for the same reason
 			// site lifecycle is: revoking a credential stops a door working and
