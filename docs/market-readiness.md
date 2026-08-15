@@ -176,7 +176,13 @@ only its symptom, because several findings share one.
 ### BLOCKER
 
 #### GP-01 — No API creates a company
-**Subsystem** Tenancy · **Status** OPEN
+**Subsystem** Tenancy · **Status** FIXED
+
+**Proof.** `platform_admin_test.go` — a company is created, read, updated,
+deactivated and issued its first operator through the API; a platform
+administrator cannot reach a tenant's people, credentials, events, terminals
+or site keys; an operator session cannot reach the platform tree and a
+platform session cannot reach the console, in both directions.
 
 **Root cause.** Companies were introduced by migration 002 as the tenant every
 pre-existing row was adopted by. Nothing has ever needed to create a second one,
@@ -196,7 +202,12 @@ belongs to exactly one company by construction.
 ---
 
 #### SEC-01 — No terminal revocation at any credential class
-**Subsystem** Terminals · **Status** OPEN
+**Subsystem** Terminals · **Status** FIXED
+
+**Proof.** `terminal_lifecycle_test.go` — a revoked terminal cannot
+authenticate, a disabled one keeps its credential and comes back without a
+site visit, a retired one is gone, revocation does not touch its neighbours,
+and every operation is company-scoped and audited.
 
 **Root cause.** `DISABLED` is written in exactly one place in the entire codebase
 — `RetireSite` (`database/sites.go:249`). The device state machine has the state;
@@ -215,7 +226,12 @@ refuses `DISABLED`, so enforcement exists and only the control is missing.
 ---
 
 #### SEC-02 — The site provisioning key is a company-wide data credential
-**Subsystem** Security · **Status** OPEN
+**Subsystem** Security · **Status** FIXED
+
+**Proof.** `terminal_lifecycle_test.go` — a site key cannot read another
+site's terminals or access logs, and cannot write the firmware catalogue at
+all. `security_test.go` covers the tenancy boundary on the remaining
+site-key routes.
 
 **Root cause.** `AuthMiddleware` sets `company_id` from the authenticated site,
 and the handlers behind it were written before an operator identity existed — so
@@ -237,7 +253,8 @@ documenting the replacement.
 ---
 
 #### SEC-03 — No secure boot, no flash encryption
-**Subsystem** Hardware · **Status** OPEN
+**Subsystem** Hardware · **Status** BLOCKED — firmware (AI #2) and a fuse
+burn on real hardware. Nothing in the backend can close it.
 
 **Root cause.** Never configured. `platformio.ini` sets neither, so the device
 credential and the local member table sit in readable NVS on a part that can be
@@ -252,7 +269,18 @@ deployed units without reflashing them.
 ---
 
 #### FW-01 — 64-person ceiling per terminal, failing silently
-**Subsystem** Firmware · **Status** OPEN
+**Subsystem** Firmware · **Status** PARTIAL
+
+**Done.** The server half. A terminal is no longer sent the company's whole
+roster (SEC-04), which removes most of the pressure, and `devices` now
+carries `pending_job_count`, `failed_job_count` and `last_apply_error` so an
+exhausted table is visible rather than silent.
+
+**Remainder, and it is a finding in its own right.** `kMaxMembers = 64` is
+still a firmware constant, and a single site with more than 64 permitted
+people will still exhaust a terminal. The server does not yet refuse or warn
+when a roster exceeds a terminal's stated capacity, because the terminal does
+not report one. Needs AI #2.
 
 **Root cause.** Two independent decisions that compound. `kMaxMembers = 64` sizes
 the on-device table, and the server fans the entire **company** roster to every
@@ -287,7 +315,18 @@ This has to be stated in the sales and installation documentation.
 ---
 
 #### FW-03 — Fingerprints are terminal-local, non-portable, unbacked
-**Subsystem** Credentials · **Status** OPEN
+**Subsystem** Credentials · **Status** PARTIAL
+
+**Done.** The entities. `credentials` carries sealed, server-opaque material
+with a vendor and template format, and `credential_placements` models which
+terminal holds which credential in which sensor slot. A credential has its
+own lifecycle independent of its owner, and the authorization engine enforces
+it — `authorization_engine_test.go` proves a revoked credential is refused
+without deactivating the person.
+
+**Remainder.** No job type distributes sealed material to terminals, so a
+person enrolled at one terminal still has no finger bound at any other. The
+sealing itself is firmware work. Needs AI #2.
 
 **Root cause.** Templates live in the sensor. The firmware uploads a locator
 (`terminal:<id>:slot:<n>`) and explicitly ignores `fingerprint_template` on the
@@ -306,7 +345,22 @@ single-terminal behaviour, so the fleet is not stranded.
 ---
 
 #### APP-01 — No application business logic
-**Subsystem** Applications · **Status** OPEN
+**Subsystem** Applications · **Status** PARTIAL
+
+**Done.** `ACCESS_CONTROL` has real behaviour for the first time: a decision
+is made from the company, site, terminal, person, credential, application,
+permission and schedule, and it produces an auditable event carrying the
+reason. It is enforced at the door for the ALLOW and unconditional-DENY case,
+because a person the rules do not permit is no longer on the terminal's
+roster. It is NOT enforced at the door for schedules -- see the application
+status table, where that gap is stated in full. The capability is also now a row rather than a SQL `CHECK`, and a
+capability a company has switched off authorizes nobody.
+
+**Remainder.** The other five capabilities are configuration and an event
+model that can carry them. `ATTENDANCE`, `CHECK_IN`, `VERIFICATION`,
+`TIME_TRACKING` and `VISITOR_MANAGEMENT` have no logic on top and are NOT
+marked implemented anywhere. See the application status table below, which is
+the honest answer and has not been softened.
 
 **Root cause.** The capability model was built in advance of the capabilities, on
 the reasoning that configuration should precede behaviour. It did — by a whole
@@ -320,7 +374,25 @@ honestly marked, and is not offered for sale.
 ---
 
 #### APP-02 — No permission engine, schedules or event model
-**Subsystem** Access control · **Status** OPEN
+**Subsystem** Access control · **Status** FIXED
+
+**Proof.** `authorization_engine_test.go` — 20+ cases covering
+deny-by-default, DENY beating ALLOW at all three scopes, scope containment,
+person and credential lifecycle, terminal/site/company state, schedule
+bounds, midnight-crossing windows, per-schedule timezones, validity windows,
+disabled capabilities and cross-tenant refusal.
+
+The load-bearing case is `TestDenyByDefault`: it is the one the previous
+behaviour could not have passed under any configuration.
+
+**A bug this suite caught, recorded because it was invisible.** PostgreSQL
+`TIME` columns arrive as `time.Time`, which `database/sql` stringifies as
+RFC3339, and the first window parser used `fmt.Sscanf("%d")` — which stops at
+the first non-digit and reports no error. `"0000-01-01T09:00:00Z"` parsed as
+hour ZERO, every schedule window collapsed to 00:00–00:00, and the
+midnight-crossing branch read that as "always". A permission restricted to
+office hours admitted at 3am. The columns are cast to text in SQL now and the
+parser refuses anything that is not exactly `HH:MM[:SS]`.
 
 **Root cause.** `permissions` and `doors` were created by migration 002 with the
 note that the engine "lands in a later sprint". It did not. Zero lines of Go read
@@ -333,7 +405,17 @@ device.
 ---
 
 #### LEG-01 — No biometric data-protection posture
-**Subsystem** Documentation / compliance · **Status** OPEN
+**Subsystem** Documentation / compliance · **Status** PARTIAL
+
+**Done.** Retention is now enforced rather than merely stored: per-company
+event and audit windows exist and a scheduled task applies them hourly
+(OPS-06). Biometric material is modelled as sealed and server-opaque, and no
+console route loads it.
+
+**Remainder.** No consent record, no erasure path that removes biometric
+material on request, and no written data-flow statement. The legal
+instruments are outside what can be built here; the consent and erasure
+primitives are not, and are open.
 
 **Root cause.** Never scoped. The platform processes special-category personal
 data with no consent record, no retention policy, no erasure path (soft delete
@@ -349,7 +431,21 @@ legal instruments themselves are outside what can be built here.
 ### CRITICAL
 
 #### SEC-04 — Person changes fan out company-wide
-**Subsystem** Synchronization · **Status** OPEN
+**Subsystem** Synchronization · **Status** FIXED
+
+**Proof.** `roster_scoping_test.go` — a person with no permission reaches no
+terminal; a site-scoped grant reaches only that site; a terminal-scoped grant
+reaches only that terminal and not its neighbour at the same site; an
+unconditional DENY withdraws somebody; an expired permission is reconciled
+off; reconciliation is idempotent; and a deletion still reaches terminals
+that were holding the person even after their rule is gone.
+
+**Two limitations this introduced, stated rather than hidden.** A CONDITIONAL
+deny (narrowed to one capability or schedule) is not enforced while a
+terminal is offline, and a validity window takes effect at an offline
+terminal on a reconciliation cycle rather than instantly. Both follow from a
+terminal caching a flat roster, both are bounded by the site's offline
+policy, and both are in `API_SPEC.md`.
 
 **Root cause.** `enqueuePersonChangeTx` and `enqueueBootstrapJobs` join
 `people` to `devices` through `sites.company_id`. Written before sites mattered
@@ -361,7 +457,8 @@ set once APP-02 exists.
 ---
 
 #### FW-04 — Firmware never heartbeats
-**Subsystem** Firmware · **Status** OPEN
+**Subsystem** Firmware · **Status** OPEN — server side complete and tested;
+needs AI #2.
 
 **Root cause.** The network task calls four endpoints; heartbeat is not one of
 them. `MarkDevicesOffline` requires `last_heartbeat_at IS NOT NULL`, so it never
@@ -373,7 +470,7 @@ complete and tested.
 ---
 
 #### FW-05 — Firmware never self-registers
-**Subsystem** Firmware · **Status** OPEN
+**Subsystem** Firmware · **Status** OPEN — needs AI #2. Blocks SEC-05.
 
 **Root cause.** Provisioning was designed as an operator action and never moved
 into the device. The firmware has no `X-API-Key` path at all.
@@ -385,7 +482,18 @@ preferable and is what the design should aim at.
 ---
 
 #### SYN-01 — Table-full is a silent permanent failure
-**Subsystem** Synchronization · **Status** OPEN
+**Subsystem** Synchronization · **Status** PARTIAL
+
+**Done.** Per-terminal `pending_job_count`, `failed_job_count`,
+`last_apply_error` and `last_apply_error_at`, maintained by trigger, so a
+failing terminal is visible. A roster reconciler runs every 15 minutes and is
+the recovery path: a terminal left with a partial roster converges without
+anybody noticing and forcing a resync.
+
+**Remainder.** No alarm threshold and no operator-facing notification — the
+counters exist and are readable, but nothing shouts. The firmware-side
+distinction between "retry, this may clear" and "this will never clear" is
+AI #2's.
 
 **Root cause.** `kRetryable` is the correct classification — a delete may free a
 row — but nothing distinguishes "retry, this may clear" from "this will never
@@ -412,26 +520,26 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 |---|---|---|---|---|
 | SEC-05 | Legacy site-key + serial device auth still accepted | Kept for firmware predating per-device keys | Remove once FW-05 lands; gate behind an explicit opt-in until then | OPEN |
 | SEC-06 | Registration rotates credentials without limit | Rate limiting lives only in the VPS nginx config | Application-level limiter plus repeat-registration alerting | OPEN |
-| SEC-07 | No operator action audit log | Never built; sessions are logged, mutations are not | Append-only `audit_events`, written in the mutation's transaction | OPEN |
-| SEC-08 | Access logs unreachable from an operator session | The only log route predates the console | Grant-scoped `GET /console/events` over the typed event model | OPEN |
+| SEC-07 | No operator action audit log | Never built; sessions are logged, mutations are not | Append-only `audit_events`, written in the mutation's transaction | FIXED |
+| SEC-08 | Access logs unreachable from an operator session | The only log route predates the console | Grant-scoped `GET /console/events` over the typed event model | FIXED |
 | SEC-09 | Rate limiting in-process and credential-only | Written for a single-instance deployment | Shared store; extend to enumeration endpoints | OPEN |
-| SEC-10 | No operator password reset | Requires transactional email the platform lacks | Single-use short-lived reset tokens | OPEN |
-| PPL-01 | No operator API for biometric enrolment | Enrolment endpoints are device/site-key authenticated | Console enrolment lifecycle over the credentials entity | OPEN |
-| PPL-02 | No invitation flow, no forced first change | `password_changed_at` exists and is unread | Single-use invitations, `must_change_password` policy | OPEN |
-| GP-02 | `person_type` is a fixed four-value taxonomy | Legacy of the single-purpose product | De-taxonomise; per-company vocabulary | OPEN |
-| GP-03 | Capability codes are a closed SQL CHECK | Modelled as an enum before it was configuration | Promote capabilities to rows | OPEN |
+| SEC-10 | No operator password reset | Requires transactional email the platform lacks | Single-use short-lived reset tokens | FIXED |
+| PPL-01 | No operator API for biometric enrolment | Enrolment endpoints are device/site-key authenticated | Console enrolment lifecycle over the credentials entity | PARTIAL |
+| PPL-02 | No invitation flow, no forced first change | `password_changed_at` exists and is unread | Single-use invitations, `must_change_password` policy | FIXED |
+| GP-02 | `person_type` is a fixed four-value taxonomy | Legacy of the single-purpose product | De-taxonomise; per-company vocabulary | PARTIAL |
+| GP-03 | Capability codes are a closed SQL CHECK | Modelled as an enum before it was configuration | Promote capabilities to rows | FIXED |
 | APP-03 | Terminals are never told their application mode | Device protocol deliberately untouched in Sprint 9 | Additive optional field in the settings payload | OPEN |
-| APP-04 | No generic event model | `access_logs` predates every non-door capability | Typed `events` table: type, direction, subject, terminal, application | OPEN |
+| APP-04 | No generic event model | `access_logs` predates every non-door capability | Typed `events` table: type, direction, subject, terminal, application | FIXED |
 | FW-06 | Pinned root CA does not match documented production target | Bundle generated for Render; nginx documents Let's Encrypt | Pin both root sets; the bundle format already supports it | OPEN |
 | FW-07 | Revocation has no firmware-side effect | 401/403 correctly treated as retryable for uploads, but no degraded state exists | Parse `offline_grace_minutes`; defined degraded policy on sustained 403 | OPEN |
 | FW-08 | Two of four exposed settings are inert | Console schema written ahead of firmware support | Implement both, or remove them from the console | OPEN |
 | FW-09 | Field truncation silently excludes people | `copyExact` correctly refuses rather than truncating, but nothing validates upstream | Server-side length validation with a clear error; surface apply failures | OPEN |
 | SYN-02 | Access-log queue is lossy | RAM-only ring, drops oldest on overflow | Persist to flash; upload a gap marker when entries are dropped | OPEN |
 | SYN-03 | Delivery failures consume the attempt budget | `AckJobFailed` cannot distinguish apply-failure from delivery-failure | Separate the two counters | OPEN |
-| SYN-04 | No sync visibility in the console | Terminal projection predates the sync engine's operational needs | Backlog and failure counts; console-authenticated resync | OPEN |
+| SYN-04 | No sync visibility in the console | Terminal projection predates the sync engine's operational needs | Backlog and failure counts; console-authenticated resync | PARTIAL |
 | FE-01 | No accessibility, browser or device verification | All 349 tests are jsdom | axe pass, manual screen-reader pass, device matrix, hardware pass | OPEN |
-| OPS-03 | No CI of any kind | Never set up | Pipeline gating all three suites plus security scanning | OPEN |
-| DOC-01 | Documentation drift | README predates the rename and the console; three limitation lists disagree with the code | Rewrite and reconcile | OPEN |
+| OPS-03 | No CI of any kind | Never set up | Pipeline gating all three suites plus security scanning | FIXED |
+| DOC-01 | Documentation drift | README predates the rename and the console; three limitation lists disagree with the code | Rewrite and reconcile | PARTIAL |
 | DOC-02 | No customer-facing documentation | Never written | Install guide, operator manual, onboarding runbook | OPEN |
 
 ---
@@ -440,30 +548,30 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 
 | ID | Finding | Remediation | Status |
 |---|---|---|---|
-| SEC-11 | Metrics token compared with `==` | `subtle.ConstantTimeCompare` | OPEN |
-| SEC-12 | `/metrics` open when `METRICS_TOKEN` unset | Fail closed | OPEN |
-| SEC-13 | CSRF token derived, stable for session life | Accept as designed; revisit if bodies are ever logged | OPEN |
-| SEC-14 | `SameSite=Lax` assumes a shared registrable domain | Document as a deployment constraint | OPEN |
+| SEC-11 | Metrics token compared with `==` | `subtle.ConstantTimeCompare` | FIXED |
+| SEC-12 | `/metrics` open when `METRICS_TOKEN` unset | Fail closed | FIXED |
+| SEC-13 | CSRF token derived, stable for session life | Accept as designed; revisit if bodies are ever logged | ACCEPTED |
+| SEC-14 | `SameSite=Lax` assumes a shared registrable domain | Document as a deployment constraint | ACCEPTED |
 | SEC-15 | Render database `ipAllowList` is `0.0.0.0/0` | Narrow; automate rather than rely on a comment | OPEN |
 | OPS-04 | Render free tier sleeps and expires | Paid plan or VPS before customer traffic | OPEN |
 | OPS-05 | Backups are a documented manual command | Scheduled, off-host, restore rehearsed | OPEN |
-| OPS-06 | `access_logs` has no retention policy | Configurable retention with a purge task | OPEN |
+| OPS-06 | `access_logs` has no retention policy | Configurable retention with a purge task | FIXED |
 | GP-04 | Two unvalidated open JSON settings objects | One declared-schema mechanism serving both | OPEN |
 | GP-05 | No capability dependency model | Model prerequisites when two capabilities first relate | OPEN |
 | GP-06 | Per-application settings unvalidated | Folds into GP-04 | OPEN |
-| PPL-03 | People API omits email, phone, validity window | Expose all four; enforce validity in the permission engine | OPEN |
+| PPL-03 | People API omits email, phone, validity window | Expose all four; enforce validity in the permission engine | PARTIAL |
 | PPL-04 | `category` can be replaced but never cleared | Pointer field, as `active` already uses | OPEN |
 | PPL-05 | People list has no filters beyond free text | Server-side filters | OPEN |
 | PPL-06 | Site grants persist through promotion | Clear on promotion, or surface explicitly | OPEN |
-| CON-01 | No API to update company details | Folds into GP-01 | OPEN |
+| CON-01 | No API to update company details | Folds into GP-01 | FIXED |
 | CON-02 | Terminal list unpaginated | `limit`/`offset`/`q`, matching people | OPEN |
-| CON-03 | Site reads omit `api_key_prefix` | One line in the projection | OPEN |
+| CON-03 | Site reads omit `api_key_prefix` | One line in the projection | FIXED |
 | CON-04 | No error boundary, no CSP | Route-level boundary; CSP with OPS-02 | OPEN |
 | SYN-05 | Bootstrap convergence takes ~13 poll cycles | Poll faster while a backlog exists | OPEN |
 | SYN-06 | New device seeded with people but not settings | Enqueue the settings snapshot in the registration transaction | OPEN |
 | HW-01 | No tamper detection | Tamper input plus an event | OPEN |
 | HW-02 | No REX, door sensor, forced/held-open, fire interlock | Scope against the target market | OPEN |
-| HW-03 | Single credential factor, modelled as a column | Credentials table | OPEN |
+| HW-03 | Single credential factor, modelled as a column | Credentials table | PARTIAL |
 | DOC-04 | Root CA bundle is gitignored | Commit it, or record its fingerprint | OPEN |
 
 ---
@@ -478,6 +586,82 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 
 ---
 
+## Remediation pass 2026-08-15 — backend
+
+What moved, what did not, and what somebody else has to do. Statuses above were
+updated against the code in the same pass, not against intent.
+
+### Closed, with the test that would have caught the original defect
+
+| Finding | Proof |
+|---|---|
+| GP-01 / CON-01 — no API creates a company | `platform_admin_test.go` |
+| SEC-01 — no terminal revocation | `terminal_lifecycle_test.go` |
+| SEC-02 — site key is a company-wide data credential | `terminal_lifecycle_test.go`, `security_test.go` |
+| SEC-04 — person changes fan out company-wide | `roster_scoping_test.go` |
+| SEC-07 — no operator action audit log | `terminal_lifecycle_test.go`, `credential_handover_test.go` |
+| SEC-08 — access logs unreachable from a session | `events_api_test.go` |
+| SEC-10 / PPL-02 — no reset, no invitations | `credential_handover_test.go` |
+| SEC-11 / SEC-12 — metrics token and exposure | `metrics_exposure_test.go` |
+| APP-02 — no permission engine or schedules | `authorization_engine_test.go` |
+| APP-04 — no generic event model | `events_api_test.go`, `platform_primitives_test.go` |
+| OPS-06 — no retention policy | scheduled purge task; `platform_primitives_test.go` |
+| GP-03 — capabilities are a closed SQL CHECK | `platform_primitives_test.go` |
+| OPS-03 — no CI | `.github/workflows/ci.yml` |
+| CON-03 — site reads omit `api_key_prefix` | `console_sites_test.go` |
+
+### Deliberately still open, and why
+
+- **The five unbuilt capabilities.** `ATTENDANCE`, `CHECK_IN`, `VERIFICATION`,
+  `TIME_TRACKING` and `VISITOR_MANAGEMENT` remain configuration plus an event
+  model that can carry them. They are not marked implemented anywhere, and the
+  application status table below still says so. Building one of them on the new
+  primitives is now a small piece of work; claiming five of them would have been
+  the exact failure this register exists to prevent.
+- **Everything firmware.** FW-01 (the on-device constant), FW-02, FW-04, FW-05,
+  FW-06, FW-07, FW-09, SYN-02, SYN-03, SEC-03, HW-01, HW-02 need AI #2. Where
+  the server half exists and is tested, the finding says so.
+- **SEC-05.** Legacy site-key + serial device auth cannot be removed until
+  firmware self-registration (FW-05) exists, or deployed terminals are stranded.
+- **SEC-09.** Rate limiting is still in-process, so with more than one instance
+  the effective rate multiplies by the instance count. It is documented in
+  `API_SPEC.md` rather than quietly carried.
+- **GP-04 / GP-06.** Two unvalidated open JSON settings objects. The audit
+  records for settings changes deliberately say *that* settings changed and not
+  *what*, because this layer cannot know which fields are sensitive — which is
+  the same gap from the other side.
+
+### Two limitations this pass introduced
+
+Both follow from a terminal caching a flat roster rather than evaluating the
+permission model, and both are bounded by the site's offline policy. They are in
+`API_SPEC.md` as well, because a client has to design around them.
+
+1. **A conditional DENY is not enforced at an offline terminal.** A `DENY`
+   narrowed to one capability or one schedule cannot be applied by removing
+   somebody from a flat roster without also refusing them when they *are*
+   allowed. An unconditional DENY does remove them, so exclusion survives an
+   outage.
+2. **A permission's validity window takes effect at an offline terminal on a
+   reconciliation cycle**, not instantly — 15 minutes by default. An online
+   terminal is decided by the server at the door and is exact.
+
+### The compatibility position, restated
+
+Nothing in this pass changed the device wire contract. `SyncProtocolVersion`
+stays at 1, `access_logs` is still written by the same handler and to the same
+shape, and the device's event id remains the idempotency key. The typed event
+trail is written **beside** the access log, from one place, so the two cannot
+disagree about what a terminal reported.
+
+The one behavioural change a deployed installation would notice is that a
+terminal now receives only the people its permissions cover. Companies that
+existed before the authorization engine were migrated to `COMPANY_ALLOW`, which
+reproduces their previous roster exactly; companies created after it start at
+`NONE`.
+
+---
+
 ## Application status
 
 Restated here because it is the question a buyer actually asks, and because the
@@ -485,7 +669,7 @@ answer must not drift from the code.
 
 | Application | Status | May be sold? |
 |---|---|---|
-| ACCESS_CONTROL | PARTIAL | No — not until APP-02 governs the decision |
+| ACCESS_CONTROL | PARTIAL | Not yet — see the remainder below |
 | REGISTRATION | PARTIAL | No — not until PPL-01 and FW-03 |
 | ATTENDANCE | CONFIGURATION ONLY | No |
 | CHECK_IN | CONFIGURATION ONLY | No |
@@ -498,18 +682,41 @@ terminal assignment works, or its navigation entry renders. It is marked
 implemented when a person can be affected by it end to end and an operator can
 see that they were.
 
+**Why ACCESS_CONTROL is still PARTIAL, stated precisely, because it is the one
+most likely to be over-claimed after this pass.**
+
+What is real: the decision is evaluated from company, site, terminal, person,
+credential, application, permission, schedule and validity window; it denies by
+default; DENY beats ALLOW; it produces an auditable event carrying the reason;
+and it is enforced at the door for the ALLOW/unconditional-DENY case, because a
+person the rules do not permit is no longer on the terminal's roster at all.
+
+What is not: **the terminal does not enforce schedules.** The device protocol
+carries a flat roster and no time rules, so somebody whose permission is
+restricted to office hours is admitted by the terminal at any hour. The server
+records the divergence afterwards, which makes it visible but does not stop it.
+The same applies to a DENY narrowed to one capability.
+
+Closing this needs the terminal to be told its rules — an additive field in the
+settings payload (APP-03) plus firmware to evaluate them (AI #2). Until then a
+customer whose requirement is "these people, but only on weekday mornings" is
+not served by this platform, and must not be told otherwise.
+
 ---
 
 ## Verification baseline
 
 Measured at the start of remediation, so any regression is visible.
 
-| Suite | Count | Result |
-|---|---|---|
-| Go integration (real PostgreSQL) | 144 | Pass, 248s |
-| Frontend (vitest/jsdom + MSW) | 349 | Pass, 20s |
-| Firmware native (22 suites) | 550 | Pass, 137s |
-| **Total** | **1043** | **Pass** |
+| Suite | At baseline | After this pass | Result |
+|---|---|---|---|
+| Go integration (real PostgreSQL) | 144 | **252** | Pass, 203s |
+| Frontend (vitest/jsdom + MSW) | 349 | not re-measured here (AI #3) | — |
+| Firmware native (22 suites) | 550 | not re-measured here (AI #2) | — |
+
+The Go figure is top-level test functions, counted the same way both times. The
+frontend and firmware suites are owned by AI #3 and AI #2 and were not run in
+this pass, so no claim is made about them.
 
 No CI existed at the baseline, so this is the first run in which all three were
 executed together.
