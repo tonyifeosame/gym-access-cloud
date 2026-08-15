@@ -76,7 +76,8 @@ textarea:focus-visible,
 .button--danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--text-inverse);
+  /* Same reason as the primary button: the dark theme lightens the fill. */
+  color: var(--on-danger);
 }
 
 .button--danger:hover:not(:disabled) {

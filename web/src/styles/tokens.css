@@ -20,6 +20,24 @@
   --text-muted: #5a6474;
   --text-inverse: #ffffff;
 
+  /*
+   * TEXT DRAWN ON A FILLED ACCENT OR DANGER SURFACE.
+   *
+   * Separate from --text-inverse, and the separation is load-bearing rather
+   * than tidy-minded. "Inverse" means "the opposite of the page's text", which
+   * is white in a light theme -- but a DARK theme lightens the accent to keep
+   * it visible against a dark page, and white on a light blue is unreadable.
+   * The primary button was 2.69:1 in the dark theme for exactly that reason,
+   * which is a fail against a 4.5:1 requirement and was invisible until the
+   * palette was measured.
+   *
+   * So the question "what colour is text on this fill" gets its own answer per
+   * theme, instead of being assumed to be the inverse of the body text.
+   * Verified in both themes by src/a11y/contrast.test.ts.
+   */
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+
   --accent: #2f5bd7;
   --accent-hover: #2749ad;
   --accent-soft: #e8eefc;
@@ -54,6 +72,11 @@
 
     --text: #e7eaf0;
     --text-muted: #98a2b3;
+
+    /* The accent and danger fills are LIGHTENED for a dark page, so the text on
+     * top of them has to be dark. See the note in the light block. */
+    --on-accent: #0b0e14;
+    --on-danger: #0b0e14;
 
     --accent: #7d9bf0;
     --accent-hover: #9ab0f5;

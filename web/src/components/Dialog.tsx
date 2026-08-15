@@ -175,7 +175,20 @@ export function Dialog({
         tabIndex={-1}
         ref={panelRef}
       >
-        <header className="dialog__header">
+        {/*
+          A DIV, NOT A <header>. `<header>` maps to the `banner` landmark
+          unless it is inside article/aside/main/nav/section — and a
+          div[role="dialog"] is none of those, so this became a SECOND banner
+          for as long as the dialog was open. A screen reader user then has two
+          "banner" entries in their landmark list with no way to tell which is
+          the site chrome. The same trap is documented on PageHeader, which is
+          how it was found here.
+
+          The <h2> below carries this block's meaning in the outline, and does
+          it without a landmark role. The footer is a div for the same reason:
+          `<footer>` maps to `contentinfo`.
+        */}
+        <div className="dialog__header">
           <h2 className="dialog__title" id={titleId}>
             {title}
           </h2>
@@ -189,7 +202,7 @@ export function Dialog({
               <span aria-hidden="true">×</span>
             </button>
           ) : null}
-        </header>
+        </div>
 
         {description ? (
           <p className="dialog__description" id={descriptionId}>
@@ -199,7 +212,7 @@ export function Dialog({
 
         {children ? <div className="dialog__body">{children}</div> : null}
 
-        {footer ? <footer className="dialog__footer">{footer}</footer> : null}
+        {footer ? <div className="dialog__footer">{footer}</div> : null}
       </div>
     </div>,
     document.body,

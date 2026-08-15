@@ -52,7 +52,15 @@ export interface DataTableProps<Row> {
   emptyTitle?: string
   emptyDescription?: string
   emptyAction?: ReactNode
-  /** Makes a whole row activatable. Rows stay keyboard reachable when set. */
+  /**
+   * Makes a whole row clickable WITH A POINTER, as a convenience.
+   *
+   * IT IS NOT THE KEYBOARD OR SCREEN-READER AFFORDANCE, and must not be the
+   * only way to reach the row's destination. Every table using this renders a
+   * real link in its `primary` column, and that link is what a keyboard user
+   * tabs to and what a screen reader announces. See the note on the row itself
+   * for why the obvious implementation of this prop was wrong.
+   */
   onRowClick?: (row: Row) => void
 }
 
@@ -110,19 +118,40 @@ export function DataTable<Row>({
             <tr
               key={rowKey(row)}
               className={onRowClick ? 'table__row table__row--clickable' : 'table__row'}
-              // A clickable row must also be reachable and activatable from the
-              // keyboard, or the interaction simply does not exist for anyone
-              // not using a pointer.
+              /*
+                A POINTER CONVENIENCE ONLY, and deliberately invisible to
+                assistive technology. This used to carry role="button" and
+                tabIndex=0 on the reasoning that a clickable row must be
+                keyboard-reachable, which sounds right and was wrong twice:
+
+                  - role="button" on a <tr> REPLACES its row semantics. A
+                    screen reader stops announcing the table's structure
+                    entirely for that row -- no "row 3 of 40", no column
+                    headers read with the cells -- which is most of what makes
+                    a data table usable without sight.
+                  - The row contains a link, so it was an interactive control
+                    nested inside another. Screen readers disagree about what
+                    to announce, and axe reports it as a serious violation.
+
+                The keyboard path was never missing: every table using this
+                renders a real <a> in its primary column, which tabs, announces
+                its destination, and works with middle-click and
+                open-in-new-tab as a row handler never could. So the row keeps
+                the pointer shortcut and nothing else.
+
+                A row is NOT given a click handler when a cell click should
+                mean something else -- the caller decides that by whether it
+                passes onRowClick at all.
+              */
               {...(onRowClick
                 ? {
-                    tabIndex: 0,
-                    role: 'button' as const,
-                    onClick: () => onRowClick(row),
-                    onKeyDown: (event: React.KeyboardEvent) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault()
-                        onRowClick(row)
-                      }
+                    onClick: (event: React.MouseEvent) => {
+                      // Let a real control inside the row win. Without this,
+                      // clicking a row's own button also navigates away from
+                      // the page it was pressed on.
+                      const target = event.target as HTMLElement
+                      if (target.closest('a, button, input, select, textarea')) return
+                      onRowClick(row)
                     },
                   }
                 : {})}

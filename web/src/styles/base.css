@@ -340,7 +340,9 @@ code {
 .button--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--text-inverse);
+  /* NOT --text-inverse: the dark theme lightens the accent, and white on a
+   * light blue is 2.69:1. See the note in tokens.css. */
+  color: var(--on-accent);
 }
 
 .button--primary:hover {

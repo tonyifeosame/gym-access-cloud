@@ -111,22 +111,59 @@ describe('DataTable', () => {
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
   })
 
-  it('makes a clickable row reachable and activatable from the keyboard', async () => {
-    // A row that only responds to a pointer does not exist for a keyboard user.
-    const user = userEvent.setup()
+  it('KEEPS ROW SEMANTICS, and does not present a row as a button', async () => {
+    // This used to put role="button" and tabIndex=0 on the <tr>, on the
+    // reasoning that a clickable row must be keyboard-reachable. It sounds
+    // right and was wrong twice, and axe reported the second one as a serious
+    // violation:
+    //
+    //   - role="button" REPLACES a row's semantics. A screen reader stops
+    //     announcing the table structure for that row entirely -- no position,
+    //     no headers read with the cells -- which is most of what makes a data
+    //     table usable without sight.
+    //   - Every such row contains a link, so it was an interactive control
+    //     nested inside another.
+    //
+    // The keyboard path was never missing: the primary cell holds a real link,
+    // which tabs, announces its destination, and supports middle-click and
+    // open-in-new-tab as a row handler never could.
     const onRowClick = vi.fn()
     renderTable({ onRowClick })
 
-    const rows = screen.getAllByRole('button')
-    const first = rows[0] as HTMLElement
-    first.focus()
-    expect(first).toHaveFocus()
+    for (const row of screen.getAllByRole('row')) {
+      expect(row).not.toHaveAttribute('role', 'button')
+      expect(row).not.toHaveAttribute('tabindex')
+    }
+    // The rows are still rows.
+    expect(screen.getAllByRole('row').length).toBeGreaterThan(1)
+  })
 
-    await user.keyboard('{Enter}')
-    expect(onRowClick).toHaveBeenCalledWith(ROWS[0])
+  it('lets a control inside a row win over the row itself', async () => {
+    // Without this, pressing a row's own button also navigates away from the
+    // page it was pressed on.
+    const user = userEvent.setup()
+    const onRowClick = vi.fn()
+    const onInner = vi.fn()
 
-    await user.keyboard(' ')
-    expect(onRowClick).toHaveBeenCalledTimes(2)
+    renderTable({
+      onRowClick,
+      columns: [
+        { id: 'serial', header: 'Serial', primary: true, render: (row) => row.serial },
+        {
+          id: 'action',
+          header: 'Action',
+          render: () => (
+            <button type="button" onClick={onInner}>
+              Inner
+            </button>
+          ),
+        },
+      ],
+    })
+
+    await user.click(screen.getAllByRole('button', { name: 'Inner' })[0] as HTMLElement)
+    expect(onInner).toHaveBeenCalled()
+    expect(onRowClick).not.toHaveBeenCalled()
   })
 
   it('still responds to a pointer', async () => {

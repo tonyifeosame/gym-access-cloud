@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from 'react-router-dom'
 
 import { ApiError } from './api/client'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { NotificationsProvider } from './components/Notifications'
 import { router } from './router'
 import { SessionProvider } from './session/SessionProvider'
@@ -63,12 +64,22 @@ export function App({
   router?: AppRouter
 }) {
   return (
-    <QueryClientProvider client={queryClient}>
-      <NotificationsProvider>
-        <SessionProvider>
-          <RouterProvider router={appRouter} />
-        </SessionProvider>
-      </NotificationsProvider>
-    </QueryClientProvider>
+    /*
+      THE OUTERMOST BOUNDARY, and the only one that can catch a failure in the
+      providers themselves. Each shell mounts a second one around its routed
+      page — see AppShell — which is the one that matters day to day, because it
+      keeps the navigation and the sign-out button alive while one screen is
+      broken. This one exists for the case where there is no shell left to fall
+      back to, and its alternative is a white page.
+    */
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <NotificationsProvider>
+          <SessionProvider>
+            <RouterProvider router={appRouter} />
+          </SessionProvider>
+        </NotificationsProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   )
 }

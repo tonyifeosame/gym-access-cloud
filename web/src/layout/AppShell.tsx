@@ -1,6 +1,7 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 
 import { roleLabel } from '../auth/roles'
+import { ErrorBoundary } from '../components/ErrorBoundary'
 import { SiteProvider } from '../context/SiteContext'
 import { useAuthenticatedSession, useSession } from '../session/useSession'
 import { navigationFor, type NavItem } from './navigation'
@@ -15,6 +16,8 @@ import { SiteSwitcher } from './SiteSwitcher'
  * anything hard-coded about what AccessLink is "for".
  */
 export function AppShell() {
+  const location = useLocation()
+
   return (
     <SiteProvider>
       <div className="shell">
@@ -22,7 +25,21 @@ export function AppShell() {
         <div className="shell__body">
           <SideNav />
           <main className="shell__main" id="main">
-            <Outlet />
+            {/*
+              THE BOUNDARY GOES INSIDE THE SHELL, not around it. A rendering
+              failure on one screen then leaves the navigation, the site
+              switcher and the sign-out button working — so an operator can go
+              somewhere else, or leave, without reloading. A boundary wrapped
+              around the whole shell would take all of that down with the page
+              that broke.
+
+              Keyed on the path, so navigating away clears it. Without that, one
+              broken screen would keep showing its error for the rest of the
+              session no matter where the operator went.
+            */}
+            <ErrorBoundary resetKey={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </main>
         </div>
       </div>

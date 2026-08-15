@@ -1,5 +1,6 @@
 import { Link, Navigate, Outlet, useLocation } from 'react-router-dom'
 
+import { ErrorBoundary } from '../components/ErrorBoundary'
 import { ErrorState, LoadingState } from '../components/states'
 import { usePlatformSession } from './PlatformSessionProvider'
 
@@ -61,7 +62,10 @@ export function PlatformShell() {
 
       <div className="shell__body">
         <main className="shell__main" id="main">
-          <Outlet />
+          {/* Inside the shell, keyed on the path — see AppShell for why. */}
+          <ErrorBoundary resetKey={location.pathname} label="This page">
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>
