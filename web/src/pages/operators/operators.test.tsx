@@ -502,16 +502,38 @@ describe('changing an account', () => {
     expect(screen.getByText(/would apply again if the account were later/)).toBeInTheDocument()
   })
 
-  it('resets a password, warning that it signs them out everywhere', async () => {
+  it('DEFAULTS to a reset link, so the administrator never learns the password', async () => {
+    // SEC-10. Before the handover mechanism existed, the only answer to "they
+    // are locked out" was an administrator typing a new password and reading it
+    // out — which leaves them knowing a colleague's credential indefinitely.
     const user = userEvent.setup()
     signIn()
     renderOperators('/operators/operator-viewer')
 
     await user.click(await screen.findByRole('button', { name: 'Reset password' }))
+
+    // No password field until the other path is deliberately chosen.
+    expect(screen.queryByLabelText(/New password/)).not.toBeInTheDocument()
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: /issue a reset link/i }),
+    )
+
+    expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled()
+  })
+
+  it('still allows setting a password directly, and says what that costs', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderOperators('/operators/operator-viewer')
+
+    await user.click(await screen.findByRole('button', { name: 'Reset password' }))
+    await user.selectOptions(screen.getByLabelText(/How they get back in/), 'PASSWORD')
+
     expect(screen.getByText('This signs them out everywhere')).toBeInTheDocument()
 
     const confirm = within(screen.getByRole('dialog')).getByRole('button', {
-      name: 'Reset password',
+      name: 'Set password',
     })
     await user.type(screen.getByLabelText(/New password/), 'short')
     expect(confirm).toBeDisabled()
@@ -522,6 +544,52 @@ describe('changing an account', () => {
     await user.click(confirm)
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('offers an INVITATION rather than a reset for an account never signed in to', async () => {
+    // The server refuses an invitation for an account that has signed in, and
+    // audits the two differently. Choosing between them from the account's own
+    // state is what stops the operator meeting a 409 that means nothing to them.
+    const user = userEvent.setup()
+    signIn()
+    seed({
+      operators: ROSTER.map((operator) =>
+        operator.id === 'operator-viewer' ? { ...operator, last_login_at: undefined } : operator,
+      ),
+    })
+    renderOperators('/operators/operator-viewer')
+
+    expect(await screen.findByText('This account has never been used')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset password' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Send invitation' }))
+    expect(screen.getByText(/Any earlier invitation stops working/i)).toBeInTheDocument()
+
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: /issue an invitation/i }),
+    )
+    expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+  })
+
+  it('never leaves a minted link in the page after the panel is dismissed', async () => {
+    // Same contract as a site provisioning key: it lives in one panel and is
+    // gone when that panel closes.
+    const user = userEvent.setup()
+    signIn()
+    renderOperators('/operators/operator-viewer')
+
+    await user.click(await screen.findByRole('button', { name: 'Reset password' }))
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: /issue a reset link/i }),
+    )
+    await screen.findByText(/shown once and cannot be recovered/i)
+
+    await user.click(screen.getByLabelText(/I have copied this link/i))
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    // The token the mock issues for a reset. Nothing on the page may still hold it.
+    expect(document.body.textContent).not.toContain('f9e8d7c6')
   })
 
   it('deactivates reversibly and says so', async () => {

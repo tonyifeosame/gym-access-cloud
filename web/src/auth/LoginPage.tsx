@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Navigate, useSearchParams } from 'react-router-dom'
+import { Link, Navigate, useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import { useSession } from '../session/useSession'
@@ -90,6 +90,18 @@ export function LoginPage() {
         <button className="button button--primary" type="submit" disabled={submitting}>
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
+
+        {/*
+          Both destinations are unauthenticated by necessity. The second is the
+          one people arrive at from a link and would not otherwise find, and it
+          matters that they can: an invitation whose URL was mangled in a chat
+          client still has a code that can be pasted.
+        */}
+        <p className="login__note">
+          <Link to="/forgot-password">Forgotten your password?</Link>
+          {' · '}
+          <Link to="/redeem">Have an invitation code?</Link>
+        </p>
       </form>
     </div>
   )

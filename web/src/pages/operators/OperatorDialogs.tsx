@@ -1,15 +1,23 @@
 import { useState } from 'react'
 
 import { ApiError } from '../../api/client'
-import type { OperatorAccount, Role } from '../../api/types'
+import type { CredentialToken, OperatorAccount, Role } from '../../api/types'
 import { assignableRoles } from '../../auth/permissions'
 import { roleLabel } from '../../auth/roles'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { Dialog } from '../../components/Dialog'
 import { CheckboxGroup, FormError, SelectField, TextField } from '../../components/Form'
+import { HandoverLinkPanel } from '../../components/HandoverLinkPanel'
 import { useNotifications } from '../../components/Notifications'
 import { InfoNote } from '../../components/states'
-import { useDeleteOperator, useSetOperatorSites, useSites, useUpdateOperator } from '../../data/console'
+import {
+  useDeleteOperator,
+  useInviteOperator,
+  useResetOperatorPassword,
+  useSetOperatorSites,
+  useSites,
+  useUpdateOperator,
+} from '../../data/console'
 import { useAuthenticatedSession } from '../../session/useSession'
 import { ROLE_DESCRIPTIONS } from './OperatorFormDialog'
 
@@ -250,9 +258,29 @@ export function SiteGrantsDialog({
 }
 
 // ---------------------------------------------------------------------------
-// Password reset
+// Credential recovery: invitation and password reset
 // ---------------------------------------------------------------------------
 
+/**
+ * Getting somebody back into an account they cannot reach.
+ *
+ * TWO PATHS, AND THE DEFAULT IS THE ONE WHERE THE ADMINISTRATOR NEVER LEARNS
+ * THE PASSWORD. A reset link is minted, handed over once, and redeemed by its
+ * owner; the administrator's involvement ends at delivery. This is SEC-10, and
+ * before it existed the only answer to "they are locked out" was for an
+ * administrator to type a new password and read it out — which leaves them
+ * knowing a colleague's credential indefinitely, and is audited as exactly that.
+ *
+ * The second path is kept because a deployment with no way to send a link needs
+ * it, and because standing next to somebody is a legitimate channel. It is not
+ * hidden; it simply is not first, and it says what it costs.
+ *
+ * WHEN THE SESSIONS END DIFFERS BETWEEN THE TWO, and the dialog says which.
+ * Setting a password directly signs them out at once. A link signs them out when
+ * it is REDEEMED — until then their current password still works, which matters
+ * to an administrator deciding whether a colleague can keep working this
+ * afternoon.
+ */
 export function ResetPasswordDialog({
   open,
   operator,
@@ -263,18 +291,55 @@ export function ResetPasswordDialog({
   onClose: () => void
 }) {
   const update = useUpdateOperator(operator.id)
+  const issueReset = useResetOperatorPassword(operator.id)
   const notifications = useNotifications()
+
+  const [method, setMethod] = useState<'LINK' | 'PASSWORD'>('LINK')
   const [password, setPassword] = useState('')
   const [touched, setTouched] = useState(false)
+  const [issued, setIssued] = useState<CredentialToken | null>(null)
 
+  const busy = update.isPending || issueReset.isPending
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH
-  const error = touched && password.length === 0 ? 'Password is required.' : tooShort ? `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` : undefined
+  const error =
+    touched && password.length === 0
+      ? 'Password is required.'
+      : tooShort
+        ? `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`
+        : undefined
+
+  const activeError = method === 'LINK' ? issueReset.error : update.error
+
+  function dismiss() {
+    // Resetting the mutation drops its `data`, which is the only other place the
+    // token exists once this component's state is cleared.
+    issueReset.reset()
+    setIssued(null)
+    setPassword('')
+    onClose()
+  }
+
+  if (issued) {
+    return (
+      <Dialog
+        open={open}
+        title="Reset link issued"
+        size="wide"
+        // Escape and a backdrop click are the two ways a dialog gets closed by
+        // accident, and here that loses the only copy of the link.
+        dismissible={false}
+        onClose={dismiss}
+      >
+        <HandoverLinkPanel token={issued} operatorName={operator.full_name} onDismiss={dismiss} />
+      </Dialog>
+    )
+  }
 
   return (
     <Dialog
       open={open}
       title={`Reset ${operator.full_name}'s password`}
-      dismissible={!update.isPending}
+      dismissible={!busy}
       onClose={onClose}
       footer={
         <>
@@ -282,63 +347,214 @@ export function ResetPasswordDialog({
             type="button"
             className="button button--quiet"
             onClick={onClose}
-            disabled={update.isPending}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+          {method === 'LINK' ? (
+            <button
+              type="button"
+              className="button button--primary"
+              disabled={busy}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const result = await issueReset.mutateAsync()
+                    setIssued(result.reset)
+                  } catch {
+                    /* rendered below */
+                  }
+                })()
+              }}
+            >
+              {issueReset.isPending ? 'Issuing…' : 'Issue a reset link'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="button button--primary"
+              disabled={password.length < MIN_PASSWORD_LENGTH || busy}
+              onClick={() => {
+                void (async () => {
+                  try {
+                    await update.mutateAsync({ password })
+                    notifications.success(
+                      `Password reset for ${operator.full_name}. They have been signed out everywhere.`,
+                    )
+                    // Not kept in state a moment longer than the request needs it.
+                    setPassword('')
+                    onClose()
+                  } catch {
+                    /* rendered below */
+                  }
+                })()
+              }}
+            >
+              {update.isPending ? 'Resetting…' : 'Set password'}
+            </button>
+          )}
+        </>
+      }
+    >
+      <SelectField
+        label="How they get back in"
+        value={method}
+        onChange={(value) => setMethod(value as 'LINK' | 'PASSWORD')}
+        disabled={busy}
+        options={[
+          {
+            value: 'LINK',
+            label: 'Issue a single-use reset link',
+            description:
+              'They choose their own password. You never learn it — you only pass the link on.',
+          },
+          {
+            value: 'PASSWORD',
+            label: 'Set a password for them',
+            description:
+              'You choose the password and tell them yourself. You will know their credential, and the audit trail records that you set it.',
+          },
+        ]}
+      />
+
+      {method === 'PASSWORD' ? (
+        <TextField
+          label="New password"
+          type="password"
+          required
+          autoComplete="new-password"
+          value={password}
+          error={error}
+          onChange={setPassword}
+          onBlur={() => setTouched(true)}
+          disabled={busy}
+          hint={`At least ${MIN_PASSWORD_LENGTH} characters. You will need to give this to them yourself — AccessLink cannot show it again.`}
+        />
+      ) : (
+        <InfoNote title="The link is shown once, here">
+          AccessLink has no email. After you issue it, copy the link and send it over
+          a channel you trust — it cannot be shown again.
+        </InfoNote>
+      )}
+
+      <InfoNote tone="warning" title="This signs them out everywhere">
+        {method === 'LINK'
+          ? 'Their sessions end the moment they redeem the link, on every device. Until then their current password keeps working.'
+          : 'Resetting a password ends every session this operator holds, on every device. They will not be able to work until you have given them the new password.'}
+      </InfoNote>
+
+      <FormError
+        message={
+          activeError
+            ? activeError instanceof ApiError
+              ? activeError.message
+              : method === 'LINK'
+                ? 'The reset link could not be issued.'
+                : 'The password could not be reset.'
+            : null
+        }
+        requestId={activeError instanceof ApiError ? activeError.requestId : null}
+      />
+    </Dialog>
+  )
+}
+
+/**
+ * Re-issuing an invitation for an account that has never been used.
+ *
+ * SEPARATE FROM A RESET, because the server keeps them separate and audits them
+ * differently: an invitation is only valid for an account that has never signed
+ * in, and re-inviting one that has would be a reset wearing an invitation's
+ * name. The console offers this only when the account qualifies, so the
+ * distinction is made here rather than discovered as a 409 after the fact.
+ *
+ * Issuing SUPERSEDES any outstanding link, which is stated because an
+ * administrator re-sending an invitation usually assumes the first one still
+ * works — and two live links to one account is the state this prevents.
+ */
+export function InviteOperatorDialog({
+  open,
+  operator,
+  onClose,
+}: {
+  open: boolean
+  operator: OperatorAccount
+  onClose: () => void
+}) {
+  const invite = useInviteOperator(operator.id)
+  const [issued, setIssued] = useState<CredentialToken | null>(null)
+
+  function dismiss() {
+    invite.reset()
+    setIssued(null)
+    onClose()
+  }
+
+  if (issued) {
+    return (
+      <Dialog
+        open={open}
+        title="Invitation issued"
+        size="wide"
+        dismissible={false}
+        onClose={dismiss}
+      >
+        <HandoverLinkPanel token={issued} operatorName={operator.full_name} onDismiss={dismiss} />
+      </Dialog>
+    )
+  }
+
+  return (
+    <Dialog
+      open={open}
+      title={`Invite ${operator.full_name}`}
+      description="This account has never been signed in to. A fresh invitation lets them set their own password."
+      dismissible={!invite.isPending}
+      onClose={onClose}
+      footer={
+        <>
+          <button
+            type="button"
+            className="button button--quiet"
+            onClick={onClose}
+            disabled={invite.isPending}
           >
             Cancel
           </button>
           <button
             type="button"
             className="button button--primary"
-            disabled={password.length < MIN_PASSWORD_LENGTH || update.isPending}
+            disabled={invite.isPending}
             onClick={() => {
               void (async () => {
                 try {
-                  await update.mutateAsync({ password })
-                  notifications.success(
-                    `Password reset for ${operator.full_name}. They have been signed out everywhere.`,
-                  )
-                  // Not kept in state a moment longer than the request needs it.
-                  setPassword('')
-                  onClose()
+                  const result = await invite.mutateAsync()
+                  setIssued(result.invitation)
                 } catch {
                   /* rendered below */
                 }
               })()
             }}
           >
-            {update.isPending ? 'Resetting…' : 'Reset password'}
+            {invite.isPending ? 'Issuing…' : 'Issue an invitation'}
           </button>
         </>
       }
     >
-      <TextField
-        label="New password"
-        type="password"
-        required
-        autoComplete="new-password"
-        value={password}
-        error={error}
-        onChange={setPassword}
-        onBlur={() => setTouched(true)}
-        disabled={update.isPending}
-        hint={`At least ${MIN_PASSWORD_LENGTH} characters. You will need to give this to them yourself — AccessLink cannot show it again.`}
-      />
-
-      <InfoNote tone="warning" title="This signs them out everywhere">
-        Resetting a password ends every session this operator holds, on every
-        device. They will not be able to work until you have given them the new
-        password.
+      <InfoNote title="Any earlier invitation stops working">
+        Issuing a new link invalidates the previous one, so two people cannot each
+        be holding a live invitation to the same account.
       </InfoNote>
 
       <FormError
         message={
-          update.error
-            ? update.error instanceof ApiError
-              ? update.error.message
-              : 'The password could not be reset.'
+          invite.error
+            ? invite.error instanceof ApiError
+              ? invite.error.message
+              : 'The invitation could not be issued.'
             : null
         }
-        requestId={update.error instanceof ApiError ? update.error.requestId : null}
+        requestId={invite.error instanceof ApiError ? invite.error.requestId : null}
       />
     </Dialog>
   )

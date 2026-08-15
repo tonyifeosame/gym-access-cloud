@@ -16,6 +16,7 @@ import { useOperator } from '../../data/console'
 import { useSession } from '../../session/useSession'
 import {
   ChangeRoleDialog,
+  InviteOperatorDialog,
   OperatorActivationDialog,
   RemoveOperatorDialog,
   ResetPasswordDialog,
@@ -48,6 +49,7 @@ export function OperatorDetailPage() {
   const [changingRole, setChangingRole] = useState(false)
   const [changingSites, setChangingSites] = useState(false)
   const [resettingPassword, setResettingPassword] = useState(false)
+  const [inviting, setInviting] = useState(false)
   const [changingActive, setChangingActive] = useState(false)
   const [removing, setRemoving] = useState(false)
 
@@ -91,6 +93,11 @@ export function OperatorDetailPage() {
   const mayRemove = canDeleteOperator(session, operator)
   const roleIgnoresGrants = operator.role === 'ADMIN' || operator.role === 'OWNER'
   const grants = operator.sites ?? []
+  // An account that has never signed in is either freshly invited or one whose
+  // invitation never arrived. Either way an INVITATION is the right instrument,
+  // not a reset — the two are audited differently and the server refuses the
+  // wrong one.
+  const neverSignedIn = !operator.last_login_at
 
   return (
     <div className="page">
@@ -109,9 +116,23 @@ export function OperatorDetailPage() {
               <button type="button" className="button" onClick={() => setChangingSites(true)}>
                 Site access
               </button>
-              <button type="button" className="button" onClick={() => setResettingPassword(true)}>
-                Reset password
-              </button>
+              {/*
+                INVITE AND RESET ARE DIFFERENT OPERATIONS and the console picks
+                between them from the account's own state rather than offering
+                both and letting the server refuse one. An invitation is only
+                valid for an account that has never signed in; offering it for
+                one that has would produce a 409 that means nothing to the
+                operator who pressed it.
+              */}
+              {neverSignedIn ? (
+                <button type="button" className="button" onClick={() => setInviting(true)}>
+                  Send invitation
+                </button>
+              ) : (
+                <button type="button" className="button" onClick={() => setResettingPassword(true)}>
+                  Reset password
+                </button>
+              )}
               {mayChangeRole ? (
                 <button type="button" className="button" onClick={() => setChangingActive(true)}>
                   {operator.active ? 'Deactivate' : 'Reactivate'}
@@ -150,6 +171,14 @@ export function OperatorDetailPage() {
         <InfoNote tone="warning" title="This account is deactivated">
           They are signed out and cannot sign in. The account and its site access are
           kept.
+        </InfoNote>
+      ) : null}
+
+      {neverSignedIn && mayManage ? (
+        <InfoNote title="This account has never been used">
+          {operator.full_name} has not signed in yet. If their invitation did not
+          arrive, issue a new one — it supersedes any earlier link, and they set
+          their own password from it.
         </InfoNote>
       ) : null}
 
@@ -250,6 +279,9 @@ export function OperatorDetailPage() {
           operator={operator}
           onClose={() => setResettingPassword(false)}
         />
+      ) : null}
+      {inviting ? (
+        <InviteOperatorDialog open operator={operator} onClose={() => setInviting(false)} />
       ) : null}
       {changingActive ? (
         <OperatorActivationDialog

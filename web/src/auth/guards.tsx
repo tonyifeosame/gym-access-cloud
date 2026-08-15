@@ -4,6 +4,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import type { Role } from '../api/types'
 import { ErrorState, LoadingState } from '../components/states'
 import { useSession } from '../session/useSession'
+import { ForcePasswordChange } from './ForcePasswordChange'
 import { roleAtLeast } from './roles'
 
 /**
@@ -16,7 +17,7 @@ import { roleAtLeast } from './roles'
  */
 
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { status, error, refresh } = useSession()
+  const { status, session, error, refresh } = useSession()
   const location = useLocation()
 
   if (status === 'loading') {
@@ -42,6 +43,23 @@ export function RequireAuth({ children }: { children: ReactNode }) {
     // Remember where they were headed so signing in resumes it.
     const next = `${location.pathname}${location.search}`
     return <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />
+  }
+
+  /*
+    A credential somebody else chose does not get to browse the console.
+
+    This sits INSIDE RequireAuth rather than on a route, deliberately: a route
+    would be reachable only by navigating to it, and the operator arriving here
+    has just signed in and is being sent somewhere. Blocking at the guard covers
+    every authenticated route at once, including ones added later, which is the
+    property that matters — a check that has to be remembered per route is one
+    that will eventually be forgotten on the route that needed it.
+
+    The server reports this flag and deliberately does not enforce it; see
+    ForcePasswordChange for why, and for what this guard is and is not worth.
+  */
+  if (session?.must_change_password) {
+    return <ForcePasswordChange />
   }
 
   return <>{children}</>

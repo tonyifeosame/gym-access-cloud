@@ -1,6 +1,8 @@
 import { Navigate, createBrowserRouter } from 'react-router-dom'
 
+import { ForgotPasswordPage } from './auth/ForgotPasswordPage'
 import { LoginPage } from './auth/LoginPage'
+import { RedeemPage } from './auth/RedeemPage'
 import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
@@ -30,6 +32,12 @@ import { SitesListPage } from './pages/sites/SitesListPage'
  */
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
+
+  // Credential handover, OUTSIDE the authenticated tree by necessity. Somebody
+  // redeeming an invitation has never had a password and somebody who has
+  // forgotten theirs cannot sign in to ask — neither can be behind RequireAuth.
+  { path: '/forgot-password', element: <ForgotPasswordPage /> },
+  { path: '/redeem', element: <RedeemPage /> },
 
   {
     path: '/',
