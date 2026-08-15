@@ -537,7 +537,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 | SYN-02 | Access-log queue is lossy | RAM-only ring, drops oldest on overflow | Persist to flash; upload a gap marker when entries are dropped | OPEN |
 | SYN-03 | Delivery failures consume the attempt budget | `AckJobFailed` cannot distinguish apply-failure from delivery-failure | Separate the two counters | OPEN |
 | SYN-04 | No sync visibility in the console | Terminal projection predates the sync engine's operational needs | Backlog and failure counts; console-authenticated resync | PARTIAL |
-| FE-01 | No accessibility, browser or device verification | All 349 tests are jsdom | axe pass, manual screen-reader pass, device matrix, hardware pass | OPEN |
+| FE-01 | No accessibility, browser or device verification | All 349 tests are jsdom | axe pass, manual screen-reader pass, device matrix, hardware pass | PARTIAL — axe across every screen and dialog, contrast computed from the palette in both themes, and a real-Chrome pass over the built bundle at three viewports. Three defects found and fixed. STILL OPEN: a manual screen-reader pass, Safari and Firefox, and hardware |
 | OPS-03 | No CI of any kind | Never set up | Pipeline gating all three suites plus security scanning | FIXED |
 | DOC-01 | Documentation drift | README predates the rename and the console; three limitation lists disagree with the code | Rewrite and reconcile | PARTIAL |
 | DOC-02 | No customer-facing documentation | Never written | Install guide, operator manual, onboarding runbook | OPEN |
@@ -566,7 +566,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 | CON-01 | No API to update company details | Folds into GP-01 | FIXED |
 | CON-02 | Terminal list unpaginated | `limit`/`offset`/`q`, matching people | OPEN |
 | CON-03 | Site reads omit `api_key_prefix` | One line in the projection | FIXED |
-| CON-04 | No error boundary, no CSP | Route-level boundary; CSP with OPS-02 | OPEN |
+| CON-04 | No error boundary, no CSP | Route-level boundary; CSP with OPS-02 | FIXED — boundary inside each shell, CSP emitted into the build and verified as enforced in a real browser. `frame-ancestors` still needs the header OPS-02 will carry |
 | SYN-05 | Bootstrap convergence takes ~13 poll cycles | Poll faster while a backlog exists | OPEN |
 | SYN-06 | New device seeded with people but not settings | Enqueue the settings snapshot in the registration transaction | OPEN |
 | HW-01 | No tamper detection | Tamper input plus an event | OPEN |
@@ -609,6 +609,39 @@ updated against the code in the same pass, not against intent.
 | GP-03 — capabilities are a closed SQL CHECK | `platform_primitives_test.go` |
 | OPS-03 — no CI | `.github/workflows/ci.yml` |
 | CON-03 — site reads omit `api_key_prefix` | `console_sites_test.go` |
+
+### The console, and what it now proves
+
+The frontend half of this pass. Every item is covered by a test that would have
+caught the original defect, and the browser pass runs the real build in real
+Chrome rather than jsdom.
+
+| Finding | Console | Proof |
+|---|---|---|
+| GP-01 / CON-01 | Platform administration: create, configure, suspend and restore a company, and issue its first operator by invitation. Onboarding is a checklist, because a company with no operator looks fine in a list and is unusable | `web/src/platform/platform.test.tsx` |
+| SEC-01 | Terminal lifecycle as five distinct operations, each naming the situation it is for and what survives it | `web/src/pages/terminals/terminalLifecycle.test.tsx` |
+| SEC-07 | The Activity trail, filtered server-side, with unknown actions shown rather than dropped and a PLATFORM actor marked as not being somebody inside the company | `web/src/pages/activity/activity.test.tsx` |
+| SEC-08 | The Events page: refusals explained by reason and remedy, presentations that matched nobody kept, both timestamps surfaced when they diverge | `web/src/pages/events/events.test.tsx` |
+| SEC-10 / PPL-02 | Invitation-first account creation, a two-path reset defaulting to a link, public redeem and forgot-password screens, and a forced first change that BLOCKS rather than suggests | `web/src/auth/credentials.test.tsx`, `web/src/pages/operators/operators.test.tsx` |
+| APP-01 / GP-03 / GP-05 | Available, enabled, configured and **operational** shown separately, each capability carrying its own specific gap | `web/src/applications/readiness.test.ts` |
+| APP-02 | Access rules on a person, schedules, and "would this person get in here, right now, and why" — with "absence of permission is not permission" said in words wherever a person has no rules | `web/src/pages/access/access.test.tsx` |
+| CON-04 | A route-level error boundary inside each shell, and a CSP emitted into the build | `web/src/components/ErrorBoundary.test.tsx`, `web/src/security/security.test.ts` |
+| FE-01 | axe across every screen and dialog at three viewports, contrast computed from the palette in both themes, keyboard and focus behaviour, and a real-Chrome pass against the built bundle | `web/src/a11y/*`, `npm run test:browser` |
+
+**Three real defects the tooling found**, each fixed rather than suppressed: a
+table row announced as a button (which replaced its row semantics and nested
+interactive controls), every open dialog adding a second `banner` landmark, and
+a dark-theme primary button at 2.69:1 against a 4.5:1 requirement. A fourth — two
+buttons labelled "Remove" on the person page, one withdrawing an access rule and
+one deleting the person — came out of writing the access tests.
+
+**The CSP is enforced, demonstrated by it refusing the test tooling.** Injecting
+axe as an inline `<script>` was blocked by `script-src 'self'` on the real page;
+it is now introduced through the debugger instead, so the policy under test is
+the one that ships.
+
+**Frontend suites:** 561 vitest tests, plus a browser pass over 11 screens at 3
+viewports. Typecheck, lint and build clean.
 
 ### Deliberately still open, and why
 
