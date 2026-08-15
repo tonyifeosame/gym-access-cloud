@@ -10,6 +10,7 @@ import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
 import { ActivityPage } from './pages/activity/ActivityPage'
 import { SchedulesPage } from './pages/access/SchedulesPage'
 import { EventsPage } from './pages/events/EventsPage'
+import { FirmwarePage } from './pages/firmware/FirmwarePage'
 import { ApplicationDetailPage } from './pages/applications/ApplicationDetailPage'
 import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
@@ -119,6 +120,18 @@ export const router = createBrowserRouter([
       // rather than the route, so an administrator can see what the company is
       // configured for without being able to decide it. The API is looser still
       // (any operator may read), so this is the stricter of the two.
+      // ADMIN, matching the server's route group. These writes move the value
+      // every "is this terminal outdated" report is measured against, which is
+      // why they left the site-key tree.
+      {
+        path: 'settings/firmware',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <FirmwarePage />
+          </RequireRole>
+        ),
+      },
+
       {
         path: 'settings/applications',
         element: (

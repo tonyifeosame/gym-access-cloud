@@ -61,6 +61,14 @@ export const PLATFORM_NAV: NavItem[] = [
     minimumRole: 'ADMIN',
   },
   {
+    id: 'firmware',
+    label: 'Firmware',
+    path: '/settings/firmware',
+    // ADMIN, matching the server. The catalogue decides what the fleet is
+    // measured against, which is why these routes left the site-key tree.
+    minimumRole: 'ADMIN',
+  },
+  {
     id: 'applications',
     label: 'Applications',
     path: '/settings/applications',

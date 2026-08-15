@@ -10,6 +10,7 @@ import { AppShell } from '../layout/AppShell'
 import { ActivityPage } from '../pages/activity/ActivityPage'
 import { SchedulesPage } from '../pages/access/SchedulesPage'
 import { EventsPage } from '../pages/events/EventsPage'
+import { FirmwarePage } from '../pages/firmware/FirmwarePage'
 import { PersonDetailPage } from '../pages/people/PersonDetailPage'
 import { ApplicationsPage } from '../pages/applications/ApplicationsPage'
 import { DashboardPage } from '../pages/DashboardPage'
@@ -22,6 +23,7 @@ import {
   makeApplication,
   makeAuditRecord,
   makeEvent,
+  makeFirmwareVersion,
   makeOperatorAccount,
   makePermission,
   makePerson,
@@ -95,6 +97,7 @@ function signIn(role: Role = 'OWNER') {
     permissions: [makePermission({ person_id: 'P-0001' })],
     schedules: [makeSchedule({ permission_count: 1 })],
     events: [makeEvent()],
+    firmware: [makeFirmwareVersion()],
     operators: [makeOperatorAccount(), makeOperatorAccount({ id: 'op-2', email: 'a@b.example' })],
     applications: [makeApplication()],
     audit: [makeAuditRecord()],
@@ -136,6 +139,7 @@ function renderInShell(path: string, client = makeTestQueryClient()) {
           { path: 'access/schedules', element: <SchedulesPage /> },
           { path: 'people/:externalId', element: <PersonDetailPage /> },
           { path: 'settings/applications', element: <ApplicationsPage /> },
+          { path: 'settings/firmware', element: <FirmwarePage /> },
         ],
       },
     ],
@@ -163,6 +167,7 @@ describe('every screen passes the automated sweep', () => {
     ['schedules', '/access/schedules', () => screen.findByRole('heading', { name: 'Schedules' })],
     ['one person', '/people/P-0001', () => screen.findByRole('heading', { name: 'Access' })],
     ['applications', '/settings/applications', () => screen.findByText('Access Control')],
+    ['firmware', '/settings/firmware', () => screen.findByRole('heading', { name: /Firmware/ })],
   ]
 
   for (const [name, path, settled] of screens) {

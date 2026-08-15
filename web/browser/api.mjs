@@ -191,6 +191,33 @@ const AVAILABLE = [
   'VISITOR_MANAGEMENT',
 ]
 
+const FIRMWARE = [
+  {
+    id: 1,
+    public_id: 'firmware-1',
+    version: '1.2.0',
+    device_type: 'TERMINAL',
+    release_channel: 'STABLE',
+    checksum_sha256: 'a'.repeat(64),
+    download_url: 'https://builds.northwind.example/accesslink/terminal/1.2.0.bin',
+    release_notes: 'Sensor timeout raised, and the sync backoff no longer resets on a 429.',
+    size_bytes: 1_842_000,
+    is_mandatory: false,
+    is_current: true,
+    created_at: '2026-06-01T00:00:00Z',
+  },
+  {
+    id: 2,
+    public_id: 'firmware-2',
+    version: '1.3.0-rc2',
+    device_type: 'TERMINAL',
+    release_channel: 'BETA',
+    is_mandatory: true,
+    is_current: true,
+    created_at: '2026-08-10T00:00:00Z',
+  },
+]
+
 const SCHEDULES = [
   {
     id: 'schedule-1',
@@ -319,7 +346,7 @@ const ROUTES = [
     enabled: APPLICATIONS.filter((app) => app.enabled).map((app) => app.code),
     available: AVAILABLE,
   })],
-  [/\/api\/v1\/console\/firmware$/, () => ({ count: 0, firmware_versions: [] })],
+  [/\/api\/v1\/console\/firmware$/, () => ({ count: FIRMWARE.length, firmware_versions: FIRMWARE })],
 
   // Access control and the door log. The event set deliberately mixes outcomes,
   // an unrecognised presentation and a buffered upload, because the layout

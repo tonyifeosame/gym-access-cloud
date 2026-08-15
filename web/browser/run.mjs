@@ -56,6 +56,7 @@ const SCREENS = [
   { name: 'events', path: '/events', ready: 'table, .state--empty' },
   { name: 'schedules', path: '/access/schedules', ready: '.rule-list, .notice' },
   { name: 'applications', path: '/settings/applications', ready: '.capability-list' },
+  { name: 'firmware', path: '/settings/firmware', ready: '.rule-list, .notice' },
   { name: 'settings', path: '/settings', ready: 'h1' },
 ]
 

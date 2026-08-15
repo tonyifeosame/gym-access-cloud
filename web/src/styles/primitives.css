@@ -1340,6 +1340,17 @@ textarea.field__input {
   max-width: 68ch;
 }
 
+/* Long opaque values -- a SHA-256, a build URL -- have no spaces to break at,
+ * so without this they set the width of the whole page. Measured at 360px: a
+ * 64-character checksum pushed the firmware catalogue to 517px and made the
+ * DOCUMENT scroll sideways, which breaks every other screen on the page.
+ *
+ * `anywhere` rather than `break-word`: these have no word boundaries to prefer,
+ * and the value stays selectable and copyable either way. */
+.rule__detail code {
+  overflow-wrap: anywhere;
+}
+
 .rule__actions {
   display: flex;
   gap: var(--space-2);
