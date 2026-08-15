@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,6 +47,18 @@ func UpdateSiteSettings(c *gin.Context) {
 		logError(c, "update site settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
 		return
+	}
+
+	// AUDITED ONLY ON THE CONSOLE PATH. This handler is mounted twice -- once
+	// behind an operator session and once behind the site key -- and the audit
+	// trail is a record of what OPERATORS did. A row with no actor, written
+	// whenever a terminal's provisioning key pushed a settings change, would be
+	// noise in the one table that has to stay readable.
+	//
+	// The settings body is not recorded. It is an open JSON object this layer
+	// does not know the shape of, and GP-04 is the finding that says so.
+	if middleware.Operator(c) != nil {
+		recordAudit(c, auditSettingsSet, auditTargetSite, "", c.GetString("site_name"), nil)
 	}
 
 	c.JSON(http.StatusOK, updated)

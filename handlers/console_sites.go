@@ -64,6 +64,14 @@ func ConsoleCreateSite(c *gin.Context) {
 		return
 	}
 
+	// The KEY IS NOT IN THE AUDIT RECORD, and the prefix is. That is the whole of
+	// what database/audit.go means by "redacted by the caller": the trail must be
+	// able to say which credential was minted without being a place to read one.
+	recordAudit(c, auditSiteCreated, auditTargetSite, site.ID, site.Name, gin.H{
+		"timezone":       site.Timezone,
+		"api_key_prefix": credential.Prefix,
+	})
+
 	// The ONE response in the operator API that carries a provisioning key.
 	c.JSON(http.StatusCreated, models.ConsoleSiteCreatedResponse{
 		Site: *site,
@@ -117,6 +125,23 @@ func ConsoleUpdateSite(c *gin.Context) {
 		return
 	}
 
+	// Only the fields the caller actually sent. Recording every column would make
+	// a rename indistinguishable from a deactivation in the trail.
+	changes := gin.H{}
+	if req.Name != nil {
+		changes["name"] = *req.Name
+	}
+	if req.Address != nil {
+		changes["address"] = *req.Address
+	}
+	if req.Timezone != nil {
+		changes["timezone"] = *req.Timezone
+	}
+	if req.Active != nil {
+		changes["active"] = *req.Active
+	}
+	recordAudit(c, auditSiteUpdated, auditTargetSite, site.ID, site.Name, changes)
+
 	c.JSON(http.StatusOK, site)
 }
 
@@ -144,6 +169,12 @@ func ConsoleRetireSite(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retire site"})
 		return
 	}
+
+	// The terminal count goes into the record as well as the response. "How many
+	// doors stopped working when this site was retired" is the question somebody
+	// asks afterwards, and the response is gone by then.
+	recordAudit(c, auditSiteRetired, auditTargetSite, result.SitePublicID,
+		result.SiteName, gin.H{"terminals_retired": result.TerminalsRetired})
 
 	// 200 with a body rather than 204: the terminal count is the whole point,
 	// and an empty response would discard the one fact the operator needs.
@@ -176,6 +207,18 @@ func ConsoleRotateSiteAPIKey(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate the site key"})
 		return
 	}
+
+	// The prefix, never the key. And the count of terminals this just locked out,
+	// because that is the consequence somebody will be asking about.
+	//
+	// Named by site_name rather than by UUID: RequireSiteGrant puts the name in
+	// the context and the rotation returns no site body, so this is the
+	// natural-key case recordAudit documents.
+	recordAudit(c, auditSiteKeyRotated, auditTargetSite, "", c.GetString("site_name"),
+		gin.H{
+			"api_key_prefix":   credential.Prefix,
+			"legacy_terminals": legacy,
+		})
 
 	c.JSON(http.StatusOK, models.ConsoleSiteRotatedResponse{
 		Credential: models.ConsoleSiteCredential{

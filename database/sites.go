@@ -197,6 +197,15 @@ type RetirementResult struct {
 	// site. Reported so a caller can say so rather than leaving an operator to
 	// discover it.
 	TerminalsRetired int
+
+	// SitePublicID and SiteName identify what was retired, for the audit record.
+	//
+	// Returned from the retiring UPDATE rather than read back afterwards: the row
+	// is soft-deleted by the time this function returns, so every console query
+	// that would name it filters it out. A trail that recorded only an internal
+	// id would name the site as a number nobody can resolve.
+	SitePublicID string
+	SiteName     string
 }
 
 // RetireSite soft-deletes a site AND every terminal at it, in one transaction.
@@ -227,14 +236,19 @@ func RetireSite(companyID, siteID int64) (*RetirementResult, error) {
 
 	// The site first, company-scoped, so a site in another tenant is not found
 	// rather than being retired.
-	var retired int64
+	var (
+		retired     int64
+		publicID    string
+		retiredName string
+	)
 	err = tx.QueryRow(`
 		UPDATE sites
 		   SET deleted_at = CURRENT_TIMESTAMP,
 		       active = FALSE,
 		       updated_at = CURRENT_TIMESTAMP
 		 WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
-		 RETURNING id`, siteID, companyID).Scan(&retired)
+		 RETURNING id, public_id, site_name`, siteID, companyID).
+		Scan(&retired, &publicID, &retiredName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrSiteNotFound
 	}
@@ -260,7 +274,11 @@ func RetireSite(companyID, siteID int64) (*RetirementResult, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &RetirementResult{TerminalsRetired: int(terminals)}, nil
+	return &RetirementResult{
+		TerminalsRetired: int(terminals),
+		SitePublicID:     publicID,
+		SiteName:         retiredName,
+	}, nil
 }
 
 // RotateSiteAPIKey issues a new provisioning key and invalidates the old one.
