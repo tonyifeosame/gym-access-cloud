@@ -134,11 +134,27 @@ func DeviceHeartbeat(c *gin.Context) {
 		return
 	}
 
+	// What the platform would like this terminal to be running (OTA, §5).
+	//
+	// BEST EFFORT, AND DELIBERATELY SO. A heartbeat records liveness and tells
+	// a terminal whether it has work; failing it because the firmware
+	// catalogue could not be read would take the fleet's heartbeat down with
+	// it, and the console would show every door offline because of a firmware
+	// query. An offer that could not be built is simply absent, which the
+	// device reads as "nothing to do" -- exactly what it read before this
+	// field existed.
+	offer, err := database.FirmwareOfferFor(c.GetInt64("device_id"))
+	if err != nil {
+		logError(c, "resolve firmware offer", err)
+		offer = nil
+	}
+
 	c.JSON(http.StatusOK, models.DeviceHeartbeatResponse{
 		ProtocolVersion: models.SyncProtocolVersion,
 		DeviceID:        c.GetString("device_serial"),
 		ServerTime:      time.Now().UTC(),
 		PendingJobs:     pending,
+		FirmwareUpdate:  offer,
 	})
 }
 

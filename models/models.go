@@ -157,10 +157,48 @@ type EnrollmentStartRequest struct {
 	MemberID string `json:"member_id" binding:"required"`
 }
 
-// EnrollmentResultRequest is the request to submit enrollment result
+// EnrolledCredential is the structured placement a terminal now sends alongside
+// the legacy locator string.
+//
+// THE FIRMWARE HAS BEEN SENDING THIS ALREADY and the server has been discarding
+// it: ShouldBindJSON ignores unknown keys, so the object arrived and went
+// nowhere. Binding it lets an enrolment write a real `credentials` row and a
+// real `credential_placements` row instead of a string in a column, WITH NO
+// FIRMWARE CHANGE AT ALL -- which is exactly what
+// docs/firmware-protocol-requirements.md §4 proposed.
+//
+// The values are the firmware's own enums (credential_ref.h) and match the
+// platform's CHECK constraints exactly: FINGERPRINT/CARD/PIN/MOBILE/FACE/QR for
+// the type, SENSOR_LOCAL/VENDOR_TEMPLATE/IDENTIFIER for the format.
+//
+// NONE OF THIS IS MATERIAL. A slot number and a vendor name describe WHERE a
+// template lives, not what it is.
+type EnrolledCredential struct {
+	CredentialType string `json:"credential_type,omitempty"`
+	TemplateFormat string `json:"template_format,omitempty"`
+	Vendor         string `json:"vendor,omitempty"`
+
+	// Terminal is the serial the firmware believes it is. Recorded but NOT
+	// trusted: the placement is written against the authenticated device, so a
+	// terminal claiming another's serial changes nothing.
+	Terminal string `json:"terminal,omitempty"`
+
+	Slot int `json:"slot,omitempty"`
+}
+
+// EnrollmentResultRequest is the request to submit enrollment result.
+//
+// FingerprintTemplate stays required and stays first. It is not a template --
+// it is a locator, "terminal:<serial>:slot:<n>" -- and the name is frozen
+// because deployed firmware sends it and the 012 back-fill parses it. Renaming a
+// JSON field that shipped hardware writes is not a cosmetic change.
 type EnrollmentResultRequest struct {
 	MemberID            string `json:"member_id" binding:"required"`
 	FingerprintTemplate string `json:"fingerprint_template" binding:"required"`
+
+	// Credential is optional and additive: older firmware omits it entirely and
+	// the enrolment still completes exactly as it did.
+	Credential *EnrolledCredential `json:"credential,omitempty"`
 }
 
 // AccessLogRequest is the request to log an access attempt.
@@ -305,6 +343,19 @@ var DeviceReportableStates = map[string]bool{
 	DeviceError:    true,
 }
 
+// MaxDeviceSerialLength is what the FIRMWARE can hold.
+//
+// device_identity.h sizes a serial at char[16], so fifteen characters plus a
+// terminator. A claim code issued for anything longer could never be redeemed by
+// the hardware it was issued for, because that hardware cannot represent its own
+// serial to send back. Refused when the code is minted rather than discovered by
+// an installer at a door.
+const MaxDeviceSerialLength = 15
+
+// ErrDeviceSerialTooLong reports a serial no terminal could present.
+var ErrDeviceSerialTooLong = errors.New(
+	"serial_number must be 15 characters or fewer, which is what the terminal can store")
+
 // DeviceRegistrationRequest is the body of POST /devices/register
 //
 // device_type and release_channel are validated here rather than being left to
@@ -422,12 +473,46 @@ type CreateFirmwareRequest struct {
 	IsMandatory    bool   `json:"is_mandatory,omitempty"`
 }
 
-// DeviceHeartbeatResponse tells a device whether it has work waiting
+// FirmwareUpdateOffer is an image the platform is offering a terminal.
+//
+// THE FIELD NAMES ARE A WIRE CONTRACT with the firmware's FirmwareOffer
+// (firmware_update.h) and are specified in
+// docs/firmware-protocol-requirements.md §5. They match the catalogue columns
+// they come from, which is what makes the mapping checkable by reading it.
+//
+// Nothing here is optional. The device refuses an offer missing a digest or a
+// size, and the server withholds one it could not populate -- see
+// database/firmware_offer.go, where each refusal is logged with the reason.
+type FirmwareUpdateOffer struct {
+	Version        string `json:"version"`
+	DownloadURL    string `json:"download_url"`
+	ChecksumSHA256 string `json:"checksum_sha256"`
+	SizeBytes      int64  `json:"size_bytes"`
+
+	// IsMandatory changes WHEN, not WHETHER. The device treats it as a
+	// scheduling signal and applies every other check unchanged -- if it could
+	// relax one, "mandatory" would be the word an attacker used.
+	IsMandatory bool `json:"is_mandatory"`
+}
+
+// DeviceHeartbeatResponse tells a device whether it has work waiting.
+//
+// ServerTime is marshalled by encoding/json as RFC3339 with a Z, because the
+// value is always constructed in UTC. The firmware parses it as an authoritative
+// clock when it cannot reach NTP, and REFUSES a numeric offset rather than
+// silently mis-parsing it -- so a change that made this a local time would take
+// the fleet's clock with it.
 type DeviceHeartbeatResponse struct {
 	ProtocolVersion int       `json:"protocol_version"`
 	DeviceID        string    `json:"device_id"`
 	ServerTime      time.Time `json:"server_time"`
 	PendingJobs     int       `json:"pending_jobs"`
+
+	// FirmwareUpdate is present only when there is one to offer, so a fleet
+	// that is up to date sees exactly the response it saw before this field
+	// existed. Older firmware ignores an unknown key; newer firmware treats an
+	// absent one as "nothing to do".
+	FirmwareUpdate *FirmwareUpdateOffer `json:"firmware_update,omitempty"`
 }
 
 // SyncJob is one unit of change a device must apply. CREATE and UPDATE are both
