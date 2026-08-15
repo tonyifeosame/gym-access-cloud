@@ -327,14 +327,20 @@ describe('terminal detail', () => {
     expect(await screen.findByText(/never sent a heartbeat/)).toBeInTheDocument()
   })
 
-  it('names what the console cannot do, rather than leaving a gap', async () => {
-    // There is no operator API for removal, reassignment or forced resync.
-    // Saying so beats an operator hunting for a button that was never built.
+  it('still names the one thing the console cannot do: first registration', async () => {
+    // This page used to say that removal, reassignment and forced resync were
+    // all unavailable, which was true until the lifecycle routes landed
+    // (SEC-01) and is now offered in the Lifecycle section. What remains
+    // genuinely impossible from a browser is enrolling the hardware in the first
+    // place — that needs the site provisioning key, which a browser must never
+    // hold. Saying so beats an operator hunting for a button that cannot exist.
     signIn()
     renderTerminals('/terminals/AT-0001')
 
-    expect(await screen.findByText('Not available from the console')).toBeInTheDocument()
-    expect(screen.getByText(/cannot be moved to another site, removed/)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Lifecycle' })).toBeInTheDocument()
+    expect(
+      screen.getByText(/Registering a terminal for the first time happens on the device/),
+    ).toBeInTheDocument()
   })
 
   it('exposes no credential material anywhere on the page', async () => {

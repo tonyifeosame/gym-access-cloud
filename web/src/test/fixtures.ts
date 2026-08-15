@@ -1,5 +1,8 @@
 import type {
+  AuditRecord,
   ConfiguredApplication,
+  CredentialToken,
+  FirmwareVersion,
   OperatorAccount,
   Person,
   Session,
@@ -114,6 +117,62 @@ export function makeOperatorAccount(
     last_login_at: '2026-08-13T08:30:00Z',
     sites: [],
     all_sites: true,
+    created_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * A minted invitation or reset.
+ *
+ * The token is shaped like the server's — 64 hex characters — so that a test
+ * asserting a link is not asserting on something implausibly short. It is still
+ * a fixture and not a secret; what matters is that the console never stores it.
+ */
+export function makeCredentialToken(
+  overrides: Partial<CredentialToken> = {},
+): CredentialToken {
+  return {
+    token: 'a1b2c3d4'.repeat(8),
+    purpose: 'INVITE',
+    expires_at: '2030-01-01T00:00:00Z',
+    shown_once: true,
+    ...overrides,
+  }
+}
+
+/**
+ * One audit record.
+ *
+ * Defaults to an action with a named target, because the interesting rendering
+ * question is how a record reads when it has one — an action with no target is
+ * the degenerate case, not the representative one.
+ */
+export function makeAuditRecord(overrides: Partial<AuditRecord> = {}): AuditRecord {
+  return {
+    id: 'audit-1',
+    action: 'TERMINAL_DISABLED',
+    actor_email: 'ops@example.com',
+    actor_role: 'ADMIN',
+    target_type: 'TERMINAL',
+    target_label: 'AT-0001',
+    ip_address: '203.0.113.10',
+    occurred_at: '2026-08-14T17:05:00Z',
+    ...overrides,
+  }
+}
+
+export function makeFirmwareVersion(
+  overrides: Partial<FirmwareVersion> = {},
+): FirmwareVersion {
+  return {
+    id: 1,
+    public_id: 'firmware-1',
+    version: '1.2.0',
+    device_type: 'TERMINAL',
+    release_channel: 'STABLE',
+    is_mandatory: false,
+    is_current: true,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   }

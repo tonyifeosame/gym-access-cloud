@@ -1,4 +1,4 @@
-import type { PeopleQuery } from '../api/types'
+import type { AuditQuery, PeopleQuery } from '../api/types'
 
 /**
  * Query keys, in one place.
@@ -73,5 +73,37 @@ export const keys = {
   applications: {
     all: [ROOT, 'applications'] as const,
     list: () => [ROOT, 'applications', 'list'] as const,
+  },
+
+  /**
+   * The audit trail.
+   *
+   * The whole filter is part of the key, normalised so that an absent filter and
+   * an empty one are the same cache entry rather than two. Every mutation hook
+   * that writes an audit record invalidates `all`, which is why the filters hang
+   * below it: a new record may belong to any filtered view.
+   */
+  audit: {
+    all: [ROOT, 'audit'] as const,
+    list: (query: AuditQuery = {}) =>
+      [
+        ROOT,
+        'audit',
+        'list',
+        {
+          action: query.action ?? '',
+          target_type: query.target_type ?? '',
+          actor: query.actor?.trim() ?? '',
+          since: query.since ?? '',
+          until: query.until ?? '',
+          limit: query.limit ?? null,
+          offset: query.offset ?? 0,
+        },
+      ] as const,
+  },
+
+  firmware: {
+    all: [ROOT, 'firmware'] as const,
+    list: () => [ROOT, 'firmware', 'list'] as const,
   },
 } as const

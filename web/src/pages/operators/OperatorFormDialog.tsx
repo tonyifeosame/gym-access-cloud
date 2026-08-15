@@ -1,5 +1,8 @@
+import { useState } from 'react'
+
 import { ApiError } from '../../api/client'
-import type { Role } from '../../api/types'
+import type { CredentialToken, Role } from '../../api/types'
+import { invitationOf, operatorOf } from '../../api/types'
 import { assignableRoles } from '../../auth/permissions'
 import { roleLabel } from '../../auth/roles'
 import { Dialog } from '../../components/Dialog'
@@ -10,6 +13,7 @@ import {
   SelectField,
   TextField,
 } from '../../components/Form'
+import { HandoverLinkPanel } from '../../components/HandoverLinkPanel'
 import { useNotifications } from '../../components/Notifications'
 import { InfoNote } from '../../components/states'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
@@ -22,25 +26,34 @@ const MIN_PASSWORD_LENGTH = 12
 /**
  * Creating an operator account.
  *
- * TWO THINGS HERE ARE EASY TO GET DANGEROUSLY WRONG, and both are handled
- * explicitly rather than left to the operator to infer.
+ * THE DEFAULT IS AN INVITATION, AND THAT IS THE POINT OF THIS SCREEN. The
+ * account is created with a credential nobody holds, and the response carries a
+ * single-use link. The administrator creating the account therefore never learns
+ * how to sign in as it.
+ *
+ * The alternative — typing a password and reading it out — is still offered,
+ * because a deployment with no way to send a link needs it. It is the second
+ * option, it says what it costs, and choosing it is a deliberate act rather than
+ * the only path. Before the credential handover existed it WAS the only path,
+ * and the realistic consequence was not hypothetical: initial passwords travelled
+ * by chat in plain text, usually stayed unchanged, and the administrator knew
+ * them indefinitely with nothing recording that they did.
+ *
+ * TWO OTHER THINGS ARE EASY TO GET DANGEROUSLY WRONG HERE:
  *
  * THE ROLE LIST IS NARROWED TO WHAT THE CALLER MAY ASSIGN. An ADMIN cannot
- * create an OWNER, because otherwise ADMIN would be a synonym for OWNER one
- * request later. The server enforces it; offering the option anyway would just
- * produce a 403 after the password had been typed.
+ * create an OWNER, or ADMIN would be a synonym for OWNER one request later. The
+ * server enforces it; offering the option anyway would produce a 403 after the
+ * form was filled in.
  *
  * AN EMPTY SITE SELECTION MEANS EVERY SITE, NOT NONE. That is the platform's
  * grant rule — absence is the default rather than a denial — and it is the one
- * piece of this product whose two readings are exact opposites, where the
- * dangerous one looks like the safe one. The form states which it is, in words,
- * as the selection changes.
- *
- * THE PASSWORD IS SET DIRECTLY AND MUST BE COMMUNICATED OUT OF BAND. There is no
- * invite flow in the platform (MR-015), so whoever creates the account has to
- * hand the password over by some other means. The form says so rather than
- * leaving somebody to email it in plain text without thinking.
+ * place in this product whose two readings are exact opposites, where the
+ * dangerous one looks like the safe one. The form says which it is, in words, as
+ * the selection changes.
  */
+
+type Handover = 'INVITE' | 'PASSWORD'
 
 interface Values extends Record<string, unknown> {
   email: string
@@ -56,6 +69,10 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
   const sites = useSites()
   const notifications = useNotifications()
 
+  const [handover, setHandover] = useState<Handover>('INVITE')
+  // The minted link, held for the life of this panel and nowhere else.
+  const [issued, setIssued] = useState<{ token: CredentialToken; name: string } | null>(null)
+
   const roles = assignableRoles(session)
 
   const form = useForm<Values>({
@@ -69,34 +86,80 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
     validate: (values) => ({
       email: validators.email(values.email),
       full_name: validators.required(values.full_name, 'Full name'),
+      // Only validated on the path that collects one. Requiring a password the
+      // form is not asking for would make the invitation path unsubmittable.
       password:
-        validators.required(values.password, 'Password') ??
-        validators.minLength(values.password, MIN_PASSWORD_LENGTH, 'Password'),
+        handover === 'PASSWORD'
+          ? (validators.required(values.password, 'Password') ??
+            validators.minLength(values.password, MIN_PASSWORD_LENGTH, 'Password'))
+          : undefined,
     }),
     onSubmit: async (values) => {
-      const created = await create.mutateAsync({
+      const response = await create.mutateAsync({
         email: values.email.trim(),
         full_name: values.full_name.trim(),
-        password: values.password,
+        // Omitted, not empty: an absent password is what asks the server for an
+        // invitation, and sending "" would mean the same thing by accident
+        // rather than on purpose.
+        password: handover === 'PASSWORD' ? values.password : undefined,
         role: values.role,
-        // Omitted rather than sent empty: an empty list is a meaningful value
-        // to the API ("not scoped"), and it is also what omitting it produces,
-        // so this keeps the request honest about intent.
+        // Likewise omitted rather than sent empty: an empty list is a meaningful
+        // value to the API ("not scoped"), which is also what omitting produces.
         site_ids: values.site_ids.length > 0 ? values.site_ids : undefined,
       })
+
+      const created = operatorOf(response)
+      const invitation = invitationOf(response)
+
+      if (invitation) {
+        // The dialog STAYS OPEN and switches to the link. Closing here would
+        // discard a credential that cannot be read back, and the operator would
+        // have to issue a second invitation to recover from a successful action.
+        setIssued({ token: invitation, name: created.full_name })
+        return
+      }
+
       notifications.success(`${created.full_name} can now sign in`)
       onClose()
     },
   })
 
+  function dismiss() {
+    // Reset drops the mutation's `data`, which is the only place the token still
+    // exists. Without this it would survive the panel for the life of the hook.
+    create.reset()
+    setIssued(null)
+    onClose()
+  }
+
   // Grants are only consulted for MANAGER and VIEWER; ADMIN and OWNER reach
-  // every site regardless. Saying so beats letting somebody carefully pick
-  // three sites for an ADMIN and believe it did something.
+  // every site regardless. Saying so beats letting somebody carefully pick three
+  // sites for an ADMIN and believe it did something.
   const roleIgnoresGrants = form.values.role === 'ADMIN' || form.values.role === 'OWNER'
   const unscoped = form.values.site_ids.length === 0
 
   const error = form.submitError
   const conflict = error instanceof ApiError && error.status === 409
+
+  if (issued) {
+    return (
+      <Dialog
+        open={open}
+        title="Operator created"
+        // Not dismissible: Escape and backdrop clicks are the two ways a dialog
+        // gets closed by accident, and here that loses the only copy of a link.
+        dismissible={false}
+        onClose={dismiss}
+        size="wide"
+      >
+        <HandoverLinkPanel
+          token={issued.token}
+          operatorName={issued.name}
+          onDismiss={dismiss}
+        />
+      </Dialog>
+    )
+  }
 
   return (
     <Dialog
@@ -131,18 +194,47 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
           disabled={form.submitting}
         />
 
-        <TextField
-          label="Initial password"
-          type="password"
+        <SelectField
+          label="How they get their password"
           required
-          autoComplete="new-password"
-          value={form.values.password}
-          error={form.errors.password}
-          onChange={(value) => form.setValue('password', value)}
-          onBlur={() => form.touch('password')}
+          value={handover}
+          onChange={(value) => setHandover(value as Handover)}
           disabled={form.submitting}
-          hint={`At least ${MIN_PASSWORD_LENGTH} characters. You will need to give this to them yourself — AccessLink does not send invitations, and cannot show you this password again.`}
+          options={[
+            {
+              value: 'INVITE',
+              label: 'Send them an invitation link',
+              description:
+                'The account is created with no usable password and you get a single-use link to send them. You never learn their password.',
+            },
+            {
+              value: 'PASSWORD',
+              label: 'Set a password myself',
+              description:
+                'You choose the password and hand it over yourself. You will know their credential, and they are asked to change it at first sign-in.',
+            },
+          ]}
         />
+
+        {handover === 'PASSWORD' ? (
+          <TextField
+            label="Initial password"
+            type="password"
+            required
+            autoComplete="new-password"
+            value={form.values.password}
+            error={form.errors.password}
+            onChange={(value) => form.setValue('password', value)}
+            onBlur={() => form.touch('password')}
+            disabled={form.submitting}
+            hint={`At least ${MIN_PASSWORD_LENGTH} characters. You will need to give this to them yourself — AccessLink does not send it, and cannot show it to you again.`}
+          />
+        ) : (
+          <InfoNote title="You will be given a link to send">
+            AccessLink does not have email. The link appears once, here, after the
+            account is created — copy it then and send it over a channel you trust.
+          </InfoNote>
+        )}
 
         <SelectField
           label="Role"
@@ -204,7 +296,11 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
             Cancel
           </button>
           <button type="submit" className="button button--primary" disabled={form.submitting}>
-            {form.submitting ? 'Creating…' : 'Create operator'}
+            {form.submitting
+              ? 'Creating…'
+              : handover === 'INVITE'
+                ? 'Create and invite'
+                : 'Create operator'}
           </button>
         </FormActions>
       </form>

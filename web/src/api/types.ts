@@ -78,6 +78,19 @@ export interface Session {
   sites: SiteGrant[]
   all_sites: boolean
   applications: EnabledApplication[]
+  /**
+   * Set when the credential in use was chosen by somebody OTHER than its owner —
+   * an invitation redeemed with a generated password, or an administrative
+   * reset.
+   *
+   * REPORTED, NOT ENFORCED, and the console has to supply the enforcement. The
+   * server deliberately does not refuse these sessions: an account refused every
+   * request could not reach /auth/password either, which is the one thing it
+   * needs to do. So the block lives here, in front of the console, and it must be
+   * a block rather than a suggestion — the whole point is that somebody else
+   * currently knows this password.
+   */
+  must_change_password?: boolean
   csrf_token: string
   session_expires_at: string
   session_expires_in_seconds: number
@@ -329,6 +342,97 @@ export interface TerminalModeRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * THREE OPERATIONS THAT SOUND ALIKE AND ARE NOT. Every screen in front of them
+ * has to make the difference unmistakable, because choosing the wrong one is
+ * either an unnecessary site visit or a door that quietly keeps working.
+ *
+ *   DISABLE   Reversible. The terminal stops authenticating; its credential is
+ *             untouched, so re-enabling brings it back with no site visit. This
+ *             is what a faulty or temporarily unused unit wants.
+ *
+ *   REVOKE    Irreversible for that credential. The device key hash is cleared,
+ *             so the credential stops resolving at all. The hardware still
+ *             exists and can be re-registered with the site's provisioning key.
+ *             This is what a STOLEN or missing unit wants.
+ *
+ *   RETIRE    One-way. The row is soft-deleted AND the credential revoked. The
+ *             terminal leaves every console list. This is what a unit that has
+ *             been decommissioned, destroyed or returned wants.
+ *
+ * All three are ADMIN server-side, matching site lifecycle rather than the
+ * MANAGER gate on day-to-day writes.
+ */
+
+/** Disable or re-enable. `reason` lands in the audit trail and on the row. */
+export interface TerminalStateRequest {
+  disabled: boolean
+  reason?: string
+}
+
+export interface TerminalRevokeRequest {
+  reason?: string
+}
+
+export interface TerminalRetireRequest {
+  reason?: string
+}
+
+/** `site_id` is a site's PUBLIC id, matching what /console/sites returns. */
+export interface TerminalMoveRequest {
+  site_id: string
+}
+
+/**
+ * What a lifecycle mutation answers with.
+ *
+ * `terminal` is OPTIONAL, and that is the server's contract rather than
+ * defensiveness: the mutation is applied first and the row read back
+ * afterwards, and a failed read-back returns the operation's own facts without
+ * it rather than a 500 that would invite a retry of a completed mutation. A
+ * caller must therefore treat a missing `terminal` as "it worked, refetch"
+ * rather than as failure.
+ */
+export interface TerminalLifecycleResponse {
+  terminal?: TerminalDetail
+  status?: TerminalStatus
+  active?: boolean
+  credential_cleared?: boolean
+  /**
+   * Queued sync work that will now never be delivered. Not decoration: an
+   * operator who is not told believes those changes reached the hardware.
+   */
+  pending_jobs_cancelled?: number
+  moved?: boolean
+  /** The server's own words on how to bring a revoked terminal back. */
+  recovery?: string
+}
+
+export interface TerminalRetiredResponse {
+  serial_number: string
+  retired: boolean
+  credential_cleared: boolean
+  pending_jobs_cancelled: number
+}
+
+/**
+ * The result of forcing a resync.
+ *
+ * `superseded_jobs` is queued work the snapshot replaced; `pending_jobs` is what
+ * the terminal will now collect. Both are worth showing — a resync that
+ * supersedes a large backlog is a different event from one that queues three
+ * rows.
+ */
+export interface TerminalResyncResponse {
+  serial_number: string
+  superseded_jobs: number
+  pending_jobs: number
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
@@ -431,12 +535,43 @@ export interface OperatorSitesResponse {
   all_sites: boolean
 }
 
+/**
+ * Create an operator.
+ *
+ * `password` IS OPTIONAL, AND OMITTING IT IS THE PREFERRED PATH. An absent
+ * password creates the account with a credential nobody holds and returns a
+ * single-use invitation instead, so the administrator creating the account never
+ * learns how to sign in as it. Supplying one is kept for a deployment that
+ * cannot deliver a link at all, and the console says as much where it is offered.
+ */
 export interface CreateOperatorRequest {
   email: string
   full_name: string
-  password: string
+  password?: string
   role: Role
   site_ids?: string[]
+}
+
+/**
+ * What creating an operator answers with.
+ *
+ * TWO SHAPES FROM ONE ENDPOINT: a bare account when the caller supplied a
+ * password, and `{operator, invitation, delivery}` when it did not. Modelled as
+ * a union rather than as an account with optional extras so that reading the
+ * invitation requires narrowing, and a caller cannot forget that it may be
+ * absent.
+ */
+export type CreateOperatorResponse =
+  | OperatorAccount
+  | { operator: OperatorAccount; invitation: CredentialToken; delivery: string }
+
+/** Narrows the union above. */
+export function operatorOf(response: CreateOperatorResponse): OperatorAccount {
+  return 'operator' in response ? response.operator : response
+}
+
+export function invitationOf(response: CreateOperatorResponse): CredentialToken | null {
+  return 'invitation' in response ? response.invitation : null
 }
 
 /** Every field optional; only what is supplied is applied. */
@@ -449,6 +584,165 @@ export interface UpdateOperatorRequest {
 /** Replaces grants wholesale. An empty list means "not scoped" — every site. */
 export interface SiteGrantsRequest {
   site_ids: string[]
+}
+
+// ---------------------------------------------------------------------------
+// Operator credential handover
+// ---------------------------------------------------------------------------
+
+/**
+ * A minted invitation or password reset.
+ *
+ * `token` IS A CREDENTIAL and is returned exactly once, by the call that created
+ * it. The server stores only its SHA-256, so it cannot be read back. Everything
+ * that applies to a site provisioning key applies here: it must not be written
+ * to storage of any kind, put in a query key, logged, or left in the React Query
+ * cache after the panel showing it closes.
+ *
+ * `shown_once` is the server saying so in the payload rather than in
+ * documentation, because a client that stores it is the failure mode.
+ */
+export interface CredentialToken {
+  token: string
+  purpose: 'INVITE' | 'RESET'
+  expires_at: string
+  shown_once: boolean
+}
+
+/**
+ * What an invitation call answers with.
+ *
+ * `delivery` is the server stating plainly that IT DOES NOT SEND THE LINK. There
+ * is no transactional email on this platform, so an administrator who closes the
+ * panel without copying the link has to issue another one. Any UI must say that
+ * before the operator can navigate away.
+ */
+export interface InvitationResponse {
+  invitation: CredentialToken
+  delivery: string
+}
+
+export interface ResetResponse {
+  reset: CredentialToken
+  delivery: string
+}
+
+/** Sets a password from an invitation or reset link. The token IS the authorisation. */
+export interface RedeemRequest {
+  token: string
+  new_password: string
+}
+
+/**
+ * The answer to a self-service reset request.
+ *
+ * ALWAYS 202 AND ALWAYS IDENTICAL, whether or not the address belongs to an
+ * account. The endpoint is unauthenticated and permanently exposed, so an
+ * honest "no such account" would be an enumeration oracle. A console that
+ * branched on this would reintroduce the oracle in the browser.
+ */
+export interface PasswordResetAcceptedResponse {
+  status: string
+  message: string
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+/**
+ * One recorded operator action.
+ *
+ * The actor is a DENORMALISED email and role, not a reference: an operator
+ * account can be deleted, and the record of what they did has to stay readable
+ * afterwards. `actor_role` may be `PLATFORM`, which is not one of the operator
+ * roles — it marks a change made by the vendor's platform administration surface
+ * rather than by somebody inside the company, and a reader must be able to tell.
+ *
+ * `changes` is free-form and already redacted server-side. It is rendered as
+ * data, never parsed for meaning.
+ */
+export interface AuditRecord {
+  id: string
+  action: string
+  actor_email?: string
+  actor_role?: string
+  target_type?: string
+  target_id?: string
+  target_label?: string
+  ip_address?: string
+  changes?: unknown
+  occurred_at: string
+}
+
+export interface AuditPage {
+  count: number
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
+  entries: AuditRecord[]
+}
+
+/**
+ * Audit filters.
+ *
+ * `since`/`until` are RFC3339 instants. The server IGNORES an unparseable one
+ * rather than rejecting the request, so a client must not rely on a 400 to tell
+ * it a date was malformed — it validates before sending instead.
+ */
+export interface AuditQuery {
+  action?: string
+  target_type?: string
+  actor?: string
+  since?: string
+  until?: string
+  limit?: number
+  offset?: number
+}
+
+// ---------------------------------------------------------------------------
+// Firmware catalogue
+// ---------------------------------------------------------------------------
+
+/**
+ * A build in the company's catalogue.
+ *
+ * `is_current` IS THE DEPLOYMENT TARGET, and it is the value every "is this
+ * terminal outdated" report is measured against. The platform does not push
+ * firmware — there is no OTA — so marking a build current changes what the fleet
+ * is COMPARED TO and nothing else. A console that implied otherwise would have
+ * operators believing a fleet had been updated.
+ */
+export interface FirmwareVersion {
+  id: number
+  public_id: string
+  version: string
+  device_type: string
+  release_channel: string
+  download_url?: string
+  checksum_sha256?: string
+  size_bytes?: number
+  release_notes?: string
+  is_mandatory: boolean
+  is_current: boolean
+  published_at?: string
+  created_at: string
+}
+
+export interface FirmwareResponse {
+  count: number
+  firmware_versions: FirmwareVersion[]
+}
+
+export interface CreateFirmwareRequest {
+  version: string
+  device_type?: string
+  release_channel?: string
+  download_url?: string
+  checksum_sha256?: string
+  release_notes?: string
+  is_mandatory?: boolean
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import { ApiError } from '../api/client'
 import { setCsrfToken } from '../api/csrf'
+import { invitationOf, operatorOf } from '../api/types'
 import {
   makeApplication,
   makeOperatorAccount,
@@ -380,7 +381,7 @@ describe('operators', () => {
     const wrapper = queryWrapper(client)
 
     const create = renderHook(() => useCreateOperator(), { wrapper })
-    const created = await create.result.current.mutateAsync({
+    const response = await create.result.current.mutateAsync({
       email: 'new@example.com',
       full_name: 'New Operator',
       password: 'a-long-enough-password',
@@ -388,9 +389,34 @@ describe('operators', () => {
       site_ids: [SITE_A.site_id],
     })
 
+    // A supplied password means a bare account and NO invitation — the union's
+    // other arm. Narrowed through the helpers so the shape stays checked.
+    const created = operatorOf(response)
+    expect(invitationOf(response)).toBeNull()
     expect(created.role).toBe('VIEWER')
     expect(created.all_sites).toBe(false)
     expect(created.sites?.[0]?.site_id).toBe(SITE_A.site_id)
+  })
+
+  it('creates an operator BY INVITATION when no password is supplied', async () => {
+    // The preferred path (PPL-02): the account exists with a credential nobody
+    // holds, and the caller is handed a single-use link instead of choosing a
+    // password it would then know indefinitely.
+    signIn()
+    const wrapper = queryWrapper(makeTestQueryClient())
+
+    const create = renderHook(() => useCreateOperator(), { wrapper })
+    const response = await create.result.current.mutateAsync({
+      email: 'invited@example.com',
+      full_name: 'Invited Operator',
+      role: 'MANAGER',
+    })
+
+    const invitation = invitationOf(response)
+    expect(invitation).not.toBeNull()
+    expect(invitation?.purpose).toBe('INVITE')
+    expect(invitation?.shown_once).toBe(true)
+    expect(operatorOf(response).email).toBe('invited@example.com')
   })
 
   it('treats an EMPTY grant list as unscoped, not as no access', async () => {

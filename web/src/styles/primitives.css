@@ -1086,6 +1086,82 @@ textarea.field__input {
   overflow-x: auto;
 }
 
+/* ===========================================================================
+ * Lifecycle options
+ *
+ * Terminal disable / revoke / retire, presented as separate rows rather than
+ * as one control with a mode. The visual weight is deliberately EVEN: making
+ * the destructive ones smaller or greyer would read as "advanced", and an
+ * operator hunting for the right one under time pressure would skip them.
+ * The distinction is carried by the words and by the button tone, not by
+ * hiding anything.
+ * ======================================================================== */
+
+.lifecycle {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.lifecycle__option {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--border);
+}
+
+.lifecycle__option:last-child {
+  border-block-end: none;
+}
+
+.lifecycle__text {
+  min-width: 0;
+}
+
+.lifecycle__title {
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.lifecycle__detail {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 62ch;
+}
+
+.lifecycle__option .button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 680px) {
+  .lifecycle__option {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lifecycle__option .button {
+    width: 100%;
+  }
+}
+
+/* The alternate channel inside a one-time credential panel. */
+.credential__alternate {
+  margin-block: var(--space-3);
+  font-size: 14px;
+}
+
+.credential__alternate summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-block-end: var(--space-2);
+}
+
 @media (max-width: 680px) {
   .capability {
     flex-direction: column;

@@ -2,7 +2,9 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 
 import type {
+  AuditRecord,
   ConfiguredApplication,
+  FirmwareVersion,
   OperatorAccount,
   Person,
   Session,
@@ -10,7 +12,16 @@ import type {
   Terminal,
   TerminalDetail,
 } from '../api/types'
-import { makeOperatorAccount, makePerson, makeSession, makeSite, makeTerminal } from './fixtures'
+import {
+  makeAuditRecord,
+  makeCredentialToken,
+  makeFirmwareVersion,
+  makeOperatorAccount,
+  makePerson,
+  makeSession,
+  makeSite,
+  makeTerminal,
+} from './fixtures'
 
 /**
  * A mock AccessLink API.
@@ -41,6 +52,14 @@ interface ServerState {
   applications: ConfiguredApplication[]
   available: string[]
   settings: Record<string, { settings: Record<string, unknown>; settings_version: number }>
+  audit: AuditRecord[]
+  firmware: FirmwareVersion[]
+  /**
+   * What each redemption token is worth. Absent means unknown, which is what an
+   * invented token gets — so a test does not have to register a failure to
+   * exercise the "that link is not valid" path.
+   */
+  redeemable: Record<string, 'ok' | 'expired' | 'used'>
   /** Forces the next matching request to fail, for error-path tests. */
   failNext: Record<string, number>
   requests: { method: string; url: string; headers: Headers }[]
@@ -66,6 +85,9 @@ function initialState(): ServerState {
       'VISITOR_MANAGEMENT',
     ],
     settings: {},
+    audit: [],
+    firmware: [],
+    redeemable: {},
     failNext: {},
     requests: [],
   }
@@ -142,6 +164,45 @@ function reachableSiteIds(): string[] | null {
   return session.sites.map((grant) => grant.site_id)
 }
 
+/** The delivery notice every minted token is returned beside. */
+const DELIVERY_NOTICE =
+  'This link is shown once and is not stored. Send it to the operator over a ' +
+  'channel you trust; the platform does not deliver it.'
+
+/**
+ * The full chain in front of a terminal route: session, CSRF, role, then the
+ * grant on the site the terminal stands at.
+ *
+ * ALL FOUR, IN THAT ORDER, because that is what the server does and each one
+ * answers differently. A terminal in another tenant is a 404 and one at an
+ * ungranted site is a 403 — a mock that conflated them would let a console ship
+ * that told an operator a terminal did not exist when in fact they were simply
+ * not scoped to it.
+ */
+function guardTerminal(
+  request: Request,
+  serial: string,
+  minimumRole: 'MANAGER' | 'ADMIN',
+): Response | null {
+  const refused = guard(request)
+  if (refused) return refused
+
+  const role = state.session?.role
+  const rank = { VIEWER: 0, MANAGER: 1, ADMIN: 2, OWNER: 3 }
+  if ((rank[role ?? 'VIEWER'] ?? 0) < rank[minimumRole]) {
+    return json({ error: 'Insufficient permissions' }, 403)
+  }
+
+  const terminal = state.terminals.find((entry) => entry.serial_number === serial)
+  if (!terminal) return json({ error: 'Terminal not found' }, 404)
+
+  const scope = reachableSiteIds()
+  if (scope && !scope.includes(terminal.site_public_id)) {
+    return json({ error: 'Site access denied' }, 403)
+  }
+  return null
+}
+
 export const handlers = [
   // --- auth ---------------------------------------------------------------
 
@@ -200,6 +261,54 @@ export const handlers = [
         failure,
       )
     }
+    return noContent()
+  }),
+
+  /**
+   * Self-service reset. ALWAYS 202 WITH THE SAME BODY, whatever the address.
+   *
+   * Reproduced exactly, because a console that branched on the response would
+   * reintroduce in the browser the enumeration oracle the server refuses to be —
+   * and a mock that answered 404 for an unknown address would let that ship.
+   */
+  http.post('*/api/v1/auth/forgot-password', async ({ request }) => {
+    record(request)
+    await request.json()
+    return json(
+      {
+        status: 'accepted',
+        message:
+          'If that address belongs to an operator account, a password reset has ' +
+          'been issued. Contact your administrator if you do not receive it.',
+      },
+      202,
+    )
+  }),
+
+  /**
+   * Redemption. The token IS the authorisation, and the three failures are
+   * REPORTED DISTINCTLY — unknown, expired, already used. That is not an
+   * enumeration risk: a caller holding a token already holds the secret, and
+   * "expired" is the difference between asking for a new link and concluding the
+   * platform is broken.
+   */
+  http.post('*/api/v1/auth/redeem', async ({ request }) => {
+    record(request)
+    const body = (await request.json()) as { token?: string; new_password?: string }
+
+    if (!body.token) return json({ error: 'A token is required' }, 400)
+    if ((body.new_password ?? '').length < 12) {
+      return json({ error: 'password must be at least 12 characters' }, 400)
+    }
+
+    const verdict = state.redeemable[body.token] ?? 'unknown'
+    if (verdict === 'expired') return json({ error: 'that link has expired' }, 410)
+    if (verdict === 'used') return json({ error: 'that link has already been used' }, 409)
+    if (verdict === 'unknown') return json({ error: 'that link is not valid' }, 404)
+
+    // 204 and NOT a session: redeeming sets a password, it does not sign anybody
+    // in. A mock that returned a session would let a console ship that skipped
+    // the login the new credential has to be exercised at.
     return noContent()
   }),
 
@@ -466,6 +575,147 @@ export const handlers = [
     return json(terminalDetail(terminal))
   }),
 
+  // --- terminal lifecycle ---------------------------------------------------
+  //
+  // The three destructive operations are modelled with the DIFFERENCES the
+  // console has to make visible, not as one shared "deactivate":
+  //
+  //   state    flips status, leaves the credential alone — reversible
+  //   revoke   clears the credential, cancels queued work — hardware must
+  //            re-register
+  //   retire   removes the row entirely — one-way
+  //
+  // A mock that collapsed them would let a console ship that described them
+  // interchangeably, which is precisely the failure the audit recorded.
+
+  http.put('*/api/v1/console/terminals/:serial/state', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-state')
+    if (failure) return json({ error: 'Failed to update terminal' }, failure)
+
+    const body = (await request.json()) as { disabled?: boolean; reason?: string }
+    if (body.disabled === undefined) return json({ error: 'disabled is required' }, 400)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+    const updated: Terminal = {
+      ...terminal,
+      status: body.disabled ? 'DISABLED' : 'OFFLINE',
+      active: !body.disabled,
+    }
+    state.terminals = state.terminals.map((entry) =>
+      entry.serial_number === serial ? updated : entry,
+    )
+
+    return json({
+      terminal: terminalDetail(updated),
+      status: updated.status,
+      active: updated.active,
+      // The credential is DELIBERATELY untouched — that is what makes this
+      // reversible without a site visit.
+      credential_cleared: false,
+    })
+  }),
+
+  http.post('*/api/v1/console/terminals/:serial/revoke', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-revoke')
+    if (failure) return json({ error: 'Failed to revoke the terminal credential' }, failure)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+    const updated: Terminal = { ...terminal, status: 'DISABLED', active: false }
+    state.terminals = state.terminals.map((entry) =>
+      entry.serial_number === serial ? updated : entry,
+    )
+    revoked.add(serial)
+
+    return json({
+      terminal: terminalDetail(updated),
+      status: updated.status,
+      active: false,
+      credential_cleared: true,
+      pending_jobs_cancelled: 4,
+      recovery:
+        'This terminal must re-register with the site provisioning key before it ' +
+        'can authenticate again.',
+    })
+  }),
+
+  http.put('*/api/v1/console/terminals/:serial/site', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const body = (await request.json()) as { site_id?: string }
+    if (!body.site_id) return json({ error: 'site_id is required' }, 400)
+
+    // A site in another tenant and one that does not exist are the SAME answer,
+    // as the server does it — naming another company's site must not be
+    // distinguishable from naming nothing.
+    const destination = state.sites.find((site) => site.id === body.site_id)
+    if (!destination) return json({ error: 'Site not found' }, 404)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+    const updated: Terminal = {
+      ...terminal,
+      site_public_id: destination.id,
+      site_name: destination.name,
+    }
+    state.terminals = state.terminals.map((entry) =>
+      entry.serial_number === serial ? updated : entry,
+    )
+
+    return json({
+      terminal: terminalDetail(updated),
+      moved: true,
+      pending_jobs_cancelled: 2,
+    })
+  }),
+
+  http.post('*/api/v1/console/terminals/:serial/resync', ({ request, params }) => {
+    record(request)
+    // MANAGER, not ADMIN: forcing a resync queues a snapshot and changes no
+    // state an operator has to reason about afterwards.
+    const refused = guardTerminal(request, String(params.serial), 'MANAGER')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-resync')
+    if (failure) return json({ error: 'Failed to queue a full sync' }, failure)
+
+    return json({
+      serial_number: String(params.serial),
+      superseded_jobs: 3,
+      pending_jobs: 12,
+    })
+  }),
+
+  http.delete('*/api/v1/console/terminals/:serial', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-retire')
+    if (failure) return json({ error: 'Failed to retire the terminal' }, failure)
+
+    const serial = String(params.serial)
+    state.terminals = state.terminals.filter((entry) => entry.serial_number !== serial)
+
+    return json({
+      serial_number: serial,
+      retired: true,
+      credential_cleared: true,
+      pending_jobs_cancelled: 7,
+    })
+  }),
+
   http.get('*/api/v1/console/terminals', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
@@ -602,6 +852,7 @@ export const handlers = [
     const body = (await request.json()) as {
       email: string
       full_name: string
+      password?: string
       role: OperatorAccount['role']
       site_ids?: string[]
     }
@@ -610,9 +861,13 @@ export const handlers = [
     }
 
     const operator = makeOperatorAccount({
+      id: `operator-${state.operators.length + 10}`,
       email: body.email,
       full_name: body.full_name,
       role: body.role,
+      // An invited account has never signed in. That is what makes it eligible
+      // for a re-invitation rather than a reset, and the console branches on it.
+      last_login_at: undefined,
       all_sites: !body.site_ids || body.site_ids.length === 0,
       sites: (body.site_ids ?? []).map((id) => ({
         site_id: id,
@@ -620,7 +875,72 @@ export const handlers = [
       })),
     })
     state.operators = [...state.operators, operator]
+
+    // AN ABSENT PASSWORD MEANS AN INVITATION, exactly as the server does it, and
+    // the response is a DIFFERENT SHAPE rather than the same one with extras.
+    // Reproducing that here is what keeps the client's narrowing under test.
+    if (!body.password) {
+      return json(
+        {
+          operator,
+          invitation: makeCredentialToken({ purpose: 'INVITE' }),
+          delivery: DELIVERY_NOTICE,
+        },
+        201,
+      )
+    }
     return json(operator, 201)
+  }),
+
+  http.post('*/api/v1/console/operators/:operatorId/invite', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const operator = state.operators.find((entry) => entry.id === String(params.operatorId))
+    if (!operator) return json({ error: 'Operator not found' }, 404)
+
+    const failure = takeFailure('invite-operator')
+    if (failure) return json({ error: 'Failed to issue the invitation' }, failure)
+
+    // 409 for an account that has signed in, as the server does: re-inviting one
+    // would be a reset wearing an invitation's name, and the two are audited
+    // differently.
+    if (operator.last_login_at) {
+      return json(
+        {
+          error:
+            'That operator has already signed in. Use the password reset route ' +
+            'instead of an invitation.',
+        },
+        409,
+      )
+    }
+
+    return json(
+      { invitation: makeCredentialToken({ purpose: 'INVITE' }), delivery: DELIVERY_NOTICE },
+      201,
+    )
+  }),
+
+  http.post('*/api/v1/console/operators/:operatorId/reset', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const operator = state.operators.find((entry) => entry.id === String(params.operatorId))
+    if (!operator) return json({ error: 'Operator not found' }, 404)
+
+    const failure = takeFailure('reset-operator')
+    if (failure) return json({ error: 'Failed to issue the reset' }, failure)
+
+    return json(
+      {
+        reset: makeCredentialToken({ purpose: 'RESET', token: 'f9e8d7c6'.repeat(8) }),
+        delivery: DELIVERY_NOTICE,
+      },
+      201,
+    )
   }),
 
   http.get('*/api/v1/console/operators/:operatorId/sites', ({ request, params }) => {
@@ -719,6 +1039,127 @@ export const handlers = [
     return noContent()
   }),
 
+  // --- audit ---------------------------------------------------------------
+
+  /**
+   * The audit trail. ADMIN, and FILTERED HERE rather than in the client.
+   *
+   * Same reasoning as people: a console that fetched a page and filtered it in
+   * the browser would be filtering the page rather than the trail, which is
+   * silently wrong the moment a company has more records than fit on one — and
+   * an audit trail is the surface where "silently wrong" matters most.
+   */
+  http.get('*/api/v1/console/audit', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (state.session.role !== 'ADMIN' && state.session.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('audit')
+    if (failure) return json({ error: 'Failed to retrieve the audit trail' }, failure)
+
+    const url = new URL(request.url)
+    const action = url.searchParams.get('action') ?? ''
+    const targetType = url.searchParams.get('target_type') ?? ''
+    const actor = (url.searchParams.get('actor') ?? '').toLowerCase()
+    const since = url.searchParams.get('since')
+    const until = url.searchParams.get('until')
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+
+    const matched = state.audit.filter((entry) => {
+      if (action && entry.action !== action) return false
+      if (targetType && entry.target_type !== targetType) return false
+      if (actor && !(entry.actor_email ?? '').toLowerCase().includes(actor)) return false
+      if (since && entry.occurred_at < since) return false
+      if (until && entry.occurred_at > until) return false
+      return true
+    })
+
+    const page = matched.slice(offset, offset + limit)
+    return json({
+      count: page.length,
+      total: matched.length,
+      limit,
+      offset,
+      has_more: offset + page.length < matched.length,
+      entries: page,
+    })
+  }),
+
+  // --- firmware ------------------------------------------------------------
+
+  http.get('*/api/v1/console/firmware', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (state.session.role !== 'ADMIN' && state.session.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('firmware')
+    if (failure) return json({ error: 'Failed to retrieve firmware versions' }, failure)
+
+    return json({ count: state.firmware.length, firmware_versions: state.firmware })
+  }),
+
+  http.post('*/api/v1/console/firmware', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const body = (await request.json()) as { version?: string; device_type?: string; release_channel?: string }
+    if (!body.version) return json({ error: 'version is required' }, 400)
+
+    const deviceType = body.device_type || 'TERMINAL'
+    const channel = body.release_channel || 'STABLE'
+    if (
+      state.firmware.some(
+        (entry) => entry.version === body.version && entry.device_type === deviceType,
+      )
+    ) {
+      return json({ error: 'That version already exists for this device type' }, 409)
+    }
+
+    // PUBLISHED IS NOT CURRENT. Adding a build and deciding a fleet should run
+    // it are different decisions, and the server keeps them as two calls.
+    const created = makeFirmwareVersion({
+      id: state.firmware.length + 1,
+      public_id: `firmware-${state.firmware.length + 1}`,
+      version: body.version,
+      device_type: deviceType,
+      release_channel: channel,
+      is_current: false,
+    })
+    state.firmware = [...state.firmware, created]
+    return json(created, 201)
+  }),
+
+  http.put('*/api/v1/console/firmware/:id/current', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const id = Number(params.id)
+    const target = state.firmware.find((entry) => entry.id === id)
+    if (!target) return json({ error: 'Firmware version not found' }, 404)
+
+    // Current is per device type AND channel, so promoting one demotes only its
+    // own peers rather than the whole catalogue.
+    state.firmware = state.firmware.map((entry) =>
+      entry.device_type === target.device_type && entry.release_channel === target.release_channel
+        ? { ...entry, is_current: entry.id === id }
+        : entry,
+    )
+    return json({ ...target, is_current: true })
+  }),
+
   // --- applications -------------------------------------------------------
 
   http.get('*/api/v1/console/applications', ({ request }) => {
@@ -785,6 +1226,9 @@ export const handlers = [
 /** Terminal application modes, kept apart so a fixture stays a plain object. */
 const modes = new Map<string, string>()
 
+/** Serials whose device credential has been revoked. */
+const revoked = new Set<string>()
+
 function terminalDetail(terminal: Terminal): TerminalDetail {
   const mode = modes.get(terminal.serial_number) ?? 'MULTI_PURPOSE'
   const enabled = state.session?.applications.map((application) => application.code) ?? []
@@ -797,8 +1241,17 @@ function terminalDetail(terminal: Terminal): TerminalDetail {
 
 export function resetTerminalModes(): void {
   modes.clear()
+  revoked.clear()
 }
 
 export const server = setupServer(...handlers)
 
-export { makeOperatorAccount, makePerson, makeSite, makeTerminal }
+export {
+  makeAuditRecord,
+  makeCredentialToken,
+  makeFirmwareVersion,
+  makeOperatorAccount,
+  makePerson,
+  makeSite,
+  makeTerminal,
+}

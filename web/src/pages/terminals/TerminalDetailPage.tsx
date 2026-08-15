@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import { MULTI_PURPOSE } from '../../api/types'
@@ -11,29 +11,41 @@ import { Timestamp } from '../../components/Timestamp'
 import { useTerminal } from '../../data/console'
 import { useSession } from '../../session/useSession'
 import { ApplicationModeDialog } from './ApplicationModeDialog'
+import {
+  MoveTerminalDialog,
+  ResyncTerminalDialog,
+  RetireTerminalDialog,
+  RevokeTerminalDialog,
+  TerminalStateDialog,
+} from './TerminalLifecycleDialogs'
 import { readHealth } from './health'
 
 /**
  * One terminal.
  *
- * Three questions, in the order an operator asks them: is it working, what is
- * it for, and what is it running.
+ * Four questions, in the order an operator asks them: is it working, what is it
+ * for, what is it running, and what can I do about it.
  *
- * WHAT IS DELIBERATELY ABSENT. There is no remove, no move-to-another-site, no
- * force-resync and no enable/disable button, because the console API has no such
- * route — those exist only behind the site provisioning key, which a browser
- * must never hold. Inventing a client-side approximation of any of them would be
- * a control that 404s, so the gaps are recorded as product requirements instead
- * and named on the page so an operator is not left hunting for a button that was
- * never built.
+ * THE LAST SECTION IS THE ONE THAT MATTERS MOST AND IS THE HARDEST TO GET
+ * RIGHT. Disable, revoke and retire sound interchangeable and are not, and an
+ * operator reaching for one of them is usually in a hurry and often standing in
+ * front of the hardware. So they are presented as three separate, differently
+ * weighted actions with the consequence stated on each — never as one control
+ * with a mode — and each names the situation it is for rather than only what it
+ * does. See TerminalLifecycleDialogs.
  */
 export function TerminalDetailPage() {
   const { serial } = useParams<{ serial: string }>()
+  const navigate = useNavigate()
   const { session } = useSession()
   const query = useTerminal(serial)
   const [configuring, setConfiguring] = useState(false)
+  const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
 
   const mayConfigure = can(session, 'configureTerminals')
+  // ADMIN, matching the server's route group: revoking a credential stops a door
+  // working and retiring is one-way. Neither is day-to-day work.
+  const mayAdminister = can(session, 'manageTerminalLifecycle')
 
   if (query.isPending) return <LoadingState label="Loading terminal…" />
 
@@ -272,17 +284,135 @@ export function TerminalDetailPage() {
         ) : null}
       </section>
 
-      {/*
-        Named rather than silently missing. An operator who needs to move or
-        remove a terminal should learn that it is not possible here, not spend
-        time looking for the button.
-      */}
-      <InfoNote title="Not available from the console">
-        A terminal cannot be moved to another site, removed, or forced to resync
-        from here — the platform has no operator API for those yet. Registering a
-        terminal, and re-registering one that has been reset, happens on the device
-        using its site’s provisioning key.
-      </InfoNote>
+      {/* --- what can be done about it -------------------------------------- */}
+      <section className="panel" aria-labelledby="terminal-lifecycle-heading">
+        <div className="panel__header">
+          <h2 className="panel__title" id="terminal-lifecycle-heading">
+            Lifecycle
+          </h2>
+          <p className="field__hint">
+            These are not variants of one another. Read what each does before
+            choosing — two of them cannot be undone from the console.
+          </p>
+        </div>
+
+        {!mayAdminister ? (
+          <InfoNote title="Read only">
+            Disabling, revoking and retiring a terminal are administrator actions.
+            {mayConfigure
+              ? ' You can still change what this terminal is for, and queue a resync, from this page.'
+              : ' Ask an administrator or owner of your company if one of these is needed.'}
+          </InfoNote>
+        ) : null}
+
+        <ul className="lifecycle">
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">
+                {terminal.active ? 'Disable' : 'Re-enable'}
+              </h3>
+              <p className="lifecycle__detail">
+                {terminal.active
+                  ? 'Stops it working, keeps its credential. Reversible from this page with no site visit — for a faulty unit, or an entrance that is closed for now.'
+                  : 'This terminal is disabled. Re-enabling brings it back using the credential it still holds.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className={terminal.active ? 'button' : 'button button--primary'}
+              disabled={!mayAdminister}
+              onClick={() => setLifecycle('state')}
+            >
+              {terminal.active ? 'Disable' : 'Re-enable'}
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Revoke credential</h3>
+              <p className="lifecycle__detail">
+                Destroys the device key, so the credential itself stops working.
+                For hardware that is <strong>missing, stolen or out of your
+                control</strong>. The unit must re-register at the door to come
+                back.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button button--danger"
+              disabled={!mayAdminister}
+              onClick={() => setLifecycle('revoke')}
+            >
+              Revoke
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Retire</h3>
+              <p className="lifecycle__detail">
+                Removes it from your fleet entirely and destroys its credential.
+                For a unit that has been decommissioned, destroyed or returned.
+                Cannot be undone.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button button--danger"
+              disabled={!mayAdminister}
+              onClick={() => setLifecycle('retire')}
+            >
+              Retire
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Move to another site</h3>
+              <p className="lifecycle__detail">
+                Reassigns which people this terminal knows about. It erases what it
+                holds and rebuilds against the new site, so it recognises nobody
+                until that finishes.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button"
+              disabled={!mayAdminister}
+              onClick={() => setLifecycle('move')}
+            >
+              Move
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Force a resync</h3>
+              <p className="lifecycle__detail">
+                Replaces what is queued with a fresh snapshot of the people and
+                settings this terminal should hold. Nothing is destroyed and it
+                keeps working throughout.
+              </p>
+            </div>
+            {/* MANAGER, not ADMIN — matching the server. A resync changes no
+                state an operator has to reason about afterwards. */}
+            <button
+              type="button"
+              className="button"
+              disabled={!mayConfigure}
+              onClick={() => setLifecycle('resync')}
+            >
+              Resync
+            </button>
+          </li>
+        </ul>
+
+        <p className="field__hint">
+          Registering a terminal for the first time happens on the device itself,
+          using its site’s provisioning key — it is not something the console can
+          do on the hardware’s behalf.
+        </p>
+      </section>
 
       {configuring ? (
         <ApplicationModeDialog
@@ -291,6 +421,31 @@ export function TerminalDetailPage() {
           onClose={() => setConfiguring(false)}
         />
       ) : null}
+
+      {lifecycle === 'state' ? (
+        <TerminalStateDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
+      {lifecycle === 'revoke' ? (
+        <RevokeTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
+      {lifecycle === 'retire' ? (
+        <RetireTerminalDialog
+          open
+          terminal={terminal}
+          onClose={() => setLifecycle(null)}
+          // The page it was opened from now 404s, so leaving is part of the
+          // action rather than something to let the operator discover.
+          onRetired={() => navigate('/terminals', { replace: true })}
+        />
+      ) : null}
+      {lifecycle === 'move' ? (
+        <MoveTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
+      {lifecycle === 'resync' ? (
+        <ResyncTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
     </div>
   )
 }
+
+type LifecycleAction = 'state' | 'revoke' | 'retire' | 'move' | 'resync'

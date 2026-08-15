@@ -12,12 +12,19 @@ import type {
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  AuditPage,
+  AuditQuery,
   CompanyDetail,
   ConfiguredApplication,
+  CreateFirmwareRequest,
   CreateOperatorRequest,
+  CreateOperatorResponse,
   CreateSiteRequest,
   CreateSiteResponse,
+  FirmwareResponse,
+  FirmwareVersion,
   FleetSummary,
+  InvitationResponse,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
@@ -25,6 +32,7 @@ import type {
   PeopleQuery,
   Person,
   PersonRequest,
+  ResetResponse,
   RetireSiteResponse,
   RotateSiteKeyResponse,
   Site,
@@ -33,7 +41,14 @@ import type {
   SiteSettingsRequest,
   SitesResponse,
   TerminalDetail,
+  TerminalLifecycleResponse,
   TerminalModeRequest,
+  TerminalMoveRequest,
+  TerminalResyncResponse,
+  TerminalRetireRequest,
+  TerminalRetiredResponse,
+  TerminalRevokeRequest,
+  TerminalStateRequest,
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
@@ -280,6 +295,141 @@ export function useUpdateTerminalMode(
 }
 
 // ---------------------------------------------------------------------------
+// Terminal lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * What every lifecycle mutation invalidates, in one place.
+ *
+ * ALL THREE OF THESE MATTER and getting one wrong is a screen that contradicts
+ * the action just taken:
+ *
+ *   detail    the row itself, written from the response where the server
+ *             returned one and refetched where it did not;
+ *   list      the fleet view a detail page is usually opened from, still mounted
+ *             behind it and still showing the old status;
+ *   summary   the counts above that list, which are computed from the statuses
+ *             this operation just changed.
+ */
+function settleTerminal(
+  queryClient: QueryClient,
+  serial: string,
+  detail: TerminalDetail | undefined,
+): void {
+  if (detail) {
+    queryClient.setQueryData(keys.terminals.detail(serial), detail)
+  } else {
+    void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+  }
+  void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+}
+
+/**
+ * Disables or re-enables a terminal.
+ *
+ * REVERSIBLE and does not touch the credential. The audit trail is invalidated
+ * too — every lifecycle operation writes a record, and an activity view open
+ * beside this is stale the moment it succeeds.
+ */
+export function useSetTerminalState(
+  serial: string,
+): UseMutationResult<TerminalLifecycleResponse, Error, TerminalStateRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalStateRequest) => endpoints.setTerminalState(serial, body),
+    onSuccess: (result) => {
+      settleTerminal(queryClient, serial, result.terminal)
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Revokes a terminal's device credential.
+ *
+ * THE SITE IS INVALIDATED AS WELL, which is the one that is easy to miss: a
+ * site's `terminal_count` counts live terminals, and revoking changes what that
+ * number describes.
+ */
+export function useRevokeTerminalCredential(
+  serial: string,
+): UseMutationResult<TerminalLifecycleResponse, Error, TerminalRevokeRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalRevokeRequest) =>
+      endpoints.revokeTerminalCredential(serial, body),
+    onSuccess: (result) => {
+      settleTerminal(queryClient, serial, result.terminal)
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Retires a terminal.
+ *
+ * The terminal's own cache entry is REMOVED rather than invalidated — refetching
+ * it would only produce a 404, and a detail page that refetches into an error is
+ * a worse answer than one whose caller navigates away.
+ */
+export function useRetireTerminal(
+  serial: string,
+): UseMutationResult<TerminalRetiredResponse, Error, TerminalRetireRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalRetireRequest) => endpoints.retireTerminal(serial, body),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Moves a terminal to another site.
+ *
+ * SITES ARE INVALIDATED because two of their terminal counts have just changed,
+ * and the SESSION is not — grants are on sites, and moving a terminal between
+ * two sites does not change which sites an operator reaches.
+ */
+export function useMoveTerminal(
+  serial: string,
+): UseMutationResult<TerminalLifecycleResponse, Error, TerminalMoveRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalMoveRequest) => endpoints.moveTerminal(serial, body),
+    onSuccess: (result) => {
+      settleTerminal(queryClient, serial, result.terminal)
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Forces a full resync.
+ *
+ * Changes no state an operator reasons about afterwards — it replaces a queue —
+ * so the terminal row is invalidated rather than replaced, and nothing else is
+ * touched.
+ */
+export function useResyncTerminal(
+  serial: string,
+): UseMutationResult<TerminalResyncResponse, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.resyncTerminal(serial),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
@@ -384,8 +534,18 @@ export function useOperatorSites(
   })
 }
 
+/**
+ * Creates an operator, by invitation unless the caller supplies a password.
+ *
+ * THE RESPONSE MAY CARRY A CREDENTIAL, and this hook treats it exactly as site
+ * creation treats a provisioning key: nothing is written into the QUERY cache,
+ * because that would outlive the panel that displayed it and be readable from
+ * anywhere with the key factory. The invitation lives in the mutation's own
+ * `data` for the life of one panel, and the caller resets the mutation when that
+ * panel closes.
+ */
 export function useCreateOperator(): UseMutationResult<
-  OperatorAccount,
+  CreateOperatorResponse,
   Error,
   CreateOperatorRequest
 > {
@@ -394,6 +554,44 @@ export function useCreateOperator(): UseMutationResult<
     mutationFn: (body: CreateOperatorRequest) => endpoints.createOperator(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.operators.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Issues a fresh invitation.
+ *
+ * The operator row is invalidated because the server flags the account
+ * `must_change_password` on the way through, and refused with 409 for an account
+ * that has already signed in — which the caller surfaces as an instruction to
+ * use a reset instead, rather than as a generic failure.
+ *
+ * As with creation, the token is for one panel and is never cached.
+ */
+export function useInviteOperator(
+  operatorId: string,
+): UseMutationResult<InvitationResponse, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.inviteOperator(operatorId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.operators.detail(operatorId) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/** Mints a reset link. Same caching contract as the invitation above. */
+export function useResetOperatorPassword(
+  operatorId: string,
+): UseMutationResult<ResetResponse, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.resetOperatorPassword(operatorId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.operators.detail(operatorId) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
   })
 }
@@ -487,6 +685,74 @@ export function useUpdateApplication(): UseMutationResult<
       void queryClient.invalidateQueries({ queryKey: keys.applications.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of the audit trail.
+ *
+ * `placeholderData` keeps the previous page on screen while the next loads, for
+ * the same reason people does: changing a filter should not blank the table
+ * under the operator's cursor.
+ *
+ * NOT POLLED. An audit trail is read deliberately, and a view that refetched on
+ * a timer would move rows under somebody reading them.
+ */
+export function useAuditEvents(query: AuditQuery = {}): UseQueryResult<AuditPage> {
+  return useQuery({
+    queryKey: keys.audit.list(query),
+    queryFn: () => endpoints.fetchAuditEvents(query),
+    placeholderData: (previous) => previous,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Firmware catalogue
+// ---------------------------------------------------------------------------
+
+export function useFirmware(): UseQueryResult<FirmwareResponse> {
+  return useQuery({
+    queryKey: keys.firmware.list(),
+    queryFn: () => endpoints.fetchFirmware(),
+    staleTime: 60_000,
+  })
+}
+
+export function useCreateFirmware(): UseMutationResult<
+  FirmwareVersion,
+  Error,
+  CreateFirmwareRequest
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CreateFirmwareRequest) => endpoints.createFirmware(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.firmware.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Marks a build as the deployment target.
+ *
+ * INVALIDATES TERMINALS, which is the whole point: `firmware_outdated` on every
+ * terminal is computed against this value, so moving it changes what the fleet
+ * view says about hardware nobody has touched.
+ */
+export function useSetCurrentFirmware(): UseMutationResult<FirmwareVersion, Error, number> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => endpoints.setCurrentFirmware(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.firmware.all })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
   })
 }

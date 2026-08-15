@@ -4,19 +4,28 @@ import type {
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  AuditPage,
+  AuditQuery,
   CompanyDetail,
   ConfiguredApplication,
+  CreateFirmwareRequest,
   CreateSiteRequest,
   CreateSiteResponse,
   CreateOperatorRequest,
+  CreateOperatorResponse,
+  FirmwareResponse,
+  FirmwareVersion,
   FleetSummary,
+  InvitationResponse,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
+  PasswordResetAcceptedResponse,
   PeoplePage,
   PeopleQuery,
   Person,
   PersonRequest,
+  ResetResponse,
   RetireSiteResponse,
   RotateSiteKeyResponse,
   Session,
@@ -26,7 +35,14 @@ import type {
   SiteSettingsRequest,
   SitesResponse,
   TerminalDetail,
+  TerminalLifecycleResponse,
   TerminalModeRequest,
+  TerminalMoveRequest,
+  TerminalResyncResponse,
+  TerminalRetireRequest,
+  TerminalRetiredResponse,
+  TerminalRevokeRequest,
+  TerminalStateRequest,
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
@@ -200,6 +216,82 @@ export function updateTerminalMode(
 }
 
 // ---------------------------------------------------------------------------
+// Terminal lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Disables or re-enables a terminal. REVERSIBLE, and does not touch the
+ * credential — a repaired unit comes back without a site visit.
+ */
+export function setTerminalState(
+  serial: string,
+  body: TerminalStateRequest,
+): Promise<TerminalLifecycleResponse> {
+  return api.put<TerminalLifecycleResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/state`,
+    body,
+  )
+}
+
+/**
+ * Invalidates a terminal's device credential. THE ANSWER TO A STOLEN TERMINAL.
+ *
+ * Irreversible for that credential: the hardware must re-register with the
+ * site's provisioning key before it can authenticate again. Queued work for it
+ * is cancelled, and the response says how much.
+ */
+export function revokeTerminalCredential(
+  serial: string,
+  body: TerminalRevokeRequest = {},
+): Promise<TerminalLifecycleResponse> {
+  return api.post<TerminalLifecycleResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/revoke`,
+    body,
+  )
+}
+
+/**
+ * Retires a terminal: soft-deleted AND its credential revoked.
+ *
+ * One-way through the API. The body carries the reason, which is why this sends
+ * one on a DELETE — the server reads it when there is one and the reason is what
+ * the next operator needs.
+ */
+export function retireTerminal(
+  serial: string,
+  body: TerminalRetireRequest = {},
+): Promise<TerminalRetiredResponse> {
+  return api.delete<TerminalRetiredResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}`,
+    { body },
+  )
+}
+
+/**
+ * Reassigns a terminal to another site in the same company.
+ *
+ * THE ROSTER IS REBUILT RATHER THAN CARRIED: queued work for the old site is
+ * cancelled and the terminal re-converges against the new one. A caller has to
+ * say so — a move is not a metadata edit.
+ */
+export function moveTerminal(
+  serial: string,
+  body: TerminalMoveRequest,
+): Promise<TerminalLifecycleResponse> {
+  return api.put<TerminalLifecycleResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/site`,
+    body,
+  )
+}
+
+/** Replaces a terminal's queue with a snapshot of current state. MANAGER. */
+export function resyncTerminal(serial: string): Promise<TerminalResyncResponse> {
+  return api.post<TerminalResyncResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/resync`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
@@ -260,8 +352,73 @@ export function fetchOperatorSites(operatorId: string): Promise<OperatorSitesRes
   )
 }
 
-export function createOperator(body: CreateOperatorRequest): Promise<OperatorAccount> {
-  return api.post<OperatorAccount>('/api/v1/console/operators', body)
+/**
+ * Creates an operator.
+ *
+ * Omitting `password` is the preferred path: the account is created with a
+ * credential nobody holds and the response carries a single-use invitation
+ * instead. The return type is a union for that reason — see CreateOperatorResponse.
+ */
+export function createOperator(body: CreateOperatorRequest): Promise<CreateOperatorResponse> {
+  return api.post<CreateOperatorResponse>('/api/v1/console/operators', body)
+}
+
+/**
+ * Issues a fresh invitation for an account that has NEVER SIGNED IN.
+ *
+ * Refused with 409 for an account that has, because re-inviting one would be a
+ * reset wearing an invitation's name and the two are audited differently. Issuing
+ * supersedes any outstanding link, so re-sending cannot leave two live tokens.
+ */
+export function inviteOperator(operatorId: string): Promise<InvitationResponse> {
+  return api.post<InvitationResponse>(
+    `/api/v1/console/operators/${encodeURIComponent(operatorId)}/invite`,
+  )
+}
+
+/**
+ * Mints a single-use reset link, WITHOUT the administrator choosing a password.
+ *
+ * The alternative — `updateOperator({password})` — still exists for a deployment
+ * that cannot deliver a link, and leaves the administrator knowing the
+ * credential. This one does not.
+ */
+export function resetOperatorPassword(operatorId: string): Promise<ResetResponse> {
+  return api.post<ResetResponse>(
+    `/api/v1/console/operators/${encodeURIComponent(operatorId)}/reset`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Unauthenticated credential handover
+// ---------------------------------------------------------------------------
+
+/**
+ * Asks for a password reset. UNAUTHENTICATED — somebody who has forgotten their
+ * password cannot sign in to ask.
+ *
+ * ALWAYS 202 WITH THE SAME BODY whether or not the address exists. The console
+ * must not branch on the response either, or it would reintroduce in the browser
+ * the enumeration oracle the server refuses to be.
+ */
+export function requestPasswordReset(email: string): Promise<PasswordResetAcceptedResponse> {
+  return api.post<PasswordResetAcceptedResponse>('/api/v1/auth/forgot-password', { email })
+}
+
+/**
+ * Sets a password from an invitation or reset link. UNAUTHENTICATED — the token
+ * IS the authorisation.
+ *
+ * Answers 204 and NOT a session: redeeming sets a password, it does not sign
+ * anybody in. Every existing session for the account is revoked server-side,
+ * because somebody redeeming a reset usually believes the old password was known
+ * to someone else.
+ *
+ * The distinct failures matter and are branched on by STATUS, never by message:
+ * 404 unknown, 410 expired, 409 already used.
+ */
+export function redeemCredential(token: string, newPassword: string): Promise<void> {
+  return api.post<void>('/api/v1/auth/redeem', { token, new_password: newPassword })
 }
 
 export function updateOperator(
@@ -311,4 +468,57 @@ export function updateApplication(
     `/api/v1/console/applications/${encodeURIComponent(code)}`,
     body,
   )
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of recorded operator actions. ADMIN server-side.
+ *
+ * Filters are narrowing conveniences: the server IGNORES an unparseable date
+ * rather than rejecting the request, so this validates instants before sending
+ * and simply omits an empty filter rather than sending a blank one.
+ */
+export function fetchAuditEvents(query: AuditQuery = {}): Promise<AuditPage> {
+  const params = new URLSearchParams()
+  if (query.action) params.set('action', query.action)
+  if (query.target_type) params.set('target_type', query.target_type)
+  if (query.actor) params.set('actor', query.actor)
+  if (query.since) params.set('since', query.since)
+  if (query.until) params.set('until', query.until)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset) params.set('offset', String(query.offset))
+  const suffix = params.size > 0 ? `?${params}` : ''
+  return api.get<AuditPage>(`/api/v1/console/audit${suffix}`)
+}
+
+// ---------------------------------------------------------------------------
+// Firmware catalogue
+// ---------------------------------------------------------------------------
+
+export function fetchFirmware(): Promise<FirmwareResponse> {
+  return api.get<FirmwareResponse>('/api/v1/console/firmware')
+}
+
+/**
+ * Adds a build to the catalogue. It does NOT become the deployment target —
+ * that is a separate, deliberate call.
+ */
+export function createFirmware(body: CreateFirmwareRequest): Promise<FirmwareVersion> {
+  return api.post<FirmwareVersion>('/api/v1/console/firmware', body)
+}
+
+/**
+ * Moves the deployment target for a device type and release channel.
+ *
+ * NOTHING IS PUSHED. The platform has no OTA, so this changes what the fleet is
+ * MEASURED AGAINST and nothing else. Any UI in front of it must say so, or
+ * operators will believe hardware has been updated.
+ *
+ * Addressed by the numeric `id`, not `public_id` — that is what the route takes.
+ */
+export function setCurrentFirmware(id: number): Promise<FirmwareVersion> {
+  return api.put<FirmwareVersion>(`/api/v1/console/firmware/${encodeURIComponent(id)}/current`)
 }

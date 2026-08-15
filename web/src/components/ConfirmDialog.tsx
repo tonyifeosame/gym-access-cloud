@@ -36,6 +36,19 @@ export interface ConfirmDialogProps {
   /** Exact text the operator must type. Reserve for the irreversible. */
   confirmPhrase?: string
   tone?: 'danger' | 'default'
+  /**
+   * Extra input the action itself needs — a reason for the audit trail, most
+   * obviously.
+   *
+   * Rendered ABOVE the typed confirmation, so the order reads: what will happen,
+   * what you want to record about it, then the deliberate act of confirming. A
+   * field placed after the phrase would be filled in after the operator has
+   * already committed mentally, and usually not at all.
+   *
+   * The caller owns this state. It cannot live here, because only the caller
+   * knows what to do with it.
+   */
+  children?: ReactNode
   onConfirm: () => Promise<unknown> | unknown
   onClose: () => void
 }
@@ -49,6 +62,7 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   confirmPhrase,
   tone = 'danger',
+  children,
   onConfirm,
   onClose,
 }: ConfirmDialogProps) {
@@ -116,6 +130,8 @@ export function ConfirmDialog({
       }
     >
       {detail ? <p className="confirm__detail">{detail}</p> : null}
+
+      {children}
 
       {confirmPhrase ? (
         <div className="field">

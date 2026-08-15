@@ -239,6 +239,18 @@ describe('role hierarchy', () => {
 // Creating
 // ---------------------------------------------------------------------------
 
+/**
+ * Switches the form to the "I will choose the password" path.
+ *
+ * The DEFAULT is now an invitation (PPL-02), so every test that is about the
+ * password field has to ask for it. That the helper is needed at all is the
+ * point: choosing a password somebody else will know is no longer what happens
+ * by pressing through the form.
+ */
+async function chooseDirectPassword(user: ReturnType<typeof userEvent.setup>) {
+  await user.selectOptions(screen.getByLabelText(/How they get their password/), 'PASSWORD')
+}
+
 describe('creating an operator', () => {
   it('creates one and refreshes the list', async () => {
     const user = userEvent.setup()
@@ -248,6 +260,7 @@ describe('creating an operator', () => {
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     await user.type(screen.getByLabelText(/Email/), 'new@example.com')
     await user.type(screen.getByLabelText(/Full name/), 'New Operator')
+    await chooseDirectPassword(user)
     await user.type(screen.getByLabelText(/Initial password/), 'a-long-enough-password')
     await user.click(screen.getByRole('button', { name: 'Create operator' }))
 
@@ -262,6 +275,7 @@ describe('creating an operator', () => {
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     await user.type(screen.getByLabelText(/Email/), 'short@example.com')
     await user.type(screen.getByLabelText(/Full name/), 'Short Password')
+    await chooseDirectPassword(user)
     await user.type(screen.getByLabelText(/Initial password/), 'tooshort')
 
     const before = state.requests.filter((r) => r.method === 'POST').length
@@ -271,15 +285,63 @@ describe('creating an operator', () => {
     expect(state.requests.filter((r) => r.method === 'POST')).toHaveLength(before)
   })
 
-  it('warns that the password must be handed over out of band', async () => {
-    // There is no invite flow in the platform, so somebody has to communicate
-    // it, and doing that carelessly is the realistic failure.
+  it('DEFAULTS TO AN INVITATION, so the creator never learns the password', async () => {
+    // The whole of PPL-02 at the point it is decided. Before the handover
+    // mechanism existed, choosing somebody else's password was the only path,
+    // and the realistic consequence was an administrator who knew it
+    // indefinitely with nothing recording that they did.
     const user = userEvent.setup()
     signIn()
     renderOperators()
 
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
-    expect(screen.getByText(/does not send invitations/)).toBeInTheDocument()
+
+    // No password field at all until the other path is deliberately chosen.
+    expect(screen.queryByLabelText(/Initial password/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create and invite' })).toBeInTheDocument()
+  })
+
+  it('issues a one-time link and refuses to close until it is acknowledged', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderOperators()
+
+    await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
+    await user.type(screen.getByLabelText(/Email/), 'invited@example.com')
+    await user.type(screen.getByLabelText(/Full name/), 'Invited Operator')
+    await user.click(screen.getByRole('button', { name: 'Create and invite' }))
+
+    // The dialog STAYS OPEN on success. Closing would discard a credential that
+    // cannot be read back, turning a successful action into one the operator has
+    // to repeat.
+    expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+
+    const done = screen.getByRole('button', { name: 'Done' })
+    expect(done).toBeDisabled()
+
+    await user.click(screen.getByLabelText(/I have copied this link/i))
+    expect(done).toBeEnabled()
+  })
+
+  it('says plainly that the platform does not deliver the link', async () => {
+    // There is no transactional email. Somebody has to send it, and doing that
+    // carelessly — or not at all — is the realistic failure.
+    const user = userEvent.setup()
+    signIn()
+    renderOperators()
+
+    await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
+    expect(screen.getByText(/AccessLink does not have email/i)).toBeInTheDocument()
+  })
+
+  it('warns that a chosen password must be handed over out of band', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderOperators()
+
+    await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
+    await chooseDirectPassword(user)
+    expect(screen.getByText(/cannot show it to you again/i)).toBeInTheDocument()
   })
 
   it('WARNS THAT AN EMPTY SITE SELECTION GRANTS EVERY SITE', async () => {
@@ -317,6 +379,7 @@ describe('creating an operator', () => {
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     await user.type(screen.getByLabelText(/Email/), 'viewer@example.com')
     await user.type(screen.getByLabelText(/Full name/), 'Duplicate')
+    await chooseDirectPassword(user)
     await user.type(screen.getByLabelText(/Initial password/), 'a-long-enough-password')
     await user.click(screen.getByRole('button', { name: 'Create operator' }))
 
@@ -333,6 +396,7 @@ describe('creating an operator', () => {
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     await user.type(screen.getByLabelText(/Email/), 'not-an-email')
     await user.type(screen.getByLabelText(/Full name/), 'Bad Email')
+    await chooseDirectPassword(user)
     await user.type(screen.getByLabelText(/Initial password/), 'a-long-enough-password')
     await user.click(screen.getByRole('button', { name: 'Create operator' }))
 
@@ -541,6 +605,7 @@ describe('nothing secret is disclosed', () => {
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     await user.type(screen.getByLabelText(/Email/), 'echo@example.com')
     await user.type(screen.getByLabelText(/Full name/), 'Echo Test')
+    await chooseDirectPassword(user)
     await user.type(screen.getByLabelText(/Initial password/), 'a-long-enough-password')
     await user.click(screen.getByRole('button', { name: 'Create operator' }))
 

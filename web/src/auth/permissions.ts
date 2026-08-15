@@ -100,6 +100,25 @@ export const ACTION_ROLES = {
    */
   manageSites: 'ADMIN',
 
+  /**
+   * Terminal lifecycle: disable, revoke a credential, retire, reassign a site.
+   *
+   * ADMIN rather than MANAGER, matching the server's route group and for the
+   * same reason site lifecycle is: revoking a credential stops a door working
+   * and retiring is one-way. `configureTerminals` above is the day-to-day gate
+   * and covers the application mode and a resync.
+   */
+  manageTerminalLifecycle: 'ADMIN',
+
+  /**
+   * The audit trail. ADMIN because it names which operators did what, which is
+   * administrative information rather than something every viewer needs.
+   */
+  viewAudit: 'ADMIN',
+
+  /** The firmware catalogue, including which build a fleet is measured against. */
+  manageFirmware: 'ADMIN',
+
   /** What the whole company's deployment is for. */
   configureApplications: 'OWNER',
 } as const satisfies Record<string, Role>
