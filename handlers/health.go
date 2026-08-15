@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,12 +106,35 @@ func HealthMaintenance(c *gin.Context) {
 // Hand-written rather than pulled from a client library: the exposition format
 // is a few lines of text, and this avoids a dependency for four gauges.
 //
-// Optionally protected by METRICS_TOKEN. Left open when unset, which is the
-// usual arrangement when the endpoint is only reachable inside a cluster.
+// PROTECTED BY METRICS_TOKEN, AND CLOSED WHEN IT IS UNSET (SEC-12).
+//
+// This used to be left open when the variable was absent, on the reasoning that
+// the endpoint is usually only reachable inside a cluster. That reasoning makes
+// the SAFE configuration the one you have to remember: a deployment that forgets
+// the variable, or loses it in an environment rename, publishes its fleet size,
+// device states, tenant counts and build identity to anyone who asks -- and
+// nothing about the response says it was supposed to be protected.
+//
+// Failing closed inverts that. An installation that genuinely wants an open
+// endpoint says so with METRICS_PUBLIC=true, which is a decision somebody made
+// on purpose and can be found by grepping the environment.
 func Metrics(c *gin.Context) {
-	if token := os.Getenv("METRICS_TOKEN"); token != "" && !metricsTokenValid(c, token) {
-		c.Header("WWW-Authenticate", "Bearer")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid metrics token"})
+	token := os.Getenv("METRICS_TOKEN")
+	switch {
+	case token != "":
+		if !metricsTokenValid(c, token) {
+			c.Header("WWW-Authenticate", "Bearer")
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid metrics token"})
+			return
+		}
+	case metricsDeliberatelyPublic():
+		// Explicitly opted in. Nothing to check.
+	default:
+		// No token and no opt-in: refuse, and say which of the two is missing so
+		// the operator who set this up can fix it without reading the source.
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "Metrics are not exposed. Set METRICS_TOKEN, " +
+				"or METRICS_PUBLIC=true to serve them unauthenticated."})
 		return
 	}
 
@@ -203,13 +228,32 @@ func Metrics(c *gin.Context) {
 }
 
 // metricsTokenValid accepts the token as a bearer credential or a plain header
+// metricsDeliberatelyPublic reports whether an installation has opted into an
+// unauthenticated /metrics.
+func metricsDeliberatelyPublic() bool {
+	public, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("METRICS_PUBLIC")))
+	return err == nil && public
+}
+
+// metricsTokenValid compares the presented token in CONSTANT TIME (SEC-11).
+//
+// `==` on strings returns as soon as two bytes differ, so how long a rejection
+// takes depends on how many leading bytes were right. That is a usable oracle
+// for recovering a secret one byte at a time, and the fix costs nothing --
+// there is no argument for the fast comparison on a credential.
+//
+// Both accepted headers are compared, and BOTH comparisons always run, so which
+// header carried the token is not itself observable through timing.
+// ConstantTimeCompare already returns 0 for differing lengths without leaking
+// where they diverged, so no length check is needed first.
 func metricsTokenValid(c *gin.Context, expected string) bool {
-	if header := c.GetHeader("Authorization"); header != "" {
-		if strings.TrimPrefix(header, "Bearer ") == expected {
-			return true
-		}
-	}
-	return c.GetHeader("X-Metrics-Token") == expected
+	bearer := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+
+	viaBearer := subtle.ConstantTimeCompare([]byte(bearer), []byte(expected))
+	viaHeader := subtle.ConstantTimeCompare(
+		[]byte(c.GetHeader("X-Metrics-Token")), []byte(expected))
+
+	return viaBearer|viaHeader == 1
 }
 
 func writeGauge(b *strings.Builder, name, help string, _ map[string]string, value float64) {
