@@ -33,6 +33,8 @@ written by hand.
 12. [Operator authentication](#12-operator-authentication)
 13. [Operator console](#13-operator-console)
 14. [Applications and modules](#14-applications-and-modules)
+15. [Authorization — permissions and schedules](#15-authorization--permissions-and-schedules)
+16. [Events — the activity trail](#16-events--the-activity-trail)
 
 ---
 
@@ -1174,6 +1176,64 @@ one. CSRF is required on every unsafe method.
 | `DELETE` | `/api/v1/console/operators/{operator_id}` | session + CSRF | ADMIN |
 | `GET` | `/api/v1/console/operators/{operator_id}/sites` | session | ADMIN |
 | `PUT` | `/api/v1/console/operators/{operator_id}/sites` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/operators/{operator_id}/invite` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/operators/{operator_id}/reset` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/sites` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/sites/{site_id}/api-key` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/resync` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/terminals/{serial}/state` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/revoke` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/terminals/{serial}` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/terminals/{serial}/site` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/firmware` | session | ADMIN |
+| `POST` | `/api/v1/console/firmware` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/firmware/{id}/current` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/audit` | session | ADMIN |
+| `GET` | `/api/v1/console/events` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}/permissions` | session | VIEWER |
+| `POST` | `/api/v1/console/people/{external_id}/permissions` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/permissions/{permission_id}` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/schedules` | session | VIEWER |
+| `POST` | `/api/v1/console/schedules` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
+| `POST` | `/api/v1/console/terminals/{serial}/evaluate` | session + CSRF | MANAGER |
+
+### Credential handover routes
+
+Unauthenticated by necessity: somebody who has forgotten their password cannot
+authenticate to ask for a new one, and somebody redeeming an invitation has
+never had one. Both share the login rate limiter.
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists |
+| `POST` | `/api/v1/auth/redeem` | the single-use token is the whole authorisation |
+
+### Platform administration routes
+
+A **separate credential class** with its own table, session and cookie. It
+reaches `companies` and operator bootstrap, and deliberately nothing inside a
+tenant — there is no platform route that loads a person, a credential, an event,
+a terminal or a site key.
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/platform/login` | none |
+| `GET` | `/api/v1/platform/me` | platform session |
+| `POST` | `/api/v1/platform/logout` | platform session + CSRF |
+| `GET` | `/api/v1/platform/companies` | platform session |
+| `GET` | `/api/v1/platform/companies/{company_id}` | platform session |
+| `POST` | `/api/v1/platform/companies` | platform session + CSRF |
+| `PUT` | `/api/v1/platform/companies/{company_id}` | platform session + CSRF |
+| `POST` | `/api/v1/platform/companies/{company_id}/operators` | platform session + CSRF |
+
+Issuing a first operator is refused into a company that already has one, by a
+query predicate rather than a check: a platform identity that could add accounts
+to a running tenant at any time would be a standing back door into every
+customer.
 
 ---
 
@@ -1731,46 +1791,328 @@ cannot tell whether any of this is configured.
 
 ---
 
+## 15. Authorization — permissions and schedules
+
+The engine that decides whether somebody may present a credential at a terminal.
+Before this existed, `permissions` was a table nothing read: every active person
+with a bound credential opened every terminal in their company, permanently.
+
+**The rule, stated once:**
+
+> Absence of permission is not permission.
+
+A decision is DENIED unless a live, matching, in-window `ALLOW` says otherwise,
+and any matching `DENY` beats every `ALLOW` at any scope.
+
+### How a decision is reached
+
+1. The terminal, its site and its company must all be in service.
+2. The capability the terminal is assigned to must be enabled for the company.
+3. The person must resolve inside the terminal's company, be active, and be
+   inside their own validity window.
+4. The credential, where one is named, must belong to that person, be `ACTIVE`,
+   and be inside its validity window.
+5. Every live permission whose scope covers the terminal and whose application
+   matches is collected. Any `DENY` wins outright. Otherwise any `ALLOW` grants.
+6. Otherwise denied, because absence of permission is not permission.
+
+### Reason codes
+
+Returned on **every** outcome including grants. A trail that records why somebody
+was refused but not why they were admitted answers half the question a security
+review asks.
+
+| Reason | Meaning |
+|---|---|
+| `ALLOWED` | A matching rule admitted them. |
+| `NO_PERMISSION` | Nothing granted access here. The deny-by-default answer. |
+| `EXPLICIT_DENY` | A `DENY` rule matched. |
+| `OUTSIDE_SCHEDULE` | A rule matched but its schedule could not be evaluated. |
+| `PERMISSION_EXPIRED` / `PERMISSION_NOT_YET_VALID` | Validity window closed or not yet open. |
+| `PERSON_INACTIVE` / `PERSON_UNKNOWN` | The subject. |
+| `CREDENTIAL_UNKNOWN` / `_REVOKED` / `_SUSPENDED` / `_EXPIRED` / `_NOT_YET_VALID` | The credential. |
+| `APPLICATION_NOT_ENABLED` | The capability is off for this company. |
+| `TERMINAL_DISABLED` / `SITE_INACTIVE` / `COMPANY_INACTIVE` | Context out of service. |
+
+### Scopes
+
+A permission names exactly one:
+
+| Scope | Reaches |
+|---|---|
+| `COMPANY` | every terminal the company has, including ones installed later |
+| `SITE` | every terminal at one site (`site_id` required) |
+| `TERMINAL` | exactly one terminal (`device_serial` required) |
+
+### `GET /api/v1/console/people/{external_id}/permissions`
+
+Role **VIEWER**. Returns `{count, permissions[]}`.
+
+```json
+{
+  "id": "9f1c…",
+  "person_id": "3ab2…",
+  "scope_type": "SITE",
+  "site_id": "7c4d…",
+  "site_name": "North Gate",
+  "application": "ACCESS_CONTROL",
+  "effect": "ALLOW",
+  "schedule_id": "1f0a…",
+  "schedule_name": "Office hours",
+  "starts_at": null,
+  "ends_at": "2026-12-31T00:00:00Z",
+  "active": true
+}
+```
+
+`application` empty means the rule applies to whatever the terminal is doing.
+`schedule_id` empty means no time restriction.
+
+### `POST /api/v1/console/people/{external_id}/permissions`
+
+Role **MANAGER**. CSRF required. **Idempotent** — it upserts onto the unique
+index for the scope, so a retried create is not a conflict.
+
+```json
+{
+  "scope_type": "SITE",
+  "site_id": "7c4d…",
+  "application": "ACCESS_CONTROL",
+  "effect": "ALLOW",
+  "schedule_id": "1f0a…",
+  "starts_at": null,
+  "ends_at": "2026-12-31T00:00:00Z",
+  "active": true
+}
+```
+
+`effect` defaults to `ALLOW`. A `COMPANY` scope must not name a site or terminal;
+a `SITE` or `TERMINAL` scope must name one. `201` with the stored permission.
+`404` if the person, site, terminal or schedule is not in the caller's company.
+
+### `DELETE /api/v1/console/permissions/{permission_id}`
+
+Role **MANAGER**. CSRF required. Soft-deletes the rule.
+
+### Schedules
+
+A schedule is a **named, reusable set of windows**, referenced by many
+permissions — so "office hours" is edited in one place rather than retyped on
+every rule.
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/schedules` | VIEWER |
+| `POST` | `/console/schedules` | MANAGER |
+| `PUT` | `/console/schedules/{schedule_id}` | MANAGER |
+| `DELETE` | `/console/schedules/{schedule_id}` | MANAGER |
+
+```json
+{
+  "name": "Office hours",
+  "timezone": "Europe/London",
+  "active": true,
+  "windows": [
+    {"days_of_week": 31, "start_time": "09:00", "end_time": "17:00"},
+    {"days_of_week": 32, "start_time": "09:00", "end_time": "13:00"}
+  ]
+}
+```
+
+`days_of_week` is a bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64,
+every day=127.
+
+**Windows may cross midnight.** `end_time <= start_time` means the window runs
+into the following day, and `days_of_week` names the day it **starts** on — so a
+22:00–06:00 Friday window admits Friday 23:00 and Saturday 02:00, and refuses
+Friday 05:00.
+
+`timezone` omitted means the window is evaluated in the timezone of the site the
+terminal stands at. Set it explicitly for a company running one shift pattern
+across several countries.
+
+**On update, `windows` REPLACES the whole set.** A schedule is a set, and the
+caller sends the set it wants.
+
+`DELETE` answers **409** while permissions still reference the schedule. The
+foreign key is `ON DELETE SET NULL`, which on a soft delete would silently widen
+every rule that used it — a permission restricted to office hours would become
+one with no time restriction at all.
+
+### `POST /api/v1/console/terminals/{serial}/evaluate`
+
+Role **MANAGER**. CSRF required. *"Would this person get in here, right now, and
+why."*
+
+```json
+{"external_id": "P-1042", "credential_id": "…", "application": "ACCESS_CONTROL",
+ "at": "2026-08-18T09:30:00Z"}
+```
+
+`at` makes a schedule testable without waiting for Tuesday. Returns an
+`AccessDecision` — `granted`, `reason`, `person_id`, `person_name`,
+`external_id`, `credential_id`, `application`, `matched_permission`,
+`decided_at`.
+
+**This writes no event.** A preview that recorded a door event would put a
+presentation that never happened into the trail an attendance report is built
+from.
+
+### What a new person is allowed
+
+`companies.default_person_access` decides what permission is written when
+somebody is created:
+
+| Value | Effect |
+|---|---|
+| `COMPANY_ALLOW` | a company-scoped `ALLOW` is written at creation |
+| `NONE` | nothing is written; they can open nothing until a rule says otherwise |
+
+Companies that existed before the engine were migrated to `COMPANY_ALLOW`, which
+reproduces their previous behaviour exactly. Companies created through the
+platform API start at `NONE`. The grant is a real permission row an operator can
+see and remove, not a special case in the evaluator.
+
+---
+
+## 16. Events — the activity trail
+
+What actually happened in the field. Distinct from `/console/audit`, which
+records what **operators changed**.
+
+`access_logs` is unchanged and still carries the device wire contract. `events`
+is the model going forward: an open `event_type`, an `application`, four
+decisions, a `direction`, a machine-readable `reason_code` and an opaque
+`payload` — enough to carry attendance, check-in, verification and visitor
+records without another migration.
+
+### `GET /api/v1/console/events`
+
+Role **VIEWER**. **Grant-scoped**: an operator scoped to one site sees that
+site's events only.
+
+| Parameter | Meaning |
+|---|---|
+| `limit` / `offset` | default 50, max 500 |
+| `site_id`, `serial`, `person_id`, `external_id` | narrow to one subject |
+| `event_type`, `application`, `decision`, `direction` | narrow by kind |
+| `from`, `to` | RFC3339, on `occurred_at` |
+| `q` | free text over person name and the id the terminal read |
+
+`decision` is one of `GRANTED`, `DENIED`, `RECORDED`, `ERROR`. `RECORDED` is the
+no-outcome case: nothing was released, the event **is** the outcome.
+
+**A malformed `from`/`to` is a 400, not an ignored filter.** Silently dropping
+`from=lastweek` and answering with the whole trail looks like an answer to the
+question that was asked. The same now applies to `since`/`until` on
+`/console/audit`, which previously ignored them.
+
+```json
+{
+  "count": 2, "total": 2, "limit": 50, "offset": 0, "has_more": false,
+  "events": [{
+    "id": "8c2f…",
+    "event_type": "ACCESS_DENIED",
+    "application": "ACCESS_CONTROL",
+    "decision": "DENIED",
+    "reason": "NO_PERMISSION",
+    "site_name": "North Gate",
+    "device_serial": "ESP32-0007",
+    "person_id": "3ab2…",
+    "person_name": "A Person",
+    "subject_external_id": "P-1042",
+    "credential_id": "…",
+    "credential_type": "FINGERPRINT",
+    "occurred_at": "2026-08-15T09:30:00Z",
+    "recorded_at": "2026-08-15T09:30:02Z",
+    "occurred_at_trusted": true
+  }]
+}
+```
+
+**Two times, and the difference matters.** `occurred_at` is when it happened at
+the terminal; `recorded_at` is when the server heard. An event queued through an
+outage and uploaded hours later has an `occurred_at` hours before its
+`recorded_at`. Filters and ordering use `occurred_at`, because an operator asking
+what happened on Tuesday means at the door. `occurred_at_trusted` is false when
+the terminal's clock was not believable and the server stamped arrival instead.
+
+### Divergence
+
+When a terminal reports a decision the platform would not have made, the event
+records the **terminal's** decision — that is the one that released the lock —
+and carries the platform's verdict beside it:
+
+```json
+"payload": {"source": "FINGERPRINT", "diverged": true,
+            "server_decision": {"granted": false, "reason": "NO_PERMISSION"}}
+```
+
+That is a terminal running on a cache it synced before a permission was revoked.
+It is what the site's offline policy is a trade against, and it is now visible
+and searchable.
+
+---
+
 ## Known limitations
 
-Behaviour a client must design around today:
+Behaviour a client must design around today. This list is maintained against the
+code, not against intent — an item is removed only when a test that would catch
+its return exists and passes.
 
-1. **Access checks ignore permissions.** `GET /access/{member_id}` tests
-   membership status only — no door scope, schedule, or validity window.
-2. **`GET /members` is unpaginated.**
-3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`
-   and `POST /auth/password` share a per-address allowance and a per-account
-   lockout; the limiter is in-process, so with more than one instance the
-   effective rate multiplies by the instance count. Nothing else is limited — a
-   leaked site key can still be brute-forced against `/devices/register`, and
-   nothing bounds how many terminals one key may enrol.
-4. **Site API keys are stored in plaintext**, and are compared with a plain SQL
-   equality. Device keys are hashed with SHA-256 and never stored in the clear.
-   Fixing this needs a way to re-issue a site key, which no endpoint offers yet —
-   see the note in README.md.
-5. **The deprecated site-key + serial device auth is still accepted.** It cannot
+1. **The legacy `GET /access/{member_id}` still ignores permissions.** It tests
+   membership status only. It is retained for deployed tooling and is
+   **deprecated**: the authorization engine is reached through
+   `POST /console/terminals/{serial}/evaluate` (operator) and is applied
+   automatically to every event a terminal reports. Do not build anything new on
+   the legacy route.
+2. **`GET /members` is unpaginated.** `GET /console/people` is paginated and
+   searchable; use it.
+3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`,
+   `POST /auth/password`, `POST /auth/forgot-password`, `POST /auth/redeem` and
+   the platform login share per-address allowances and per-account lockout. The
+   limiter is **in-process**, so with more than one instance the effective rate
+   multiplies by the instance count (SEC-09, open). Nothing else is limited — a
+   leaked site key can still be brute-forced against `/devices/register`.
+4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
-   claims.
-6. **People are tenant-wide, not site-scoped.** Every terminal in a company
-   receives every person in that company, including terminals at other sites.
-   Site settings, by contrast, reach only that site's devices. This is by
-   design; door-level scoping belongs to the permission engine.
-7. **`/metrics` is fleet-wide and unauthenticated unless `METRICS_TOKEN` is
-   set.** It exposes counts across all tenants. Keep it off the public network
-   or set the token.
-8. **Response envelopes are inconsistent** — bare arrays for members, access
-   logs, and enrollment; `{count, ...}` objects for devices, firmware, and every
+   claims. It cannot be removed until firmware self-registration exists (FW-05).
+5. **A conditional `DENY` is not enforced at an offline terminal.** A terminal
+   caches a flat roster and does not evaluate permissions, so a `DENY` narrowed
+   to one application or one schedule cannot be applied by removing the person
+   from the roster without also refusing them when they *are* allowed. Those
+   people stay on the roster and the server decides at the door. An
+   **unconditional** `DENY` does remove them, so exclusion survives an outage.
+   The site's offline policy bounds the exposure; `DENY_ALL` removes it.
+6. **Permission validity windows take effect at an offline terminal on a
+   reconciliation cycle, not instantly.** Roster membership changes with the
+   clock, and the reconciler runs every 15 minutes by default
+   (`ROSTER_RECONCILE_INTERVAL_SECONDS`). An online terminal is decided by the
+   server at the door and is exact.
+7. **Response envelopes are inconsistent** — bare arrays for members, access
+   logs and enrollment; `{count, …}` objects for devices, firmware and every
    console list.
-9. **Error message strings are not stable.** Branch on status codes.
-10. **Site grants do not narrow `GET /console/people`** — people are company-wide
-    (limitation 6), so the console reports the scope the API can actually
-    enforce rather than implying one it cannot. The list itself is paginated and
-    searchable; `GET /members` (site key) is still unpaginated per limitation 2.
-11. **No application business logic exists yet.** The applications model records
-    which capabilities a company has enabled and what each terminal is assigned
-    to; nothing evaluates attendance, access decisions or check-in on top of it.
-    Enabling a capability changes what the dashboard should offer, not what the
-    platform does at a door.
-12. **Terminals are not told their application mode.** The device protocol is
-    unchanged, so a mode is operator-facing configuration until a module needs
-    to deliver it — which will be an additive field in the settings payload.
+8. **Error message strings are not stable.** Branch on status codes.
+9. **Terminals are not told their application mode.** The device protocol is
+   unchanged, so a mode is operator-facing configuration and a server-side input
+   to the decision, but the terminal does not know it (APP-03, open). Delivering
+   it will be an additive field in the settings payload.
+10. **Only `ACCESS_CONTROL` has behaviour.** `ATTENDANCE`, `CHECK_IN`,
+    `VERIFICATION`, `TIME_TRACKING` and `VISITOR_MANAGEMENT` are configuration
+    and an event model that can carry them; no capability logic is implemented
+    on top. Enabling one changes what the dashboard should offer and what the
+    authorization engine will refuse, not what the platform does with the event
+    afterwards.
+11. **Biometric templates remain terminal-local.** A person enrolled at one
+    terminal has no finger bound at any other. The `credentials` and
+    `credential_placements` entities exist to carry sealed, server-opaque
+    templates; the distribution job type is not built (FW-03, open).
+12. **Site API keys are hashed** (SHA-256) and rotatable through
+    `POST /console/sites/{site_id}/api-key`. Device keys are hashed and never
+    stored in the clear. Neither is ever returned by a read endpoint — a key is
+    shown once, at the moment it is minted.
+13. **The 64-person on-device ceiling is a firmware constant.** The server no
+    longer fans a whole company at every terminal (SEC-04), which removes most
+    of the pressure, but a single site with more than 64 permitted people will
+    still exhaust a terminal's table. The server-side capacity model and the
+    firmware limit are both open (FW-01).
