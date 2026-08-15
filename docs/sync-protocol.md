@@ -155,11 +155,30 @@ key already on the row is left exactly as it was.
 
 ```json
 { "protocol_version": 1, "device_id": "AT-0001",
-  "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4 }
+  "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4,
+  "firmware_update": {
+    "version": "1.2.0",
+    "download_url": "https://updates.example.com/at-1.2.0.bin",
+    "checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "size_bytes": 1003664,
+    "is_mandatory": false } }
 ```
 
 Records liveness and inventory. `pending_jobs` lets a device skip polling when
 there is nothing waiting.
+
+`server_time` is RFC3339 **UTC with a `Z`**. A terminal that can reach the API
+but not an NTP server adopts it for stamping queued events, and refuses a
+numeric offset rather than mis-parsing it — so this must never become a local
+time.
+
+`firmware_update` is **present only when there is an update to offer**, so a
+fleet that is up to date sees exactly the response it saw before the field
+existed. It is the `is_current` build for the device's own company, device type
+and release channel. The server withholds an offer whose digest is missing or
+not 64 lower-case hex, whose `size_bytes` is absent, whose URL is not `https`,
+or whose URL or version would not fit the device's fixed buffers — and logs the
+catalogue row and the reason. See API_SPEC.md section 17.2.
 
 ### Device states
 
@@ -287,6 +306,7 @@ Settings live at the site; every device at that site receives the same push.
     "settings": {
       "unlock_duration_seconds": 8,
       "sync_interval_seconds": 30,
+      "offline_policy": "CACHED_GRACE",
       "offline_grace_minutes": 120,
       "tamper_alarm": true
     }
@@ -301,11 +321,80 @@ which is what keeps settings idempotent under redelivery and reordering.
 `settings` is an opaque JSON object to the transport — adding a key does not
 change the protocol version. Firmware must ignore keys it does not recognise.
 
+**Two keys are not opaque and are server-authoritative.** `offline_policy`
+(`DENY_ALL` / `CACHED_GRACE` / `CACHED_INDEFINITE`) and `offline_grace_minutes`
+(0–43200) come from validated columns on the site and are layered OVER the
+stored settings object, so an operator cannot override a safety control by
+writing raw JSON into the free-form blob. They appear in this payload and in
+`GET /api/v1/devices/settings` identically — the push and the pull are built by
+the same code so they cannot describe different configurations.
+
+Absent keys mean "leave the stored policy alone", so firmware predating them is
+unaffected.
+
 Settings are managed by an operator through:
 
 - `GET /api/v1/sites/settings` — read current settings and version
 - `PUT /api/v1/sites/settings` — replace settings; bumps the version and fans
   a SETTINGS job out to every device at the site in the same transaction
+- `PUT /api/v1/console/sites/{site_id}` — set `offline_policy` /
+  `offline_grace_minutes` (ADMIN). Also bumps the version and fans out, which is
+  required rather than incidental: a policy change delivered without a version
+  bump is discarded by the terminal as a replay.
+
+## Credentials, device-facing
+
+Two routes added for multi-terminal identity. **No biometric material crosses
+either, in either direction** — a `credential_id` is a handle naming which
+credential a report is about, and the template stays on the sensor that captured
+it, which is all the fitted hardware permits.
+
+`GET /api/v1/devices/credentials/pending?limit=25` — what this terminal is
+expected to hold and does not. Scoped to the authenticated device and to people
+that terminal's permissions would admit.
+
+```json
+{ "protocol_version": 1, "device_id": "AT-0001", "count": 1,
+  "credentials": [{ "credential_id": "8c2f…", "placement_id": "1a9b…",
+    "member_id": "MEM001", "full_name": "A Person",
+    "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+    "vendor": "ZFM", "state": "PENDING", "attempts": 0,
+    "last_error": "", "generation": 1 }] }
+```
+
+`POST /api/v1/devices/credentials/placement` — report the outcome.
+
+```json
+{ "credential_id": "8c2f…", "member_id": "MEM001",
+  "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+  "vendor": "ZFM", "slot": 5, "state": "PLACED", "error": "" }
+```
+
+`state` is `PLACED`, `FAILED` or `REMOVED`. `PENDING` and `REMOVING` are the
+platform's intentions and are refused — a terminal claiming either would be a
+device deciding what the platform wants. Idempotent on `(credential, device)`.
+
+`POST /api/v1/devices/enrollment/result` additionally binds an optional
+`credential` object, writing a real credential and placement instead of only the
+`fingerprint_template` locator. The locator is unchanged and still required.
+
+## `POST /api/v1/devices/claim`
+
+**Unauthenticated**, because the caller has no credential yet — obtaining one is
+what it is for. Removes the need to put the site provisioning key on an
+installer's laptop.
+
+```json
+{"claim_code": "K7M2-P4QX", "serial_number": "AT-A1B2C3"}
+
+200 {"api_key": "atd_…", "serial_number": "AT-A1B2C3"}
+```
+
+Single use, bound to one serial, short-lived, hashed at rest, rate limited and
+audited. **Every failure is the same `401` with the same body** — distinguishing
+"wrong code" from "right code, wrong serial" is what would make an intercepted
+code worth having. `404` means the server does not implement claim codes at all
+and is never used for a bad code.
 
 ## `POST /api/v1/devices/jobs/{id}/complete`
 
@@ -350,17 +439,19 @@ That is correct and safe, because applies are idempotent.
 
 These are known gaps, not oversights:
 
-- **OTA.** Firmware is inventory only. Marking a build current changes what
-  "outdated" means; nothing downloads, schedules, or applies firmware, and no
-  `FIRMWARE_UPDATE` job is ever dispatched.
-- **Site API keys are still stored in plaintext.** Device credentials are
-  hashed, but `sites.api_key` predates that and was left alone deliberately —
-  hashing it needs its own migration and a rotation window.
-- **The offline sweep is not scheduled.** `MarkDevicesOffline` exists but nothing
-  calls it periodically yet, so `status` only advances to `OFFLINE` when
-  something invokes the sweep.
-- **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync today. Doors,
-  schedules, and permissions arrive with the permission engine (Sprint 6).
+- **OTA is offered but not yet consumed.** The heartbeat response now carries a
+  `firmware_update` object (above), and the device-side download, verification,
+  commit and rollback are built — but the firmware's heartbeat parser does not
+  read the field yet, so nothing updates itself today. There is deliberately no
+  `FIRMWARE` job type: the firmware has no case for one, so such jobs would be
+  enqueued only to be acknowledged and discarded.
+- **Withdrawing a placement has no job.** A credential that should no longer be
+  on a terminal stops appearing in that terminal's pending list, but nothing
+  instructs it to erase the template it holds.
+- **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync. The
+  authorization engine evaluates on the server and shapes the roster a terminal
+  receives; schedules themselves are not delivered, so a terminal cannot enforce
+  a time window while offline.
 
 ## Changing this protocol
 

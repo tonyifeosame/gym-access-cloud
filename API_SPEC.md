@@ -35,6 +35,7 @@ written by hand.
 14. [Applications and modules](#14-applications-and-modules)
 15. [Authorization — permissions and schedules](#15-authorization--permissions-and-schedules)
 16. [Events — the activity trail](#16-events--the-activity-trail)
+17. [Device protocol additions](#17-device-protocol-additions)
 
 ---
 
@@ -1200,6 +1201,7 @@ one. CSRF is required on every unsafe method.
 | `PUT` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
 | `DELETE` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
 | `POST` | `/api/v1/console/terminals/{serial}/evaluate` | session + CSRF | MANAGER |
+| `POST` | `/api/v1/console/sites/{site_id}/claim-codes` | session + CSRF | ADMIN |
 
 ### Credential handover routes
 
@@ -2054,6 +2056,289 @@ and searchable.
 
 ---
 
+## 17. Device protocol additions
+
+Everything in this section implements
+`docs/firmware-protocol-requirements.md` in the **firmware** repository, which
+is the contract of record between the two sides. The field names, enum
+spellings and shapes below were taken from the firmware source that parses them
+(`sync_job.cpp`, `heartbeat.cpp`, `provisioning.cpp`, `credential_ref.h`), not
+from prose.
+
+**`SyncProtocolVersion` is unchanged and stays at 1.** Every addition is either
+a new optional key inside an existing object or a new route, which is the
+extension path the compatibility policy already relies on.
+
+### 17.1 The site's offline policy reaches the terminal
+
+Two keys inside the existing `settings` object, on **both**
+`GET /api/v1/devices/settings` and every `SETTINGS` job payload:
+
+```json
+{
+  "settings_version": 7,
+  "settings": {
+    "unlock_duration_seconds": 5,
+    "sync_interval_seconds": 60,
+    "offline_policy": "CACHED_GRACE",
+    "offline_grace_minutes": 720
+  }
+}
+```
+
+| Key | Type | Values |
+|---|---|---|
+| `offline_policy` | string | `DENY_ALL`, `CACHED_GRACE`, `CACHED_INDEFINITE` |
+| `offline_grace_minutes` | integer | `0`–`43200` |
+
+Both come from `sites.offline_policy` and `sites.offline_grace_minutes`.
+
+**The columns are layered OVER the stored settings blob.** `sites.settings` is a
+free-form JSON object an operator can write anything into; the policy is a
+validated column. If the two disagree, the column wins — otherwise an operator
+could bypass a safety control by writing raw JSON.
+
+**Setting it:** `PUT /api/v1/console/sites/{site_id}` now accepts
+`offline_policy` and `offline_grace_minutes`. **ADMIN**, matching site key
+rotation, because it decides what a door does during an outage.
+
+Changing either **increments `settings_version` and queues a `SETTINGS` job to
+every terminal at the site**. This is required, not incidental: the terminal
+gates a push behind a strictly-greater version check, so a policy change written
+without the bump is discarded as a replay — a silent no-op the console would
+report as applied.
+
+Renaming a site does **not** bump the version or push a job.
+
+**Backward compatibility.** Purely additive. Firmware that does not know the keys
+ignores them; firmware that does treats absent keys as "leave the stored policy
+alone", so old-server/new-terminal and new-server/old-terminal both behave
+exactly as before.
+
+### 17.2 Firmware updates on the heartbeat response
+
+`POST /api/v1/devices/heartbeat` gains one optional object:
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "AT-A1B2C3",
+  "server_time": "2026-08-15T09:30:00Z",
+  "pending_jobs": 0,
+  "firmware_update": {
+    "version": "1.2.0",
+    "download_url": "https://updates.example.com/at-1.2.0.bin",
+    "checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "size_bytes": 1003664,
+    "is_mandatory": false
+  }
+}
+```
+
+**Absent when there is nothing to offer**, so a fleet that is up to date sees
+exactly the response it saw before this field existed.
+
+The offer is the `is_current` build for the device's own **company, device type
+and release channel**, and is withheld when the device already runs that
+version.
+
+**Only one transport is implemented — this one.** The requirements document
+offered a `FIRMWARE` sync job as an alternative; it is deliberately not built,
+because the firmware's `syncJobTypeFromName` has no `FIRMWARE` case, so such
+jobs would be enqueued per terminal per poll only to be acknowledged and
+discarded. Adding it later is additive and needs no version bump.
+
+**The server withholds an offer that breaks any of the four hard rules**, and
+logs the catalogue row and the reason:
+
+1. `checksum_sha256` present — the device refuses an offer without one.
+2. **Lower-case** 64-hex — the device refuses upper case rather than folding it.
+3. `size_bytes` present and positive — it sizes the flash write and is trusted
+   over `Content-Length`.
+4. `download_url` is `https`.
+
+Two further limits come from the device's fixed buffers: a `download_url` over
+127 characters or a `version` over 23 is withheld, because the terminal would
+truncate it and fetch the wrong image.
+
+`server_time` is RFC3339 **UTC with a `Z`**. The terminal adopts it as a clock
+when it cannot reach NTP and **refuses a numeric offset** rather than
+mis-parsing it, so this must never become a local time.
+
+### 17.3 Credential placements, device-facing
+
+Two device-authenticated routes. **No biometric material crosses either, in
+either direction.** A `credential_id` is a handle naming which credential a
+report is about; the template stays on the sensor that captured it, which is all
+the fitted hardware permits.
+
+#### `GET /api/v1/devices/credentials/pending`
+
+What this terminal is expected to hold and does not — the work list that makes
+"person A is recognised at terminals A, B and C" real without moving a template.
+
+`?limit=` defaults to 25, capped at 100.
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "AT-A1B2C3",
+  "count": 1,
+  "credentials": [{
+    "credential_id": "8c2f…",
+    "placement_id": "1a9b…",
+    "member_id": "MEM001",
+    "full_name": "A Person",
+    "credential_type": "FINGERPRINT",
+    "template_format": "SENSOR_LOCAL",
+    "vendor": "ZFM",
+    "state": "PENDING",
+    "attempts": 0,
+    "last_error": "",
+    "generation": 1
+  }]
+}
+```
+
+Scoped to the **authenticated device** — there is no parameter naming a
+terminal — and to people that terminal's **permissions would admit**, so the
+enrolment surface is exactly as narrow as the access surface. Credentials that
+are `REVOKED`/`SUSPENDED`, or already `PLACED`/`REMOVING`/`REMOVED` here, are
+excluded.
+
+#### `POST /api/v1/devices/credentials/placement`
+
+```json
+{"credential_id": "8c2f…", "member_id": "MEM001",
+ "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+ "vendor": "ZFM", "slot": 5, "state": "PLACED", "error": ""}
+```
+
+`state` is `PLACED`, `FAILED` or `REMOVED`. `PENDING` and `REMOVING` are the
+**platform's** intentions and are refused with 400 — a terminal claiming either
+would be a device deciding what the platform wants.
+
+`slot` is 1-based and required for `PLACED`. `error` carries the device's own
+words ("sensor full") so an operator sees why.
+
+Idempotent on `(credential, device)`. A `PLACED` report promotes a `PENDING`
+credential to `ACTIVE`. A credential named in the body that does not belong to
+`member_id`, or to this tenant, is a **404**.
+
+#### `generation`
+
+`credential_placements.generation` (migration 019) records the sensor era a
+placement belongs to, copied from `devices.placement_generation`. The sensor
+hands out the lowest free slot, so a slot freed by a deletion names a different
+finger afterwards; the counter removes the ambiguity outright.
+
+#### Enrolment results
+
+`POST /api/v1/devices/enrollment/result` now **binds** the `credential` object
+the firmware already sends, writing a real credential and placement:
+
+```json
+{"member_id": "MEM001",
+ "fingerprint_template": "terminal:AT-0001:slot:5",
+ "credential": {"credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+                "vendor": "ZFM", "terminal": "AT-0001", "slot": 5}}
+```
+
+`fingerprint_template` is unchanged, still required, and still written — it is a
+**locator, not material**, and deployed firmware plus the 012 back-fill depend on
+it. The `credential` object is optional; older firmware omits it and the
+enrolment completes exactly as before. Placement writing is best-effort: it
+never fails an enrolment that has already committed. `terminal` is recorded but
+**not trusted** — the placement is written against the authenticated device.
+
+### 17.4 `POST /api/v1/devices/claim`
+
+**Unauthenticated by necessity**: the caller is a terminal that has no
+credential, and obtaining one is what it is for. This removes the need to put the
+**site API key** — which registers devices and rotates their credentials — on an
+installer's laptop.
+
+```
+POST /api/v1/devices/claim
+{"claim_code": "K7M2-P4QX", "serial_number": "AT-A1B2C3"}
+
+200 {"api_key": "atd_…", "serial_number": "AT-A1B2C3"}
+```
+
+The response is deliberately tiny: the firmware refuses a body over 512 bytes.
+`api_key` is `atd_` + 64 lower-case hex, which is what
+`DeviceCredential::keyLooksIssued` requires.
+
+| Status | Meaning to the firmware |
+|---|---|
+| `200` | claimed |
+| `400` | malformed body — the endpoint exists |
+| `401` | the code was refused |
+| `404` | **this server does not support claim codes**; use `set key` |
+| `429` | rate limited |
+| `5xx` | server error, retry |
+
+`404` is reserved for "unsupported" and is never used for a bad code — it would
+send an installer to look at the wrong thing.
+
+**Every failure returns the same 401 with the same body.** Wrong code, expired,
+superseded, or the right code with the wrong serial — all identical.
+Distinguishing them would let an unauthenticated caller learn that a code is real
+but the serial is wrong, which is exactly what turns an intercepted code back
+into something worth having.
+
+Security properties:
+
+- **Single use** — redemption marks it, and issuing a new code for a serial
+  supersedes any outstanding one.
+- **Serial-bound** — the device sends the serial it derives from its factory MAC;
+  a code redeemed by other hardware is refused, and the legitimate code survives
+  the attempt.
+- **Short-lived** — 2 hours by default, capped at 24.
+- **Hashed at rest** — SHA-256; the plaintext exists once, in the response that
+  mints it.
+- **Rate limited** — its own limiter instance, so an installer retrying a
+  mistyped code cannot exhaust the allowance an operator needs to sign in.
+- **Audited** — `DEVICE_CLAIM_CODE_ISSUED` (who, which serial, code prefix) and
+  `DEVICE_CLAIMED` (which unit, from which address). The code itself is never
+  recorded.
+- **Cannot revive a disabled terminal** — it goes through the same registration
+  lifecycle as the site-key path, which refuses a `DISABLED` unit.
+
+#### `POST /api/v1/console/sites/{site_id}/claim-codes`
+
+**ADMIN.** Mints a code for one serial.
+
+```json
+{"serial_number": "AT-A1B2C3", "expires_in_minutes": 120}
+
+201 {"claim_code": "K7M2-P4QX", "code_prefix": "K7M2",
+     "serial_number": "AT-A1B2C3", "site_name": "North Gate",
+     "expires_at": "…", "shown_once": true, "superseded_codes": 0}
+```
+
+The code is returned **once** and no read endpoint gives it back.
+`serial_number` is limited to 15 characters — what the firmware can store —
+refused when minted rather than discovered at a door. `superseded_codes` lets the
+console warn that an installer's earlier printout has just stopped working.
+
+### 17.5 What is still outstanding for the firmware side
+
+Recorded because the requirements document lists them as done on the device and
+they are not consumed today:
+
+- **The heartbeat response's `firmware_update` object is not parsed.**
+  `parseHeartbeatResponse` reads `protocol_version`, `pending_jobs` and
+  `server_time` only. The OTA *execution* path is complete and reachable from the
+  serial console; the network transport that feeds it is not wired.
+- **`GET /devices/credentials/pending` has no client.** The firmware document
+  describes it as what the terminal *would* use.
+- **A `REMOVING` placement has no sync job to carry it.** Listed in the document
+  as the third route; withdrawal is currently visible only through the pending
+  list ceasing to offer the credential.
+
+---
+
 ## Known limitations
 
 Behaviour a client must design around today. This list is maintained against the
@@ -2103,15 +2388,31 @@ its return exists and passes.
     on top. Enabling one changes what the dashboard should offer and what the
     authorization engine will refuse, not what the platform does with the event
     afterwards.
-11. **Biometric templates remain terminal-local.** A person enrolled at one
-    terminal has no finger bound at any other. The `credentials` and
-    `credential_placements` entities exist to carry sealed, server-opaque
-    templates; the distribution job type is not built (FW-03, open).
+11. **Biometric templates remain terminal-local, and this is a hardware
+    limit rather than a schema one.** The fitted sensor's driver implements
+    template export but **not import**, so a template captured at one door
+    cannot be installed at another by this firmware at all. What the platform
+    now does instead is tell each terminal which people it is expected to
+    recognise and does not (section 17.3) — which turns "enrolled at one door,
+    silently does nothing at the others" into a work list. No template ever
+    crosses the device API in either direction.
 12. **Site API keys are hashed** (SHA-256) and rotatable through
     `POST /console/sites/{site_id}/api-key`. Device keys are hashed and never
     stored in the clear. Neither is ever returned by a read endpoint — a key is
     shown once, at the moment it is minted.
-13. **The 64-person on-device ceiling is a firmware constant.** The server no
+13. **OTA offers are delivered, not yet consumed.** The heartbeat response
+    carries a `firmware_update` object when a newer current build exists for the
+    device's company, type and channel, and the server withholds one that breaks
+    any of the four hard rules. The firmware's heartbeat parser does not read the
+    field yet, so no fleet updates itself today — see section 17.5.
+14. **A `REMOVING` placement has no delivery mechanism.** A credential withdrawn
+    from a terminal stops appearing in that terminal's pending list, but nothing
+    instructs it to erase the template it already holds. That is the third route
+    in the firmware requirements and is not built.
+15. **Claim codes remove the credential exposure, not the serial cable.** The
+    code still has to be typed into the unit over a serial console, because the
+    fitted keypad cannot reach the admin menu on this hardware revision.
+16. **The 64-person on-device ceiling is a firmware constant.** The server no
     longer fans a whole company at every terminal (SEC-04), which removes most
     of the pressure, but a single site with more than 64 permitted people will
     still exhaust a terminal's table. The server-side capacity model and the
