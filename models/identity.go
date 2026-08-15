@@ -64,7 +64,12 @@ var (
 	ErrCategoryCodeInvalid = errors.New("category code must be 1-30 characters of A-Z, 0-9 or underscore")
 	ErrCategoryLabelEmpty  = errors.New("category label is required")
 	ErrCategoryNotFound    = errors.New("category not found")
-	ErrCategoryInUse       = errors.New("category is still assigned to people")
+	// ErrPersonNotFound is returned when an external id does not resolve INSIDE
+	// the caller's company. A person in another tenant is not found rather than
+	// forbidden: telling a caller that an id exists somewhere they cannot reach
+	// is itself a cross-tenant disclosure.
+	ErrPersonNotFound = errors.New("person not found")
+	ErrCategoryInUse  = errors.New("category is still assigned to people")
 )
 
 // NormalizeCategoryCode puts a code into the form the schema stores.

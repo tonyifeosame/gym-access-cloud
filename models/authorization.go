@@ -61,6 +61,14 @@ var (
 	ErrScheduleNameTaken   = errors.New("a schedule with that name already exists")
 	ErrScheduleNoWindows   = errors.New("a schedule must have at least one window")
 	ErrInvalidWindow       = errors.New("a schedule window needs a day mask and two different times")
+
+	// ErrScheduleInUse refuses to delete a schedule that rules still reference.
+	//
+	// The foreign key is ON DELETE SET NULL, which on a soft delete would
+	// silently WIDEN every rule that used it: a permission restricted to office
+	// hours would become one with no time restriction at all. Refusing is the
+	// only answer that cannot quietly grant access.
+	ErrScheduleInUse = errors.New("schedule is still used by permissions")
 )
 
 // Permission is one rule about one person.
@@ -283,6 +291,21 @@ type AccessRequest struct {
 	Application string
 
 	At time.Time
+}
+
+// AccessEvaluationRequest asks the engine what it would decide.
+//
+// The console's "would this person get in at this terminal, and why". The
+// terminal is NOT in the body -- it is the :serial in the path, already resolved
+// and authorized by RequireTerminalGrant, so an operator cannot preview a
+// decision at a terminal they are not scoped to.
+//
+// At makes a schedule testable without waiting for Tuesday. Absent means now.
+type AccessEvaluationRequest struct {
+	ExternalID   string     `json:"external_id"`
+	CredentialID string     `json:"credential_id,omitempty"`
+	Application  string     `json:"application,omitempty"`
+	At           *time.Time `json:"at,omitempty"`
 }
 
 // OfflinePolicy is what a terminal does when it cannot reach the platform.

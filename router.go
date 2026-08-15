@@ -226,6 +226,14 @@ func NewRouter() *gin.Engine {
 			read.GET("/people", handlers.ConsoleListPeople)
 			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
 
+			// Who may go where, and when (APP-02). Readable by any operator:
+			// "why was she refused" is a question a viewer at a front desk has
+			// to be able to answer, and the rules are not secret from the
+			// people administering the deployment.
+			read.GET("/people/:external_id/permissions",
+				handlers.ConsoleListPersonPermissions)
+			read.GET("/schedules", handlers.ConsoleListSchedules)
+
 			// Site-scoped reads. RequireSiteGrant resolves :site_id inside the
 			// operator's company and puts it in the context, so a site in
 			// another tenant is a 404 and one they are not scoped to is a 403.
@@ -253,6 +261,31 @@ func NewRouter() *gin.Engine {
 			// destructive terminal operations are ADMIN, below.
 			write.POST("/terminals/:serial/resync",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleResyncTerminal)
+
+			// The authorization engine's write surface (APP-02).
+			//
+			// MANAGER rather than ADMIN, deliberately. Deciding who may come in
+			// on Tuesday is day-to-day work at any customer with more than a
+			// handful of people; putting it behind the gate that mints site
+			// provisioning credentials would mean every rota change needs an
+			// administrator. Deleting a schedule that rules still depend on is
+			// refused rather than cascaded, so the destructive case is closed
+			// by the store rather than by the role.
+			write.POST("/people/:external_id/permissions", handlers.ConsoleGrantPermission)
+			write.DELETE("/permissions/:permission_id", handlers.ConsoleRevokePermission)
+
+			write.POST("/schedules", handlers.ConsoleCreateSchedule)
+			write.PUT("/schedules/:schedule_id", handlers.ConsoleUpdateSchedule)
+			write.DELETE("/schedules/:schedule_id", handlers.ConsoleDeleteSchedule)
+
+			// "Would this person get in here, right now, and why."
+			//
+			// A POST because it takes a body, NOT because it changes anything:
+			// it writes no event by design, so that a preview cannot put a
+			// presentation that never happened into the trail an attendance
+			// report is built from.
+			write.POST("/terminals/:serial/evaluate",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleEvaluateAccess)
 
 			// GetSiteSettings/UpdateSiteSettings are the SAME handlers the
 			// site-key API uses. Both read site_id from the context, which

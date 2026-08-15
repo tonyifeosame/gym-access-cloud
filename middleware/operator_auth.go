@@ -391,6 +391,10 @@ func RequireTerminalGrant(param string) gin.HandlerFunc {
 
 		c.Set("site_id", access.SiteID)
 		c.Set("site_name", access.SiteName)
+		// The terminal this grant check authorized. A handler behind this gate
+		// uses it rather than resolving the same serial again -- one resolution,
+		// one authorization, no chance of the two disagreeing.
+		c.Set("device_id", access.DeviceID)
 
 		c.Next()
 	}

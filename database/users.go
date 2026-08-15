@@ -675,6 +675,14 @@ type SiteAccess struct {
 	SiteName   string
 	Granted    bool
 	GrantCount int
+
+	// DeviceID is set only by ResolveDeviceAccess, which resolved a serial to
+	// get here. Carrying it means a handler behind RequireTerminalGrant does not
+	// have to resolve the same serial a second time -- and, more importantly,
+	// cannot resolve it differently. The authorization preview evaluates against
+	// the terminal the grant check authorized, not against whatever a second
+	// lookup of the same string returns.
+	DeviceID int64
 }
 
 // ResolveSiteAccess looks up a site inside one company and reports whether an
@@ -746,7 +754,8 @@ func ResolveDeviceAccess(companyID, userID int64, serialNumber string) (*SiteAcc
 		       EXISTS (SELECT 1 FROM user_site_grants g
 		                WHERE g.user_id = $3 AND g.site_id = s.id) AS granted,
 		       (SELECT count(*) FROM user_site_grants g2
-		         WHERE g2.user_id = $3) AS grant_count
+		         WHERE g2.user_id = $3) AS grant_count,
+		       d.id
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		 WHERE d.serial_number = $1
@@ -754,7 +763,8 @@ func ResolveDeviceAccess(companyID, userID int64, serialNumber string) (*SiteAcc
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL`,
 		serialNumber, companyID, userID).
-		Scan(&access.SiteID, &access.SiteName, &access.Granted, &access.GrantCount)
+		Scan(&access.SiteID, &access.SiteName, &access.Granted, &access.GrantCount,
+			&access.DeviceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrDeviceNotFound
 	}
