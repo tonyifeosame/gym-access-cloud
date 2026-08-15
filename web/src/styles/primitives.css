@@ -238,10 +238,20 @@ textarea.field__input {
 }
 
 .checkbox__input {
-  margin-top: 3px;
-  /* A target that can actually be hit on a phone. */
-  width: 16px;
-  height: 16px;
+  margin-top: 1px;
+  /*
+   * 24px, WHICH IS A CONFORMANCE FLOOR RATHER THAN A PREFERENCE. WCAG 2.2
+   * SC 2.5.8 (Target Size, Minimum, AA) requires 24x24 CSS pixels, and this was
+   * 16x16 — with a comment claiming it was "a target that can actually be hit
+   * on a phone", which measurement in a real browser at 360px disproved.
+   *
+   * The checkbox groups here are site grants: a list of similar rows where
+   * picking the one below the one you meant silently changes which sites an
+   * operator can reach. That is the case the size floor exists for, and it is
+   * not one to be clever about — the visual weight is the price.
+   */
+  width: 24px;
+  height: 24px;
   flex: 0 0 auto;
 }
 
