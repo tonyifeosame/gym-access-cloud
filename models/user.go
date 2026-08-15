@@ -196,6 +196,16 @@ type OperatorIdentity struct {
 	SessionID       int64
 	SessionPublicID string
 
+	// MustChangePassword is set when the current password was chosen by somebody
+	// other than its owner -- an invitation, or an administrative reset.
+	//
+	// Carried on the identity rather than fetched by the one handler that reports
+	// it, because the session lookup already reads the row. NOT enforced by
+	// refusing requests: an account that cannot reach the endpoint that fixes it
+	// is worse than one working under a flag. The console insists before it lets
+	// the operator do anything else; the API says so and serves the request.
+	MustChangePassword bool
+
 	// CSRFTokenHash is the stored form of the session's synchronizer token, for
 	// the middleware's constant-time comparison.
 	CSRFTokenHash string

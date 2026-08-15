@@ -146,10 +146,20 @@ type ConsolePersonRequest struct {
 }
 
 // ConsoleOperatorRequest creates an operator.
+//
+// PASSWORD IS OPTIONAL, AND OMITTING IT IS THE PREFERRED PATH (PPL-02). An
+// absent password means the account is created with a credential nobody holds
+// and the response carries a single-use invitation instead -- so the
+// administrator creating the account never knows how to sign in as it.
+//
+// It was `binding:"required"` until that finding, which made the invitation flow
+// unreachable through the API no matter what the store supported: gin refused
+// the request before any handler ran. Supplying a password still works, for a
+// deployment that cannot deliver a link at all.
 type ConsoleOperatorRequest struct {
 	Email    string   `json:"email" binding:"required"`
 	FullName string   `json:"full_name" binding:"required"`
-	Password string   `json:"password" binding:"required"`
+	Password string   `json:"password,omitempty"`
 	Role     string   `json:"role" binding:"required"`
 	SiteIDs  []string `json:"site_ids,omitempty"`
 }

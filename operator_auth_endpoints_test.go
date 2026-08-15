@@ -157,8 +157,19 @@ func TestAuthLoginSucceedsAndSetsTheSessionCookie(t *testing.T) {
 
 	// A password must never come back, and neither must the session token: the
 	// token belongs in the cookie and nowhere else.
+	//
+	// The check names the three things that would actually be a leak -- the
+	// plaintext, a `password` field and a hash field -- rather than the substring
+	// "password". A bare substring also matches `must_change_password`, which
+	// carries no secret at all: it is a boolean saying the credential was issued
+	// by an invitation or a reset and has not been chosen yet (PPL-02), and the
+	// console needs it to route to the change-password screen. Forbidding the
+	// word rather than the secret would mean the guard fails on a field that is
+	// safe by construction while still passing on any new one that is not.
 	raw := mustJSON(t, body)
-	if strings.Contains(raw, testPassword) || strings.Contains(raw, "password") {
+	if strings.Contains(raw, testPassword) ||
+		strings.Contains(raw, `"password"`) ||
+		strings.Contains(raw, "password_hash") {
 		t.Errorf("the login response mentions a password: %s", raw)
 	}
 	if strings.Contains(raw, "ats_") {

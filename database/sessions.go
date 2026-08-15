@@ -194,6 +194,7 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 		       (s.last_used_at <= CURRENT_TIMESTAMP - make_interval(secs => $2::float8))
 		           AS needs_touch,
 		       u.id, u.public_id, u.company_id, u.email, u.full_name, u.role, u.active,
+		       u.must_change_password,
 		       c.public_id, c.name, c.slug,
 		       (c.active AND c.deleted_at IS NULL) AS company_ok
 		  FROM user_sessions s
@@ -209,6 +210,7 @@ func AuthenticateSession(token string) (*models.OperatorIdentity, error) {
 			&sessionLive, &needsTouch,
 			&identity.UserID, &identity.UserPublicID, &identity.CompanyID,
 			&identity.Email, &identity.FullName, &identity.Role, &identity.Active,
+			&identity.MustChangePassword,
 			&identity.CompanyPublicID, &identity.CompanyName, &identity.CompanySlug,
 			&companyOK)
 	if err == sql.ErrNoRows {

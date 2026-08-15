@@ -61,6 +61,15 @@ type sessionResponse struct {
 	// this flag a dashboard could not tell those apart, and would have to guess.
 	AllSites bool `json:"all_sites"`
 
+	// MustChangePassword tells the dashboard to insist on a password change
+	// before anything else. Set when the credential in use was chosen by somebody
+	// other than its owner -- an invitation redeemed with a password the platform
+	// generated, or an administrative reset.
+	//
+	// Reported rather than enforced. See the note on models.OperatorIdentity: an
+	// account refused every request could not reach /auth/password either.
+	MustChangePassword bool `json:"must_change_password"`
+
 	CSRFToken string `json:"csrf_token"`
 
 	// SessionExpiresAt is computed from the remaining duration the database
@@ -127,6 +136,7 @@ func buildSessionResponse(identity *models.OperatorIdentity,
 		Sites:                   grants,
 		Applications:            applications,
 		AllSites:                allSites,
+		MustChangePassword:      identity.MustChangePassword,
 		CSRFToken:               identity.CSRFToken,
 		SessionExpiresAt:        time.Now().UTC().Add(time.Duration(identity.ExpiresInSeconds) * time.Second),
 		SessionExpiresInSeconds: identity.ExpiresInSeconds,
