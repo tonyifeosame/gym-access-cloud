@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import { MULTI_PURPOSE } from '../../api/types'
+import { readinessOf } from '../../applications/readiness'
 import { describeApplication, findApplicationBySlug } from '../../applications/registry'
 import { can } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
@@ -89,6 +90,7 @@ export function ApplicationDetailPage() {
   const definition = describeApplication(code)
   const isEnabled = query.data.enabled.includes(code)
   const recognised = definition.description !== UNKNOWN_DESCRIPTION
+  const readiness = readinessOf(code, query.data)
 
   async function setEnabled(next: boolean) {
     try {
@@ -165,46 +167,101 @@ export function ApplicationDetailPage() {
         </InfoNote>
       ) : null}
 
-      <section className="cards" aria-label="Summary">
+      {/*
+        FOUR STATES, SHOWN SEPARATELY. Collapsing them into one "status" is how a
+        configuration screen becomes a false claim: an owner who enables a
+        capability, stores settings for it and assigns a terminal has done three
+        real things and still has a platform that does nothing with any of them.
+      */}
+      <section className="cards" aria-label="Readiness">
         <article className="card">
-          <h2 className="card__title">Status</h2>
+          <h2 className="card__title">Available</h2>
           <p className="card__value">
-            {isEnabled ? <Badge tone="positive">Enabled</Badge> : <Badge>Not enabled</Badge>}
+            {readiness.available ? (
+              <Badge tone="positive">Yes</Badge>
+            ) : (
+              <Badge tone="warning">No</Badge>
+            )}
+          </p>
+          <p className="card__detail">offered by this platform</p>
+        </article>
+
+        <article className="card">
+          <h2 className="card__title">Enabled</h2>
+          <p className="card__value">
+            {isEnabled ? <Badge tone="positive">Yes</Badge> : <Badge>No</Badge>}
           </p>
           <p className="card__detail">for {session?.company.name}</p>
         </article>
 
         <article className="card">
-          <h2 className="card__title">Platform code</h2>
+          <h2 className="card__title">Configured</h2>
           <p className="card__value">
-            <code className="mono">{code}</code>
+            {readiness.configured ? <Badge tone="positive">Yes</Badge> : <Badge>No</Badge>}
           </p>
-          <p className="card__detail">what terminals are assigned to</p>
-        </article>
-
-        <article className="card">
-          <h2 className="card__title">Minimum role to use</h2>
-          <p className="card__value">{definition.minimumRole}</p>
-          <p className="card__detail">for the module&apos;s own screens</p>
-        </article>
-
-        <article className="card">
-          <h2 className="card__title">Last changed</h2>
-          <p className="card__value">
+          <p className="card__detail">
             {record ? (
-              <Timestamp value={record.updated_at} relative />
+              <>
+                changed <Timestamp value={record.updated_at} relative />
+              </>
             ) : (
-              <span className="muted">Never configured</span>
+              'no settings stored'
             )}
           </p>
         </article>
+
+        <article className="card">
+          <h2 className="card__title">Operational</h2>
+          <p className="card__value">
+            {readiness.operational ? (
+              <Badge tone="positive">Yes</Badge>
+            ) : readiness.implementation === 'PARTIAL' ? (
+              <Badge tone="warning">Partly</Badge>
+            ) : (
+              <Badge tone="warning">No</Badge>
+            )}
+          </p>
+          <p className="card__detail">does the platform actually do this</p>
+        </article>
       </section>
 
-      <InfoNote tone="warning" title="No behaviour is switched on yet">
-        Enabling this records that your company intends to use it, and lets a
-        terminal be assigned to it. The platform does not yet evaluate this
-        workflow on its own.
-      </InfoNote>
+      {!readiness.operational ? (
+        <InfoNote
+          tone="warning"
+          title={
+            readiness.implementation === 'PARTIAL'
+              ? 'This capability is only partly built'
+              : 'Nothing acts on this capability yet'
+          }
+        >
+          <p>{readiness.gap}</p>
+          <p>
+            Enabling it records that your company intends to use it, and lets a
+            terminal be assigned to it. Until the platform carries out the
+            workflow, that is the whole of what it does.
+          </p>
+        </InfoNote>
+      ) : null}
+
+      <section className="panel" aria-labelledby="application-identity-heading">
+        <div className="panel__header">
+          <h2 className="panel__title" id="application-identity-heading">
+            How terminals refer to it
+          </h2>
+        </div>
+        <dl className="detail-list">
+          <div className="detail-list__row">
+            <dt>Platform code</dt>
+            <dd>
+              <code className="mono">{code}</code>
+            </dd>
+          </div>
+          <div className="detail-list__row">
+            <dt>Minimum role to open its screens</dt>
+            <dd>{definition.minimumRole}</dd>
+          </div>
+        </dl>
+      </section>
 
       {/*
         Dependencies and conflicts are not modelled anywhere in the platform --

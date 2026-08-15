@@ -1,5 +1,6 @@
 import { useParams } from 'react-router-dom'
 
+import { implementationOf } from '../applications/readiness'
 import { findApplicationBySlug } from '../applications/registry'
 import { useAuthenticatedSession } from '../session/useSession'
 
@@ -81,12 +82,39 @@ export function ApplicationPlaceholder() {
     )
   }
 
+  /*
+    THE SPECIFIC GAP, NOT A GENERIC "COMING SOON". An operator who followed a
+    navigation entry here has already been told the capability is enabled, and
+    "screens are not built yet" invites them to assume the WORK is happening
+    somewhere and only the view is missing. For every capability except access
+    control and registration, nothing is happening at all — and saying which is
+    the difference between an honest gap and a misleading one.
+  */
+  const readiness = definition ? implementationOf(definition.code) : null
+
   return (
-    <NotImplemented
-      title={label}
-      description={definition?.description}
-      detail="This application is enabled for your company, but its screens are not built yet."
-    />
+    <div className="page">
+      <header className="page__header">
+        <h1>{label}</h1>
+        {definition?.description ? (
+          <p className="page__lead">{definition.description}</p>
+        ) : null}
+      </header>
+
+      <div className="notice notice--warning">
+        <h2 className="notice__title">
+          {readiness?.status === 'PARTIAL'
+            ? 'Partly built, with no screens yet'
+            : 'Not built yet'}
+        </h2>
+        {readiness?.gap ? <p>{readiness.gap}</p> : null}
+        <p>
+          This capability is enabled for {session.company.name}, so terminals may
+          be assigned to it and it appears in your navigation. It has no screens
+          of its own yet.
+        </p>
+      </div>
+    </div>
   )
 }
 

@@ -228,23 +228,44 @@ describe('capabilities newer than this console', () => {
 // ---------------------------------------------------------------------------
 
 describe('what enabling actually does', () => {
-  it('says plainly that no behaviour is switched on yet', async () => {
-    // The most important sentence on the page. An owner reading "Access
-    // Control" and expecting doors to change behaviour has been misled.
+  it('DISTINGUISHES ENABLED FROM OPERATIONAL, and defines both', async () => {
+    // The most important thing on the page. An owner reading "Access Control",
+    // switching it on and expecting doors to change behaviour has been misled,
+    // and one green "Enabled" badge is exactly how that happens.
     signIn()
     renderApplications()
 
-    expect(
-      await screen.findByText('Enabling a capability does not switch on behaviour yet'),
-    ).toBeInTheDocument()
-    expect(screen.getByText(/does not yet evaluate any of these workflows/)).toBeInTheDocument()
+    expect(await screen.findByText('Enabled is not the same as operational')).toBeInTheDocument()
+    expect(screen.getByText(/the platform actually carries out the workflow/i)).toBeInTheDocument()
   })
 
-  it('repeats it on the detail page', async () => {
+  it('marks each capability with whether the platform actually does it', async () => {
+    signIn()
+    renderApplications()
+
+    const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
+    expect(within(attendance).getByText('Not built yet')).toBeInTheDocument()
+    // The SPECIFIC gap, not a generic disclaimer.
+    expect(within(attendance).getByText(/Nothing records attendance/i)).toBeInTheDocument()
+
+    // Access control is further along, and says so differently.
+    const access = screen.getByText('Access Control').closest('li') as HTMLElement
+    expect(within(access).getByText('Partly built')).toBeInTheDocument()
+    expect(within(access).getByText(/no permission engine/i)).toBeInTheDocument()
+  })
+
+  it('repeats the four states on the detail page', async () => {
     signIn()
     renderApplications('/settings/applications/attendance')
 
-    expect(await screen.findByText('No behaviour is switched on yet')).toBeInTheDocument()
+    // Available, enabled, configured and operational, shown separately.
+    const readiness = await screen.findByRole('region', { name: 'Readiness' })
+    expect(within(readiness).getByText('Available')).toBeInTheDocument()
+    expect(within(readiness).getByText('Enabled')).toBeInTheDocument()
+    expect(within(readiness).getByText('Configured')).toBeInTheDocument()
+    expect(within(readiness).getByText('Operational')).toBeInTheDocument()
+
+    expect(screen.getByText('Nothing acts on this capability yet')).toBeInTheDocument()
   })
 
   it('states that dependencies and conflicts are not modelled', async () => {

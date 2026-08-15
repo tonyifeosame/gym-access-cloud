@@ -159,7 +159,12 @@ describe('the console the session describes', () => {
     renderApp('/applications/attendance')
 
     expect(await screen.findByRole('heading', { name: 'Attendance' })).toBeInTheDocument()
-    expect(screen.getByText(/not implemented yet/i)).toBeInTheDocument()
+    expect(screen.getByText(/not built yet/i)).toBeInTheDocument()
+    // The SPECIFIC gap rather than "coming soon". An operator who followed a
+    // navigation entry here has been told the capability is enabled, and a
+    // vague placeholder invites them to assume the work is happening somewhere
+    // and only the screen is missing. Nothing is happening at all.
+    expect(screen.getByText(/Nothing records attendance/i)).toBeInTheDocument()
   })
 
   it('says so when a capability is not enabled for the company', async () => {

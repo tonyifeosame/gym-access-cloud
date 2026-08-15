@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 
 import { MULTI_PURPOSE, type ApplicationCode } from '../../api/types'
 import { describeApplication } from '../../applications/registry'
+import { readinessOf } from '../../applications/readiness'
 import { can } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
 import { useNotifications } from '../../components/Notifications'
@@ -55,7 +56,7 @@ export function ApplicationsPage() {
     )
   }
 
-  const { available, enabled, configured } = query.data
+  const { available, enabled } = query.data
 
   // Defensive: MULTI_PURPOSE must never appear as something a company enables,
   // whatever the server sends.
@@ -88,11 +89,34 @@ export function ApplicationsPage() {
         behaving differently has been misled, and this is where that would
         happen.
       */}
-      <InfoNote tone="warning" title="Enabling a capability does not switch on behaviour yet">
-        These settings record what your company intends to use AccessLink for. They
-        control what this console offers and what a terminal may be assigned to.
-        The platform does not yet evaluate any of these workflows on its own —
-        that logic is still being built, capability by capability.
+      <InfoNote tone="warning" title="Enabled is not the same as operational">
+        <p>
+          Four different things are easy to confuse here, and only the last one
+          affects anybody standing at a door:
+        </p>
+        <ul className="capability__legend">
+          <li>
+            <strong>Available</strong> — the platform offers it at all.
+          </li>
+          <li>
+            <strong>Enabled</strong> — your company has switched it on. This
+            decides what the console offers and what a terminal may be assigned
+            to.
+          </li>
+          <li>
+            <strong>Configured</strong> — settings have been stored for it.
+          </li>
+          <li>
+            <strong>Operational</strong> — the platform actually carries out the
+            workflow.
+          </li>
+        </ul>
+        <p>
+          Every capability below is marked with where it stands. Enabling one
+          that is not yet built changes what this console offers and nothing
+          else — no attendance is computed, no access decision is evaluated, no
+          check-in is recorded.
+        </p>
       </InfoNote>
 
       {!mayConfigure ? (
@@ -111,10 +135,10 @@ export function ApplicationsPage() {
           {catalog.map((code) => {
             const definition = describeApplication(code)
             const isEnabled = enabledSet.has(code)
-            const record = configured.find((entry) => entry.code === code)
             // A code the server offers that this build cannot describe. It is
             // still rendered — humanised and marked — rather than hidden.
             const known = definition.description !== UNKNOWN_DESCRIPTION
+            const readiness = readinessOf(code, query.data)
 
             return (
               <li key={code} className="capability" data-enabled={isEnabled}>
@@ -123,17 +147,40 @@ export function ApplicationsPage() {
                     <Link to={`/settings/applications/${definition.slug}`}>
                       {definition.label}
                     </Link>
+                    {/*
+                      TWO BADGES, NEVER ONE. "Enabled" describes a row in a
+                      database; "operational" describes whether the platform
+                      does the work. An owner who enables Attendance and sees a
+                      single green tick has been told the product records
+                      attendance, and it does not.
+                    */}
                     {isEnabled ? (
                       <Badge tone="positive">Enabled</Badge>
                     ) : (
                       <Badge>Not enabled</Badge>
                     )}
+                    {readiness.operational ? (
+                      <Badge tone="positive">Operational</Badge>
+                    ) : readiness.implementation === 'PARTIAL' ? (
+                      <Badge tone="warning">Partly built</Badge>
+                    ) : (
+                      <Badge tone="warning">Not built yet</Badge>
+                    )}
                     {!known ? <Badge tone="warning">Unrecognised</Badge> : null}
                   </h2>
                   <p className="capability__description">{definition.description}</p>
+                  {/*
+                    The specific gap, not a generic disclaimer. "Nothing records
+                    attendance" is actionable in a way that "some features are
+                    in development" is not, and it is what a buyer is entitled
+                    to know before they are sold this.
+                  */}
+                  {readiness.gap ? (
+                    <p className="capability__gap">{readiness.gap}</p>
+                  ) : null}
                   <p className="capability__meta">
                     <code className="mono">{code}</code>
-                    {record ? null : ' · never configured'}
+                    {readiness.configured ? ' · configured' : ' · never configured'}
                   </p>
                 </div>
 
