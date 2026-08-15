@@ -119,6 +119,21 @@ func NewRouter() *gin.Engine {
 
 		auth.POST("/login", credentialLimit, handlers.OperatorLogin)
 
+		// Credential handover, UNAUTHENTICATED BY NECESSITY (PPL-02, SEC-10).
+		//
+		// Somebody who has forgotten their password cannot authenticate to ask
+		// for a new one, and somebody redeeming an invitation has never had one.
+		// Both therefore sit outside the session, and both share the credential
+		// limiter above -- so an attacker cannot get a fresh allowance by moving
+		// between login, reset and redemption.
+		//
+		// forgot-password answers 202 with the same body whether or not the
+		// address exists; redeem takes a 256-bit single-use token as its whole
+		// authorisation. Neither returns anything about an account it was not
+		// given the secret for.
+		auth.POST("/forgot-password", credentialLimit, handlers.RequestPasswordReset)
+		auth.POST("/redeem", credentialLimit, handlers.RedeemCredential)
+
 		session := auth.Group("")
 		session.Use(middleware.OperatorAuthMiddleware())
 		{
@@ -126,6 +141,53 @@ func NewRouter() *gin.Engine {
 			session.POST("/logout", middleware.RequireCSRF(), handlers.OperatorLogout)
 			session.POST("/password", credentialLimit, middleware.RequireCSRF(),
 				handlers.OperatorChangePassword)
+		}
+	}
+
+	// Platform administration, /api/v1/platform/*.
+	//
+	// THE THIRD CREDENTIAL CLASS, and the answer to GP-01: no API created a
+	// company, so onboarding a customer meant SQL against production.
+	//
+	// A SEPARATE TREE WITH A SEPARATE IDENTITY, not a role above OWNER. Every
+	// function in database/ takes a companyID and every query filters on it, and
+	// that contract is what makes the tenancy boundary checkable at all -- an
+	// operator that could reach several companies would dissolve it everywhere.
+	// So this group authenticates a different table with a different cookie, and
+	// reaches `companies` and operator bootstrap and nothing inside a tenant.
+	//
+	// Both cookies are Path=/, so a browser genuinely offers each to the other's
+	// routes. Neither middleware falls through to the other; both directions are
+	// covered by tests.
+	platform := r.Group("/api/v1/platform")
+	{
+		// Its OWN limiter instance rather than the operator one. A platform
+		// administrator locked out because an attacker was hammering a tenant's
+		// login is an outage of the surface that fixes outages.
+		platformLimit := middleware.LoginRateLimiter()
+
+		platform.POST("/login", platformLimit, handlers.PlatformLogin)
+
+		admin := platform.Group("")
+		admin.Use(middleware.PlatformAuthMiddleware())
+		{
+			admin.GET("/me", handlers.PlatformMe)
+			admin.POST("/logout", middleware.RequirePlatformCSRF(), handlers.PlatformLogout)
+
+			admin.GET("/companies", handlers.PlatformListCompanies)
+			admin.GET("/companies/:company_id", handlers.PlatformGetCompany)
+
+			admin.POST("/companies", middleware.RequirePlatformCSRF(),
+				handlers.PlatformCreateCompany)
+			admin.PUT("/companies/:company_id", middleware.RequirePlatformCSRF(),
+				handlers.PlatformUpdateCompany)
+
+			// Onboarding only: refused into a company that already has an
+			// operator, by a query predicate rather than a check. A platform
+			// identity that could add accounts to a running tenant at any time
+			// would be a standing back door into every customer.
+			admin.POST("/companies/:company_id/operators",
+				middleware.RequirePlatformCSRF(), handlers.PlatformCreateFirstOperator)
 		}
 	}
 
@@ -266,6 +328,17 @@ func NewRouter() *gin.Engine {
 			admin.PUT("/operators/:operator_id", handlers.ConsoleUpdateOperator)
 			admin.PUT("/operators/:operator_id/sites", handlers.ConsoleSetOperatorSites)
 			admin.DELETE("/operators/:operator_id", handlers.ConsoleDeleteOperator)
+
+			// Credential handover (PPL-02, SEC-10). Both mint a single-use link
+			// rather than a password, so an administrator can give somebody an
+			// account, or get them back into one, WITHOUT ever knowing their
+			// credential.
+			//
+			// Separate routes rather than one, because the two are audited
+			// differently and refused differently: an invitation is only valid
+			// for an account that has never signed in.
+			admin.POST("/operators/:operator_id/invite", handlers.ConsoleInviteOperator)
+			admin.POST("/operators/:operator_id/reset", handlers.ConsoleResetOperatorPassword)
 		}
 
 		// Which capabilities the company has at all. OWNER only: this decides

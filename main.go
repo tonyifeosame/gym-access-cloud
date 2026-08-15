@@ -125,6 +125,16 @@ func main() {
 		log.Fatalf("Operator bootstrap: %v", err)
 	}
 
+	// And the first PLATFORM ADMINISTRATOR, on the same terms: only on an
+	// installation that has none, fatal only where it would actually run.
+	//
+	// This is the identity that creates companies. Without it a fresh
+	// installation can serve exactly the one tenant migration 002 created, which
+	// was the audit's first blocker (GP-01).
+	if _, err := bootstrap.EnsureFirstPlatformAdmin(); err != nil {
+		log.Fatalf("Platform bootstrap: %v", err)
+	}
+
 	r := NewRouter()
 
 	// Background maintenance
