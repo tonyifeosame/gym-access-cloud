@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"time"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/middleware"
@@ -134,12 +133,16 @@ func ConsoleListAuditEvents(c *gin.Context) {
 		Offset:     boundedQueryInt(c, "offset", 0, 0, 0),
 	}
 
-	if since := parseTimeQuery(c, "since"); since != nil {
-		query.Since = since
+	since, ok := parseTimeQuery(c, "since")
+	if !ok {
+		return
 	}
-	if until := parseTimeQuery(c, "until"); until != nil {
-		query.Until = until
+	until, ok := parseTimeQuery(c, "until")
+	if !ok {
+		return
 	}
+	query.Since = since
+	query.Until = until
 
 	page, err := database.ListAuditEvents(c.GetInt64("company_id"), query)
 	if err != nil {
@@ -158,20 +161,12 @@ func ConsoleListAuditEvents(c *gin.Context) {
 	})
 }
 
-// parseTimeQuery reads an RFC3339 query parameter.
+// The RFC3339 filter parser both trails use lives in handlers/events.go.
 //
-// An unparseable value is IGNORED rather than rejected. A filter is a narrowing
-// convenience, and failing the whole request because a date was malformed would
-// be less useful than answering the unfiltered question -- which is the same
-// reasoning boundedQueryInt applies to a bad limit.
-func parseTimeQuery(c *gin.Context, name string) *time.Time {
-	raw := c.Query(name)
-	if raw == "" {
-		return nil
-	}
-	parsed, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return nil
-	}
-	return &parsed
-}
+// IT REJECTS A MALFORMED VALUE rather than ignoring it, which is a deliberate
+// reversal of what this file did before. Silently dropping `since=lastweek` and
+// answering with the whole trail looks like an answer to the question that was
+// asked: an operator reading a year of audit history believing they are reading
+// a week is worse off than one who gets an error and fixes the parameter. The
+// same reasoning does NOT apply to `limit`, which is a page size rather than a
+// claim about what the results cover, so boundedQueryInt still clamps.

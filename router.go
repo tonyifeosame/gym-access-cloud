@@ -234,6 +234,16 @@ func NewRouter() *gin.Engine {
 				handlers.ConsoleListPersonPermissions)
 			read.GET("/schedules", handlers.ConsoleListSchedules)
 
+			// The event trail (SEC-08). Grant-scoped inside the handler, the
+			// same way the site and people lists are -- an operator scoped to
+			// one site reads that site's events and no others.
+			//
+			// VIEWER, unlike /console/audit which is ADMIN. An event trail says
+			// what happened in the field; an audit trail names which operators
+			// changed what, which is administrative information about
+			// colleagues rather than the product working.
+			read.GET("/events", handlers.ConsoleListEvents)
+
 			// Site-scoped reads. RequireSiteGrant resolves :site_id inside the
 			// operator's company and puts it in the context, so a site in
 			// another tenant is a 404 and one they are not scoped to is a 403.

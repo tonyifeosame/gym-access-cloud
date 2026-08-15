@@ -181,10 +181,12 @@ func LogDeviceAccess(c *gin.Context) {
 	siteName, _ := c.Get("site_name")
 	name, _ := siteName.(string)
 
+	companyID := c.GetInt64("company_id")
+	siteID := c.GetInt64("site_id")
+	deviceID := c.GetInt64("device_id")
+
 	created, err := database.CreateDeviceAccessLog(
-		c.GetInt64("company_id"),
-		c.GetInt64("site_id"),
-		c.GetInt64("device_id"),
+		companyID, siteID, deviceID,
 		req.EventID, memberID, req.Granted, req.Source, name, req.Message,
 		occurredAt)
 	if err != nil {
@@ -192,6 +194,21 @@ func LogDeviceAccess(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to log access"})
 		return
 	}
+
+	// The typed event trail (APP-04), written BESIDE access_logs rather than
+	// instead of it.
+	//
+	// access_logs is a frozen wire contract -- deployed firmware uploads to it
+	// and the compatibility policy says so -- but its shape cannot carry an
+	// attendance record, a check-in or a reason code, so it cannot be the model
+	// going forward. Both are written from this one handler so the trail and the
+	// log can never disagree about what a terminal reported.
+	//
+	// NEVER FAILS THE REQUEST. The person is already through the door; the
+	// terminal is reporting history. Refusing the upload because the event row
+	// could not be written would make the terminal retry for ever and lose the
+	// access_log that DID commit.
+	recordDoorEvent(c, companyID, siteID, deviceID, req, occurredAt)
 
 	// 200 either way, and `duplicate` says which. A replay MUST NOT be an error:
 	// the terminal retries precisely because it did not hear the first answer,
@@ -201,4 +218,77 @@ func LogDeviceAccess(c *gin.Context) {
 		"recorded":  created,
 		"duplicate": !created,
 	})
+}
+
+// recordDoorEvent writes the typed event for one reported door presentation, and
+// checks the terminal's decision against the platform's own.
+//
+// WHAT THE EVENT RECORDS IS WHAT HAPPENED, NOT WHAT SHOULD HAVE. The decision
+// stored is the terminal's, because that is the one that actually released a
+// lock or did not. Substituting the server's re-evaluation would produce a trail
+// that disagrees with reality -- an operator reading "DENIED" about somebody who
+// demonstrably walked in.
+//
+// The server's own evaluation is recorded BESIDE it, in the payload, when the
+// two differ. That divergence is the actionable signal this platform previously
+// had no way to produce: a terminal running on a stale cache admitting somebody
+// whose permission was revoked while it was offline. It is exactly what the
+// site's offline policy exists to bound, and now it is visible.
+func recordDoorEvent(c *gin.Context, companyID, siteID, deviceID int64,
+	req models.DeviceAccessLogRequest, occurredAt time.Time) {
+
+	eventType := models.EventAccessDenied
+	decision := models.DecisionDenied
+	if req.Granted {
+		eventType = models.EventAccessGranted
+		decision = models.DecisionGranted
+	}
+
+	payload := map[string]any{"source": req.Source}
+	if req.Message != "" {
+		payload["message"] = req.Message
+	}
+
+	// Re-evaluate against the platform's current rules. Best effort: an
+	// evaluation that cannot be completed must not stop the event being
+	// recorded, so the divergence fields are simply absent.
+	reason := ""
+	if verdict, err := database.Authorize(models.AccessRequest{
+		ExternalID: req.MemberID,
+		DeviceID:   deviceID,
+		At:         occurredAt,
+	}); err == nil && verdict != nil {
+		reason = verdict.Reason
+		if verdict.Granted != req.Granted {
+			payload["server_decision"] = map[string]any{
+				"granted": verdict.Granted,
+				"reason":  verdict.Reason,
+			}
+			// Named so it can be alarmed on and searched for. A terminal
+			// admitting somebody the platform would refuse is the failure mode
+			// an offline grace window is a trade against, not an accident.
+			payload["diverged"] = true
+		}
+	}
+
+	personID, _ := database.ResolvePersonRowID(companyID, req.MemberID)
+
+	if _, err := database.RecordAccessEvent(database.AccessEvent{
+		// The device's event id is the idempotency key for BOTH tables, so a
+		// retried upload produces neither a second log nor a second event.
+		PublicID:          req.EventID,
+		CompanyID:         companyID,
+		SiteID:            siteID,
+		DeviceID:          deviceID,
+		PersonID:          personID,
+		SubjectExternalID: req.MemberID,
+		EventType:         eventType,
+		Decision:          decision,
+		ReasonCode:        reason,
+		Payload:           payload,
+		OccurredAt:        occurredAt,
+		OccurredAtTrusted: !occurredAt.IsZero(),
+	}); err != nil {
+		database.LogEventFailure(companyID, deviceID, eventType, err)
+	}
 }
