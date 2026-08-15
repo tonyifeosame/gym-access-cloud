@@ -7,6 +7,7 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { ActivityPage } from './pages/activity/ActivityPage'
 import { ApplicationDetailPage } from './pages/applications/ApplicationDetailPage'
 import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
@@ -81,6 +82,18 @@ export const router = createBrowserRouter([
           </RequireRole>
         ),
       },
+      // ADMIN, matching the server's route group: an audit trail names which
+      // operators did what, which is administrative information rather than
+      // something every viewer needs.
+      {
+        path: 'activity',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <ActivityPage />
+          </RequireRole>
+        ),
+      },
+
       // Your own account and your company, plus signposts to the other
       // configuration scopes. No role gate: it holds your own password.
       { path: 'settings', element: <SettingsPage /> },

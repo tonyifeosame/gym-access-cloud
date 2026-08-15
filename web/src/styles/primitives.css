@@ -1150,6 +1150,44 @@ textarea.field__input {
   }
 }
 
+/* ===========================================================================
+ * Activity / audit
+ * ======================================================================== */
+
+/* Filters laid out as a grid that collapses to one column on a phone. The
+ * console is used standing in front of a door, and a five-across filter row is
+ * unusable there. */
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin-block-end: var(--space-3);
+  align-items: start;
+}
+
+.audit__actor,
+.audit__target {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* A role or target type beside a name. Small and quiet: it qualifies the value
+ * next to it rather than competing with it. */
+.audit__role {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.button--small {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  font-size: 13px;
+}
+
 /* The alternate channel inside a one-time credential panel. */
 .credential__alternate {
   margin-block: var(--space-3);

@@ -39,6 +39,13 @@ export const PLATFORM_NAV: NavItem[] = [
   { id: 'sites', label: 'Sites', path: '/sites', minimumRole: 'VIEWER' },
   { id: 'operators', label: 'Operators', path: '/operators', minimumRole: 'ADMIN' },
   {
+    id: 'activity',
+    label: 'Activity',
+    path: '/activity',
+    // ADMIN, matching the server: the trail names which operators did what.
+    minimumRole: 'ADMIN',
+  },
+  {
     id: 'applications',
     label: 'Applications',
     path: '/settings/applications',

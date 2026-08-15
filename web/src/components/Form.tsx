@@ -79,7 +79,12 @@ export interface TextFieldProps {
   error?: string
   hint?: ReactNode
   required?: boolean
-  type?: 'text' | 'email' | 'password' | 'number'
+  /**
+   * `date` collects a PLAIN DAY, not an instant. The caller decides what that
+   * means — a filter's "to" date usually means the end of that day, not its
+   * midnight — because only the caller knows which edge it wants.
+   */
+  type?: 'text' | 'email' | 'password' | 'number' | 'date'
   placeholder?: string
   autoComplete?: string
   disabled?: boolean

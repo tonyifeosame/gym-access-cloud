@@ -261,6 +261,7 @@ describe('console navigation', () => {
       'terminals',
       'sites',
       'operators',
+      'activity',
       'applications',
       'settings',
     ])
