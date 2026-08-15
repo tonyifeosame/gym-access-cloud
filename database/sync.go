@@ -462,16 +462,40 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 	}
 	defer tx.Rollback()
 
+	superseded, err := compactDeviceBacklogTx(tx, deviceID, "superseded by full sync")
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return superseded, nil
+}
+
+// compactDeviceBacklogTx is the whole of compaction, on the caller's
+// transaction.
+//
+// Factored out for RELOCATION (MoveTerminal), which has to move a terminal
+// between sites and rebuild its state ATOMICALLY. A committed move whose
+// snapshot failed to enqueue would leave a terminal pointing at its new site
+// with an empty queue -- still holding the OLD site's people, and with nothing
+// durable scheduled to say otherwise.
+//
+// `reason` is recorded on the cancelled jobs. Compaction and relocation both
+// supersede work, but an operator reading a cancelled queue should be able to
+// tell "your backlog was collapsed" from "this terminal was moved".
+func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, error) {
 	// Retire whatever was queued. These are superseded, not applied, so they
 	// are CANCELLED rather than COMPLETED -- acknowledged_at stays null and the
 	// "only acked jobs are complete" invariant holds.
 	result, err := tx.Exec(`
 		UPDATE sync_jobs
 		   SET status = 'CANCELLED',
-		       error_message = 'superseded by full sync'
+		       error_message = $2
 		 WHERE device_id = $1
 		   AND acknowledged_at IS NULL
-		   AND status IN ('PENDING', 'FAILED')`, deviceID)
+		   AND status IN ('PENDING', 'FAILED')`, deviceID, reason)
 	if err != nil {
 		return 0, err
 	}
@@ -571,9 +595,6 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		return 0, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return int(superseded), nil
 }
 

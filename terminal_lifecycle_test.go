@@ -278,13 +278,37 @@ func TestTerminalMoveRebuildsTheRoster(t *testing.T) {
 		t.Fatalf("move = %d, want 200 (%v)", code, body)
 	}
 
-	var pendingAfter int
+	// NO WORK FOR THE OLD SITE SURVIVES.
+	//
+	// Asserted by the job's OWN site_id rather than by counting the queue.
+	// sync_jobs records the site each job was enqueued for, so "nothing stale
+	// from Site A is still deliverable" is directly checkable -- and stays
+	// checkable now that the move queues replacement work.
+	//
+	// This assertion used to be `pendingAfter != 0`, i.e. "the queue is empty
+	// afterwards". That was asserting the defect: an empty queue is precisely
+	// what left a relocated terminal running on its cached Site A roster until
+	// a background reconciler happened to run.
+	var stalePending int
 	mustScan(t, `SELECT count(*) FROM sync_jobs j
 	              JOIN devices d ON d.id = j.device_id
-	             WHERE d.serial_number = 'ESP32-RELOCATE' AND j.status = 'PENDING'`,
-		&pendingAfter)
-	if pendingAfter != 0 {
-		t.Errorf("%d jobs for the old site survived the move", pendingAfter)
+	              JOIN sites s ON s.id = j.site_id
+	             WHERE d.serial_number = 'ESP32-RELOCATE'
+	               AND s.site_name = 'Site A'
+	               AND j.status = 'PENDING'`, &stalePending)
+	if stalePending != 0 {
+		t.Errorf("%d jobs for the old site are still deliverable after the move", stalePending)
+	}
+
+	// And they were superseded rather than quietly deleted, so an operator can
+	// still see what was dropped.
+	var cancelled int
+	mustScan(t, `SELECT count(*) FROM sync_jobs j
+	              JOIN devices d ON d.id = j.device_id
+	             WHERE d.serial_number = 'ESP32-RELOCATE' AND j.status = 'CANCELLED'`,
+		&cancelled)
+	if cancelled == 0 {
+		t.Error("the old site's queued work vanished instead of being cancelled")
 	}
 
 	var siteName string

@@ -181,11 +181,16 @@ func ConsoleRetireTerminal(c *gin.Context) {
 // one across that boundary would hand whatever roster it holds to a different
 // tenant.
 //
-// THE ROSTER IS REBUILT, NOT CARRIED. Queued work for the old site is cancelled,
-// placements are marked for removal so the terminal is told to erase templates
-// it may no longer hold, and the device re-converges against the new site. A
-// move that kept the old roster would leave a terminal opening for the previous
-// location's people.
+// THE ROSTER IS REBUILT, NOT CARRIED, AND THE WORK TO DO IT IS QUEUED BEFORE
+// THIS RETURNS. Queued work for the old site is superseded, placements are
+// marked for removal, and a FULL_SYNC snapshot of the NEW site is enqueued in
+// the same transaction as the move.
+//
+// That last part is the whole point and was previously missing: the move used
+// to cancel the queue and enqueue nothing, so the terminal kept admitting the
+// old site's people from its cache until a background reconciler happened to
+// run up to fifteen minutes later -- while this endpoint had already reported
+// success.
 func ConsoleMoveTerminal(c *gin.Context) {
 	var req models.ConsoleTerminalMoveRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -217,12 +222,17 @@ func ConsoleMoveTerminal(c *gin.Context) {
 	}
 
 	recordAudit(c, auditTerminalMoved, auditTargetTerminal, "", serial, gin.H{
-		"site_id": req.SiteID,
+		"site_id":         req.SiteID,
+		"roster_resynced": result.RosterResynced,
 	})
 
 	respondTerminalDetail(c, companyID, serial, gin.H{
 		"moved":                  true,
 		"pending_jobs_cancelled": result.PendingJobsCancelled,
+		// So the console can say the roster is being rebuilt rather than just
+		// that the terminal moved. The difference is whether the old site's
+		// people should still be expected to open it.
+		"roster_resynced": result.RosterResynced,
 	})
 }
 

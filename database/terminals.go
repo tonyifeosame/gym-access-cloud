@@ -52,6 +52,15 @@ type TerminalLifecycleResult struct {
 	// terminal with a backlog silently dropping it would leave an operator
 	// believing those changes had been delivered.
 	PendingJobsCancelled int64
+
+	// RosterResynced reports that a full-sync snapshot was queued in the same
+	// transaction, which is what makes a relocation take effect at the door
+	// rather than at the next reconciler pass.
+	//
+	// Reported so the console can say "moved, and its roster is being rebuilt"
+	// instead of "moved" -- the difference is whether an operator should expect
+	// the old site's people to still open it, and for how long.
+	RosterResynced bool
 }
 
 // ErrTerminalAlreadyRetired reports an operation on a terminal that is gone.
@@ -330,11 +339,6 @@ func MoveTerminal(companyID int64, serial, targetSitePublicID string) (*Terminal
 		return nil, err
 	}
 
-	cancelled, err := cancelQueuedWork(tx, deviceID, "terminal moved to another site")
-	if err != nil {
-		return nil, err
-	}
-
 	// Placements are marked for removal rather than deleted: the templates are
 	// physically still in that sensor, and the terminal has to be told to erase
 	// the ones it may no longer hold. Deleting the rows here would lose the
@@ -346,11 +350,51 @@ func MoveTerminal(companyID int64, serial, targetSitePublicID string) (*Terminal
 		return nil, fmt.Errorf("marking placements for removal after move: %w", err)
 	}
 
+	// THE RELOCATION ITSELF, and the reason this is not merely a cancel.
+	//
+	// This used to call cancelQueuedWork and stop. That left the terminal
+	// pointing at its new site with an EMPTY QUEUE and nothing durable telling
+	// it anything had changed -- so it went on admitting the OLD site's people
+	// from its cached roster until the 15-minute roster reconciler happened to
+	// run. A terminal carried from a warehouse to a boardroom kept the
+	// warehouse's staff list for a quarter of an hour, and the console showed
+	// the move as done.
+	//
+	// A FULL_SYNC snapshot is exactly the right instrument and already exists.
+	// It is a SET DIFFERENCE -- "your local set should be exactly this, remove
+	// anything else" -- so one job simultaneously withdraws the old site's
+	// people and establishes the new site's. The firmware already implements it
+	// that way (sync_engine.cpp, reconcile): a member absent from the roster is
+	// removed AND its template is erased from the sensor, then the removal is
+	// reported back as a REMOVED placement, which converges the rows marked
+	// REMOVING above. No firmware change, and no second protocol.
+	//
+	// ORDER MATTERS. devices.site_id was updated above, and every query in the
+	// snapshot joins sites through it -- so the roster, and the SETTINGS job
+	// carrying the offline policy, are the NEW site's. Compacting before the
+	// move would have snapshotted the site the terminal is leaving.
+	//
+	// IN THIS TRANSACTION, so the move and the work that makes it true commit
+	// together. That is what makes it safe across a crash: either the terminal
+	// has moved and the snapshot is queued, or neither happened.
+	//
+	// IDEMPOTENT AND REDELIVERY-SAFE by construction. Moving twice cancels the
+	// first snapshot and queues a second; a FULL_SYNC applied twice is a no-op
+	// once converged, because it describes a set rather than a change. That is
+	// the property the compaction comment calls out and the reason a "wipe then
+	// re-add" design was rejected there.
+	superseded, err := compactDeviceBacklogTx(tx, deviceID,
+		"superseded by relocation to another site")
+	if err != nil {
+		return nil, fmt.Errorf("queueing relocation snapshot: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
-	result.PendingJobsCancelled = cancelled
+	result.PendingJobsCancelled = int64(superseded)
+	result.RosterResynced = true
 	return &result, nil
 }
 
