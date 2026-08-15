@@ -147,6 +147,28 @@ var BiometricCredentialTypes = map[string]bool{
 	CredentialFace:        true,
 }
 
+// Template formats: how a credential's substance is held.
+//
+// The firmware's CredentialFormat enum (credential_ref.h), spelled identically
+// because these values travel on the wire in both directions.
+const (
+	// TemplateFormatSensorLocal means the material NEVER LEAVES the device that
+	// captured it. A placement on one sensor says nothing usable to any other.
+	// This is what the fitted hardware produces, and it is why such a credential
+	// is substantiated by its placements rather than by stored material -- see
+	// the substance check in migration 020.
+	TemplateFormatSensorLocal = "SENSOR_LOCAL"
+
+	// TemplateFormatVendorTemplate is a template read off a sensor that could,
+	// in principle, be written to another of the same family. NOT PRODUCED by
+	// the current firmware: the fitted driver implements export but not import.
+	TemplateFormatVendorTemplate = "VENDOR_TEMPLATE"
+
+	// TemplateFormatIdentifier is a non-secret value -- a card number, a QR
+	// payload. The only format the platform holds in the clear.
+	TemplateFormatIdentifier = "IDENTIFIER"
+)
+
 // IsCredentialType reports whether code is a credential the platform handles.
 func IsCredentialType(code string) bool { return CredentialTypes[code] }
 
@@ -253,6 +275,33 @@ const (
 	PlacementFailed   = "FAILED"
 	PlacementRemoving = "REMOVING"
 	PlacementRemoved  = "REMOVED"
+)
+
+// DeviceReportablePlacementStates are the placement states a TERMINAL may
+// report. (models.go has DeviceReportableStates for the device's own STATUS;
+// these are different sets about different things, so they are named apart.)
+//
+// A device says what it did: it placed the credential, it could not, or it has
+// erased it. PENDING and REMOVING are the PLATFORM's intentions -- "you should
+// hold this" and "stop holding this" -- and a terminal claiming either would be
+// a device deciding what the platform wants, which is backwards.
+var DeviceReportablePlacementStates = map[string]bool{
+	PlacementPlaced:  true,
+	PlacementFailed:  true,
+	PlacementRemoved: true,
+}
+
+// IsPlacementState reports whether a terminal may report this state.
+func IsPlacementState(state string) bool { return DeviceReportablePlacementStates[state] }
+
+// Placement errors.
+var (
+	ErrPlacementStateInvalid = errors.New(
+		"state must be PLACED, FAILED or REMOVED")
+	ErrPlacementSlotRequired = errors.New(
+		"a PLACED report must name the sensor slot it used")
+	ErrPlacementSubjectRequired = errors.New(
+		"member_id is required")
 )
 
 // CredentialPlacement is the server's record that one credential should be --

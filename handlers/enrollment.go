@@ -86,8 +86,41 @@ func SubmitEnrollmentResult(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// The structured placement, when the caller is a DEVICE and sent one.
+	//
+	// Best effort and deliberately non-fatal: the enrolment itself has already
+	// committed, and failing the response now would make the terminal retry an
+	// enrolment the platform has already accepted -- producing a second
+	// enrolment attempt at the sensor for a finger that is already stored.
+	//
+	// Gated on device_id because this handler is mounted TWICE: once behind the
+	// device credential and once behind the site key. Only the device path knows
+	// which terminal is speaking, and a placement has to name one.
+	response := gin.H{
 		"message":   "Enrollment completed successfully",
 		"member_id": req.MemberID,
-	})
+	}
+
+	if deviceID := c.GetInt64("device_id"); deviceID != 0 && req.Credential != nil {
+		placement, err := database.RecordPlacement(deviceID, database.PlacementReport{
+			ExternalID:     req.MemberID,
+			CredentialType: req.Credential.CredentialType,
+			TemplateFormat: req.Credential.TemplateFormat,
+			Vendor:         req.Credential.Vendor,
+			Slot:           req.Credential.Slot,
+			State:          models.PlacementPlaced,
+		})
+		if err != nil {
+			// Logged, not returned. The locator in `people` is still written and
+			// the terminal still works exactly as it did before placements
+			// existed, so this degrades to the old behaviour rather than to a
+			// broken one.
+			logError(c, "record enrolment placement", err)
+		} else {
+			response["credential_id"] = placement.CredentialID
+			response["placement_id"] = placement.PlacementID
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
 }

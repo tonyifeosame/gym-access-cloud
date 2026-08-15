@@ -492,6 +492,21 @@ func NewRouter() *gin.Engine {
 		// device from the authenticated terminal, so there is no parameter
 		// through which a device could write a log against another site.
 		deviceAPI.POST("/access/log", handlers.LogDeviceAccess)
+
+		// Credentials and placements, reachable with the DEVICE credential.
+		//
+		// The work list a terminal uses to answer "who should I be able to
+		// recognise that I cannot", and the report it sends back. Both are
+		// scoped to the AUTHENTICATED device -- there is no parameter naming a
+		// terminal, so one cannot ask what another is missing or report a
+		// placement onto it.
+		//
+		// NO BIOMETRIC MATERIAL CROSSES EITHER OF THESE. A credential id is a
+		// handle naming which credential a report is about; the substance stays
+		// on the sensor that captured it, which is all the fitted hardware
+		// permits in any case.
+		deviceAPI.GET("/credentials/pending", handlers.GetPendingCredentials)
+		deviceAPI.POST("/credentials/placement", handlers.ReportCredentialPlacement)
 	}
 
 	return r
