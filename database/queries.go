@@ -155,6 +155,17 @@ func CreateMember(companyID int64, member *models.Member) error {
 		return err
 	}
 
+	// The company's default access policy, written BEFORE the fan-out.
+	//
+	// Order matters and is not incidental: the fan-out is scoped by permission
+	// (SEC-04), so a person with no rule yet reaches no terminal. Granting after
+	// enqueueing would produce a person who is authorized but was never sent
+	// anywhere, which is the most confusing possible state -- the console would
+	// show access they have and the door would refuse them.
+	if err := grantDefaultPersonAccessTx(tx, companyID, member.ID); err != nil {
+		return err
+	}
+
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobCreate, member, false); err != nil {
 		return err
 	}

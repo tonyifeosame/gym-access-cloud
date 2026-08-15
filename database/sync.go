@@ -68,17 +68,31 @@ func enqueuePersonChangeTx(tx *sql.Tx, companyID int64, jobType string, member *
 		return fmt.Errorf("building sync payload: %w", err)
 	}
 
+	// SCOPED BY PERMISSION, not by company (SEC-04). `p` and `d` are the
+	// aliases rosterMembershipPredicate expects; see database/roster.go for what
+	// the rule is and why DENY is only subtracted when it is unconditional.
+	//
+	// A DELETE is exempt from the predicate. A person being removed, deactivated
+	// or losing their permission must be withdrawn from terminals that were
+	// holding them -- and by the time this runs, the rule that put them there
+	// may already be gone, so testing membership would skip exactly the
+	// terminals that need telling.
+	membership := rosterMembershipPredicate
+	if jobType == "DELETE" || deleted {
+		membership = "TRUE"
+	}
+
 	query := `INSERT INTO sync_jobs
 	          (site_id, device_id, job_type, entity_type, entity_id, entity_external_id,
 	           payload, protocol_version, status, next_attempt_at)
 	          SELECT d.site_id, d.id, $1, 'PERSON', $2, $3, $4::jsonb, $5, 'PENDING', CURRENT_TIMESTAMP
 	            FROM devices d
 	            JOIN sites s ON s.id = d.site_id
+	            JOIN people p ON p.id = $2
 	           WHERE s.company_id = $6
-	             AND d.active = TRUE
-	             AND d.deleted_at IS NULL
-	             AND d.status <> 'DISABLED'
-	             AND s.deleted_at IS NULL`
+	             AND s.deleted_at IS NULL
+	             AND ` + deviceIsSyncable + `
+	             AND (` + membership + `)`
 
 	_, err = tx.Exec(query, jobType, member.ID, member.MemberID, payload,
 		models.SyncProtocolVersion, companyID)
@@ -214,7 +228,10 @@ func enqueueBootstrapJobs(db execer, deviceID int64) (int, error) {
 	            JOIN people p ON p.company_id = s.company_id
 	           WHERE d.id = $2
 	             AND d.deleted_at IS NULL
-	             AND p.deleted_at IS NULL`
+	             AND p.deleted_at IS NULL
+	             -- SEC-04: a newly registered terminal is seeded with the people
+	             -- its permissions cover, not with the company's whole roster.
+	             AND ` + rosterMembershipPredicate
 
 	result, err := db.Exec(query, models.SyncProtocolVersion, deviceID)
 	if err != nil {
@@ -471,10 +488,16 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  LEFT JOIN LATERAL (
+		       -- SCOPED BY PERMISSION (SEC-04). The snapshot is the AUTHORITATIVE
+		       -- roster, so listing the whole company here would make the terminal
+		       -- immediately re-add everybody the change fan-out correctly withheld
+		       -- -- the recovery path would silently undo the scoping.
 		       SELECT count(*) AS n,
 		              jsonb_agg(p.external_id ORDER BY p.external_id) AS ids
 		         FROM people p
-		        WHERE p.company_id = s.company_id AND p.deleted_at IS NULL
+		        WHERE p.company_id = s.company_id
+		          AND p.deleted_at IS NULL
+		          AND `+rosterMembershipPredicate+`
 		  ) roster ON TRUE
 		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
 		deviceID, models.SyncProtocolVersion)
@@ -500,7 +523,8 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  JOIN people p ON p.company_id = s.company_id
-		 WHERE d.id = $1 AND d.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		 WHERE d.id = $1 AND d.deleted_at IS NULL AND p.deleted_at IS NULL
+		   AND `+rosterMembershipPredicate,
 		deviceID, models.SyncProtocolVersion)
 	if err != nil {
 		return 0, fmt.Errorf("enqueueing snapshot records: %w", err)

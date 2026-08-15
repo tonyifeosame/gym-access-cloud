@@ -411,8 +411,18 @@ func CreateCompany(in NewCompany) (*models.PlatformCompany, error) {
 
 	var company models.PlatformCompany
 	err := DB.QueryRow(`
-		INSERT INTO companies (name, slug, contact_email, timezone, active)
-		VALUES ($1, $2, NULLIF($3, ''), $4, TRUE)
+		-- default_person_access is NONE for a company created here, which is NOT
+		-- the column's default (018_default_person_access.sql).
+		--
+		-- The column defaults to COMPANY_ALLOW because that is what the ALTER had
+		-- to give existing rows to preserve their behaviour. A tenant created
+		-- after the authorization engine exists has no behaviour to preserve, so
+		-- it starts deny-by-default: a person added to a new customer's roster
+		-- opens nothing until somebody says otherwise. The permissive setting is
+		-- only ever a legacy carry-over, and it is visible and changeable.
+		INSERT INTO companies (name, slug, contact_email, timezone, active,
+		                       default_person_access)
+		VALUES ($1, $2, NULLIF($3, ''), $4, TRUE, 'NONE')
 		RETURNING public_id, name, slug, COALESCE(contact_email, ''), timezone,
 		          active, created_at`,
 		name, slug, strings.TrimSpace(in.ContactEmail), timezone).
