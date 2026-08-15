@@ -12,12 +12,15 @@ import type {
   Terminal,
   TerminalDetail,
 } from '../api/types'
+import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
   makeAuditRecord,
   makeCredentialToken,
   makeFirmwareVersion,
   makeOperatorAccount,
   makePerson,
+  makePlatformCompany,
+  makePlatformSession,
   makeSession,
   makeSite,
   makeTerminal,
@@ -54,6 +57,10 @@ interface ServerState {
   settings: Record<string, { settings: Record<string, unknown>; settings_version: number }>
   audit: AuditRecord[]
   firmware: FirmwareVersion[]
+  /** The platform administrator's session — a DIFFERENT identity from `session`. */
+  platformSession: PlatformSession | null
+  platformLoginStatus: number
+  companies: PlatformCompany[]
   /**
    * What each redemption token is worth. Absent means unknown, which is what an
    * invented token gets — so a test does not have to register a failure to
@@ -87,6 +94,9 @@ function initialState(): ServerState {
     settings: {},
     audit: [],
     firmware: [],
+    platformSession: null,
+    platformLoginStatus: 200,
+    companies: [],
     redeemable: {},
     failNext: {},
     requests: [],
@@ -162,6 +172,35 @@ function reachableSiteIds(): string[] | null {
   const session = state.session
   if (!session || session.all_sites) return null
   return session.sites.map((grant) => grant.site_id)
+}
+
+/**
+ * The platform surface's own guard.
+ *
+ * SEPARATE FROM `guard`, and that separation is the thing being modelled: an
+ * operator session must not authenticate a platform route and vice versa. Both
+ * cookies are Path=/ in the real deployment, so the browser genuinely offers
+ * each to the other's routes and only the middleware names keep them apart — a
+ * mock that shared one session would hide exactly that.
+ */
+function guardPlatform(request: Request): Response | null {
+  if (!state.platformSession) return unauthorized()
+  const method = request.method.toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    if (!request.headers.get('X-CSRF-Token')) {
+      return json({ error: 'CSRF token required' }, 403)
+    }
+  }
+  return null
+}
+
+/** Mirrors models.NormalizeSlug. */
+function normalizeSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
 }
 
 /** The delivery notice every minted token is returned beside. */
@@ -310,6 +349,176 @@ export const handlers = [
     // in. A mock that returned a session would let a console ship that skipped
     // the login the new credential has to be exercised at.
     return noContent()
+  }),
+
+  // --- platform administration ---------------------------------------------
+  //
+  // A SEPARATE IDENTITY WITH A SEPARATE SESSION, reproduced here as a separate
+  // piece of state. A mock that let the operator session authenticate these
+  // routes would let a console ship that assumed one login served both, and the
+  // failure would only appear against the real API.
+
+  http.post('*/api/v1/platform/login', async ({ request }) => {
+    record(request)
+    await request.json()
+
+    if (state.platformLoginStatus !== 200) {
+      return json({ error: 'Invalid email or password' }, state.platformLoginStatus)
+    }
+
+    state.platformSession = state.platformSession ?? makePlatformSession()
+    return json(state.platformSession)
+  }),
+
+  http.get('*/api/v1/platform/me', ({ request }) => {
+    record(request)
+    if (!state.platformSession) return unauthorized()
+    return json(state.platformSession)
+  }),
+
+  http.post('*/api/v1/platform/logout', ({ request }) => {
+    record(request)
+    state.platformSession = null
+    return noContent()
+  }),
+
+  http.get('*/api/v1/platform/companies', ({ request }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const failure = takeFailure('platform-companies')
+    if (failure) return json({ error: 'Failed to retrieve companies' }, failure)
+
+    return json({ count: state.companies.length, companies: state.companies })
+  }),
+
+  http.post('*/api/v1/platform/companies', async ({ request }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const body = (await request.json()) as {
+      name?: string
+      slug?: string
+      contact_email?: string
+      timezone?: string
+    }
+    const name = (body.name ?? '').trim()
+    if (!name) return json({ error: 'company name is required' }, 400)
+
+    // Derived from the name when absent, exactly as the server does it — a
+    // console that sent its own derivation would have a second implementation
+    // of the rule to keep in step.
+    const slug = (body.slug ?? '').trim() || normalizeSlug(name)
+    if (state.companies.some((company) => company.slug === slug)) {
+      return json({ error: 'a company with that slug already exists' }, 409)
+    }
+
+    const company = makePlatformCompany({
+      id: `company-${state.companies.length + 1}`,
+      name,
+      slug,
+      contact_email: body.contact_email,
+      timezone: (body.timezone ?? '').trim() || 'UTC',
+      // Created EMPTY and with no operator. The whole point of the console's
+      // onboarding checklist is that this state exists and is visible.
+      site_count: 0,
+      terminal_count: 0,
+      person_count: 0,
+      operator_count: 0,
+    })
+    state.companies = [...state.companies, company]
+    return json(company, 201)
+  }),
+
+  http.get('*/api/v1/platform/companies/:companyId', ({ request, params }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const company = state.companies.find((entry) => entry.id === String(params.companyId))
+    if (!company) return json({ error: 'Company not found' }, 404)
+    return json(company)
+  }),
+
+  http.put('*/api/v1/platform/companies/:companyId', async ({ request, params }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const companyId = String(params.companyId)
+    const existing = state.companies.find((entry) => entry.id === companyId)
+    if (!existing) return json({ error: 'Company not found' }, 404)
+
+    const failure = takeFailure('platform-update-company')
+    if (failure) return json({ error: 'Failed to update the company' }, failure)
+
+    const body = (await request.json()) as Record<string, unknown>
+    const updated: PlatformCompany = {
+      ...existing,
+      name: typeof body.name === 'string' ? body.name : existing.name,
+      contact_email:
+        typeof body.contact_email === 'string' ? body.contact_email : existing.contact_email,
+      timezone: typeof body.timezone === 'string' && body.timezone ? body.timezone : existing.timezone,
+      active: typeof body.active === 'boolean' ? body.active : existing.active,
+      event_retention_days:
+        typeof body.event_retention_days === 'number'
+          ? body.event_retention_days
+          : existing.event_retention_days,
+      audit_retention_days:
+        typeof body.audit_retention_days === 'number'
+          ? body.audit_retention_days
+          : existing.audit_retention_days,
+    }
+    state.companies = state.companies.map((entry) => (entry.id === companyId ? updated : entry))
+    return json(updated)
+  }),
+
+  http.post('*/api/v1/platform/companies/:companyId/operators', async ({ request, params }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const companyId = String(params.companyId)
+    const company = state.companies.find((entry) => entry.id === companyId)
+    if (!company) return json({ error: 'Company not found' }, 404)
+
+    // ONLY INTO A COMPANY THAT HAS NO OPERATOR. The rule that stops this being a
+    // standing back door into every customer, reproduced so a console cannot
+    // ship offering the action for a running tenant.
+    if (company.operator_count > 0) {
+      return json(
+        {
+          error:
+            'That company already has an operator. Further accounts are created ' +
+            'from its own console.',
+        },
+        409,
+      )
+    }
+
+    const body = (await request.json()) as { email?: string; full_name?: string; password?: string }
+    if (!body.email) return json({ error: 'email is required' }, 400)
+
+    state.companies = state.companies.map((entry) =>
+      entry.id === companyId ? { ...entry, operator_count: 1 } : entry,
+    )
+
+    const response: Record<string, unknown> = {
+      operator: {
+        id: 'operator-owner-1',
+        email: body.email,
+        full_name: body.full_name ?? '',
+        role: 'OWNER',
+      },
+      must_change_password: true,
+    }
+    if (!body.password) {
+      response.invitation = makeCredentialToken({ purpose: 'INVITE' })
+      response.delivery = DELIVERY_NOTICE
+    }
+    return json(response, 201)
   }),
 
   // --- company ------------------------------------------------------------
@@ -1252,6 +1461,8 @@ export {
   makeFirmwareVersion,
   makeOperatorAccount,
   makePerson,
+  makePlatformCompany,
+  makePlatformSession,
   makeSite,
   makeTerminal,
 }

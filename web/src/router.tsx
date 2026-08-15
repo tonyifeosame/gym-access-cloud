@@ -13,6 +13,11 @@ import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
 import { OperatorsListPage } from './pages/operators/OperatorsListPage'
 import { PeopleListPage } from './pages/people/PeopleListPage'
+import { CompaniesPage } from './platform/CompaniesPage'
+import { CompanyDetailPage } from './platform/CompanyDetailPage'
+import { PlatformLoginPage } from './platform/PlatformLoginPage'
+import { PlatformSessionProvider } from './platform/PlatformSessionProvider'
+import { PlatformShell } from './platform/PlatformShell'
 import { SettingsPage } from './pages/settings/SettingsPage'
 import { PersonDetailPage } from './pages/people/PersonDetailPage'
 import { SiteDetailPage } from './pages/sites/SiteDetailPage'
@@ -141,6 +146,36 @@ export const router = createBrowserRouter([
           />
         ),
       },
+    ],
+  },
+
+  /*
+    PLATFORM ADMINISTRATION, a separate tree for a separate identity.
+
+    Not nested under the console's RequireAuth, and not reachable from its
+    navigation: this authenticates a different table with a different cookie, and
+    a tenant operator has no business seeing that the surface exists. Its
+    provider is mounted here rather than at the app root so that a console user
+    never issues a request to /api/v1/platform/me at all.
+  */
+  {
+    path: '/platform/login',
+    element: (
+      <PlatformSessionProvider>
+        <PlatformLoginPage />
+      </PlatformSessionProvider>
+    ),
+  },
+  {
+    path: '/platform',
+    element: (
+      <PlatformSessionProvider>
+        <PlatformShell />
+      </PlatformSessionProvider>
+    ),
+    children: [
+      { index: true, element: <CompaniesPage /> },
+      { path: 'companies/:companyId', element: <CompanyDetailPage /> },
     ],
   },
 

@@ -9,6 +9,7 @@ import type {
   Site,
   Terminal,
 } from '../api/types'
+import type { PlatformCompany, PlatformSession } from '../platform/types'
 
 /**
  * Session fixtures.
@@ -173,6 +174,58 @@ export function makeFirmwareVersion(
     release_channel: 'STABLE',
     is_mandatory: false,
     is_current: true,
+    created_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * The platform administrator's session.
+ *
+ * A DIFFERENT SHAPE from an operator session, deliberately: no company, no role,
+ * no site grants and no applications. There is nothing about a tenant on it,
+ * because this identity reaches `companies` and nothing inside them.
+ */
+export function makePlatformSession(
+  overrides: Partial<PlatformSession> = {},
+): PlatformSession {
+  return {
+    admin: {
+      id: 'platform-admin-1',
+      email: 'vendor@accesslink.example',
+      full_name: 'Vendor Support',
+      active: true,
+    },
+    csrf_token: 'platform-csrf-token',
+    session_expires_at: '2030-01-01T00:00:00Z',
+    session_expires_in_seconds: 604800,
+    ...overrides,
+  }
+}
+
+/**
+ * A tenant as the platform sees it.
+ *
+ * Retention defaults to NULL, which means "keep for ever" — the state a company
+ * is actually created in. Defaulting it to a number would let a console ship
+ * that never rendered the indefinite case.
+ */
+export function makePlatformCompany(
+  overrides: Partial<PlatformCompany> = {},
+): PlatformCompany {
+  return {
+    id: 'company-1',
+    name: 'Northwind Logistics',
+    slug: 'northwind',
+    contact_email: 'ops@northwind.example',
+    timezone: 'Africa/Lagos',
+    active: true,
+    event_retention_days: null,
+    audit_retention_days: null,
+    site_count: 2,
+    terminal_count: 5,
+    person_count: 120,
+    operator_count: 3,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   }

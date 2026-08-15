@@ -1,4 +1,4 @@
-import { getCsrfToken } from './csrf'
+import { getCsrfToken, type CredentialScope } from './csrf'
 
 /**
  * The HTTP client.
@@ -88,6 +88,17 @@ interface RequestOptions {
   signal?: AbortSignal
   /** Suppresses the global 401 handler, for the boot-time session probe. */
   expectUnauthenticated?: boolean
+  /**
+   * Which credential class this request belongs to. Decides WHICH CSRF token is
+   * sent, and whether a 401 ends the operator session.
+   *
+   * Defaults to `operator`, which is every call in the tenant console. The
+   * platform-administration tree passes `platform`: it authenticates a different
+   * table with a different cookie, and a 401 there says nothing about whether an
+   * operator is still signed in — routing it to the operator's unauthenticated
+   * handler would sign somebody out of a console they were using.
+   */
+  scope?: CredentialScope
 }
 
 export async function request<T>(
@@ -101,8 +112,10 @@ export async function request<T>(
     headers['Content-Type'] = 'application/json'
   }
 
+  const scope = options.scope ?? 'operator'
+
   if (!SAFE_METHODS.has(method)) {
-    const token = getCsrfToken()
+    const token = getCsrfToken(scope)
     if (token) {
       headers['X-CSRF-Token'] = token
     }
@@ -120,7 +133,11 @@ export async function request<T>(
 
   const requestId = response.headers.get('X-Request-ID')
 
-  if (response.status === 401 && !options.expectUnauthenticated) {
+  // Only the OPERATOR session has a global recovery. A 401 on a platform route
+  // means the platform administrator's session ended, which is a different
+  // identity entirely — handing it to the operator's handler would clear a
+  // console session that is perfectly valid.
+  if (response.status === 401 && scope === 'operator' && !options.expectUnauthenticated) {
     onUnauthenticated?.()
   }
 

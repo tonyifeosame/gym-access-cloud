@@ -1151,6 +1151,99 @@ textarea.field__input {
 }
 
 /* ===========================================================================
+ * Onboarding checklist
+ *
+ * A step that is DONE and a step that is somebody else's work read differently
+ * without relying on colour: the done marker is a badge with its own text, and
+ * the left edge is a second, redundant signal.
+ * ======================================================================== */
+
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.checklist__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  border-inline-start: 3px solid var(--border);
+}
+
+.checklist__item[data-done='true'] {
+  border-inline-start-color: var(--success);
+}
+
+.checklist__text {
+  min-width: 0;
+}
+
+.checklist__title {
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.checklist__detail {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 62ch;
+}
+
+@media (max-width: 680px) {
+  .checklist__item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
+}
+
+/* ===========================================================================
+ * Platform administration
+ *
+ * Marked, not merely different. A vendor engineer may hold a console session
+ * and a platform session in the same browser at once, and the mistake that
+ * follows from confusing the two surfaces is suspending a CUSTOMER when they
+ * meant to suspend a site.
+ * ======================================================================== */
+
+/* A bordered chip rather than a filled one, matching how every other warning
+ * surface in this console is drawn -- and keeping the text on the ordinary page
+ * background, where its contrast is already known to pass. */
+.topbar__scope {
+  margin-inline-start: var(--space-2);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* A second, redundant signal: the whole bar is edged. Colour is never the only
+ * thing distinguishing the two surfaces -- the chip above says which it is in
+ * words. */
+.shell--platform .topbar {
+  border-block-end: 2px solid var(--warning);
+}
+
+.shell--platform .shell__main {
+  /* No side navigation on this surface, so the page owns the full width. */
+  width: 100%;
+}
+
+/* ===========================================================================
  * Activity / audit
  * ======================================================================== */
 
