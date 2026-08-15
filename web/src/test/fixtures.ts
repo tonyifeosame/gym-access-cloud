@@ -1,5 +1,8 @@
 import type {
   AuditRecord,
+  FieldEvent,
+  Permission,
+  Schedule,
   ConfiguredApplication,
   CredentialToken,
   FirmwareVersion,
@@ -227,6 +230,75 @@ export function makePlatformCompany(
     person_count: 120,
     operator_count: 3,
     created_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * One access rule.
+ *
+ * Defaults to a SITE-scoped ALLOW with no schedule and no validity window,
+ * which is the plainest rule the model can express — every awkward case
+ * (a deny, an expiry, a schedule) is then a visible override in the test that
+ * needs it rather than something buried in the fixture.
+ */
+export function makePermission(overrides: Partial<Permission> = {}): Permission {
+  return {
+    id: 'permission-1',
+    person_id: 'P-0001',
+    scope_type: 'SITE',
+    site_id: 'site-a',
+    site_name: 'Lagos Depot',
+    effect: 'ALLOW',
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * A schedule.
+ *
+ * Defaults to weekdays 09:00-17:00 — five bits, not 127 — because a mask that
+ * happens to be "every day" would let a broken day-mask conversion pass.
+ */
+export function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
+  return {
+    id: 'schedule-1',
+    name: 'Office hours',
+    windows: [{ days_of_week: 31, start_time: '09:00', end_time: '17:00' }],
+    permission_count: 0,
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * One thing that happened at a terminal.
+ *
+ * Defaults to a DENIAL, deliberately: a grant is a door opening and a denial is
+ * somebody standing outside who expected not to be, which is the case the
+ * screens exist to explain.
+ */
+export function makeEvent(overrides: Partial<FieldEvent> = {}): FieldEvent {
+  return {
+    id: 'event-1',
+    event_type: 'ACCESS_DENIED',
+    decision: 'DENIED',
+    reason: 'NO_PERMISSION',
+    application: 'ACCESS_CONTROL',
+    site_name: 'Lagos Depot',
+    device_serial: 'AT-0001',
+    device_name: 'North Gate',
+    person_id: 'person-public-1',
+    person_name: 'Ada Okonkwo',
+    subject_external_id: 'P-0001',
+    occurred_at: '2026-08-15T08:00:00Z',
+    recorded_at: '2026-08-15T08:00:00Z',
+    occurred_at_trusted: true,
     ...overrides,
   }
 }

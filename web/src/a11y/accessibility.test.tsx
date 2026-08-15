@@ -8,6 +8,9 @@ import type { Role } from '../api/types'
 import { RequireAuth } from '../auth/guards'
 import { AppShell } from '../layout/AppShell'
 import { ActivityPage } from '../pages/activity/ActivityPage'
+import { SchedulesPage } from '../pages/access/SchedulesPage'
+import { EventsPage } from '../pages/events/EventsPage'
+import { PersonDetailPage } from '../pages/people/PersonDetailPage'
 import { ApplicationsPage } from '../pages/applications/ApplicationsPage'
 import { DashboardPage } from '../pages/DashboardPage'
 import { OperatorsListPage } from '../pages/operators/OperatorsListPage'
@@ -18,8 +21,11 @@ import { TerminalsListPage } from '../pages/terminals/TerminalsListPage'
 import {
   makeApplication,
   makeAuditRecord,
+  makeEvent,
   makeOperatorAccount,
+  makePermission,
   makePerson,
+  makeSchedule,
   makeSession,
   makeSite,
   makeTerminal,
@@ -86,6 +92,9 @@ function signIn(role: Role = 'OWNER') {
     sites: SITES,
     terminals: TERMINALS,
     people: [makePerson(), makePerson({ id: 'p2', external_id: 'P-0002', full_name: 'Bem Tor' })],
+    permissions: [makePermission({ person_id: 'P-0001' })],
+    schedules: [makeSchedule({ permission_count: 1 })],
+    events: [makeEvent()],
     operators: [makeOperatorAccount(), makeOperatorAccount({ id: 'op-2', email: 'a@b.example' })],
     applications: [makeApplication()],
     audit: [makeAuditRecord()],
@@ -123,6 +132,9 @@ function renderInShell(path: string, client = makeTestQueryClient()) {
           { path: 'sites', element: <SitesListPage /> },
           { path: 'operators', element: <OperatorsListPage /> },
           { path: 'activity', element: <ActivityPage /> },
+          { path: 'events', element: <EventsPage /> },
+          { path: 'access/schedules', element: <SchedulesPage /> },
+          { path: 'people/:externalId', element: <PersonDetailPage /> },
           { path: 'settings/applications', element: <ApplicationsPage /> },
         ],
       },
@@ -147,6 +159,9 @@ describe('every screen passes the automated sweep', () => {
     ['sites', '/sites', () => screen.findByText(SITE_A.site_name)],
     ['operators', '/operators', () => screen.findByText('viewer@example.com')],
     ['activity', '/activity', () => screen.findByRole('heading', { name: 'Activity' })],
+    ['events', '/events', () => screen.findByRole('heading', { name: 'Events' })],
+    ['schedules', '/access/schedules', () => screen.findByRole('heading', { name: 'Schedules' })],
+    ['one person', '/people/P-0001', () => screen.findByRole('heading', { name: 'Access' })],
     ['applications', '/settings/applications', () => screen.findByText('Access Control')],
   ]
 

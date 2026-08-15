@@ -36,6 +36,21 @@ export const PLATFORM_NAV: NavItem[] = [
   { id: 'dashboard', label: 'Overview', path: '/', minimumRole: 'VIEWER' },
   { id: 'people', label: 'People', path: '/people', minimumRole: 'VIEWER' },
   { id: 'terminals', label: 'Terminals', path: '/terminals', minimumRole: 'VIEWER' },
+  {
+    id: 'events',
+    label: 'Events',
+    path: '/events',
+    // VIEWER: "why was she refused" is a question somebody at a front desk has
+    // to be able to answer without an administrator.
+    minimumRole: 'VIEWER',
+  },
+  {
+    id: 'schedules',
+    label: 'Schedules',
+    path: '/access/schedules',
+    // Readable by anyone; the write controls carry their own MANAGER gate.
+    minimumRole: 'VIEWER',
+  },
   { id: 'sites', label: 'Sites', path: '/sites', minimumRole: 'VIEWER' },
   { id: 'operators', label: 'Operators', path: '/operators', minimumRole: 'ADMIN' },
   {

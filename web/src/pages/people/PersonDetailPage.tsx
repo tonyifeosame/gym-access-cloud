@@ -10,6 +10,7 @@ import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components
 import { Timestamp } from '../../components/Timestamp'
 import { useDeletePerson, usePerson, useUpdatePerson } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { PersonAccessPanel } from './PersonAccessPanel'
 import { PersonFormDialog } from './PersonFormDialog'
 
 /**
@@ -146,6 +147,15 @@ export function PersonDetailPage() {
           </p>
         </article>
       </section>
+
+      {/*
+        ACCESS BEFORE CREDENTIAL, deliberately. "Where may this person go" is the
+        question somebody opens this page to answer, and the credential is the
+        mechanism by which they prove who they are once they are permitted. A
+        person with a credential and no rules reaches nothing, and putting the
+        credential first would suggest the opposite.
+      */}
+      <PersonAccessPanel externalId={person.external_id} />
 
       {/* --- credential ----------------------------------------------------- */}
       <section className="panel" aria-labelledby="person-credential-heading">

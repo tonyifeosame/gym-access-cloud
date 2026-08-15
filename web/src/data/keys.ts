@@ -1,4 +1,19 @@
-import type { AuditQuery, PeopleQuery } from '../api/types'
+import type { AuditQuery, EventQuery, PeopleQuery } from '../api/types'
+
+/**
+ * Normalises an event filter into a stable cache key.
+ *
+ * Every field, sorted, with absent and empty collapsed — so `{}` and
+ * `{q: ''}` are one entry rather than two, and adding a filter to the type
+ * cannot silently split the cache because somebody forgot to list it here.
+ */
+function normaliseEventQuery(query: EventQuery): Record<string, string | number> {
+  const entries = Object.entries(query)
+    .filter(([, value]) => value !== undefined && value !== '')
+    .map(([key, value]) => [key, value as string | number] as const)
+    .sort(([a], [b]) => a.localeCompare(b))
+  return Object.fromEntries(entries)
+}
 
 /**
  * Query keys, in one place.
@@ -73,6 +88,36 @@ export const keys = {
   applications: {
     all: [ROOT, 'applications'] as const,
     list: () => [ROOT, 'applications', 'list'] as const,
+  },
+
+  /**
+   * Access-control rules, keyed by the PERSON they belong to.
+   *
+   * There is no company-wide permission list endpoint, so this hierarchy mirrors
+   * the API rather than inventing a shape the server cannot serve. Granting or
+   * revoking invalidates one person's rules and nothing else.
+   */
+  permissions: {
+    all: [ROOT, 'permissions'] as const,
+    forPerson: (externalId: string) => [ROOT, 'permissions', 'person', externalId] as const,
+  },
+
+  schedules: {
+    all: [ROOT, 'schedules'] as const,
+    list: () => [ROOT, 'schedules', 'list'] as const,
+  },
+
+  /**
+   * Field events — the door log.
+   *
+   * Separate from `audit`: different endpoint, different role, different
+   * meaning. Collapsing them would let one invalidation refresh the other and
+   * make "what happened at the door" and "what an operator changed" share a
+   * cache entry.
+   */
+  events: {
+    all: [ROOT, 'events'] as const,
+    list: (query: EventQuery = {}) => [ROOT, 'events', 'list', normaliseEventQuery(query)] as const,
   },
 
   /**

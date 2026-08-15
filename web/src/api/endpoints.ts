@@ -1,6 +1,8 @@
 import { ApiError, api } from './client'
 import { setCsrfToken } from './csrf'
 import type {
+  AccessDecision,
+  AccessEvaluationRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
@@ -13,6 +15,8 @@ import type {
   CreateSiteResponse,
   CreateOperatorRequest,
   CreateOperatorResponse,
+  EventPage,
+  EventQuery,
   FirmwareResponse,
   FirmwareVersion,
   FleetSummary,
@@ -23,10 +27,16 @@ import type {
   PasswordResetAcceptedResponse,
   PeoplePage,
   PeopleQuery,
+  Permission,
+  PermissionRequest,
+  PermissionsResponse,
   Person,
   PersonRequest,
   ResetResponse,
   RetireSiteResponse,
+  Schedule,
+  ScheduleRequest,
+  SchedulesResponse,
   RotateSiteKeyResponse,
   Session,
   Site,
@@ -468,6 +478,107 @@ export function updateApplication(
     `/api/v1/console/applications/${encodeURIComponent(code)}`,
     body,
   )
+}
+
+// ---------------------------------------------------------------------------
+// Access control
+// ---------------------------------------------------------------------------
+
+/**
+ * Every rule about one person. VIEWER server-side.
+ *
+ * Readable by anyone, deliberately: "why was she refused" is a question somebody
+ * at a front desk has to be able to answer, and the rules are not secret from
+ * the people administering the deployment.
+ */
+export function fetchPersonPermissions(externalId: string): Promise<PermissionsResponse> {
+  return api.get<PermissionsResponse>(
+    `/api/v1/console/people/${encodeURIComponent(externalId)}/permissions`,
+  )
+}
+
+/** Grants (or denies) at one scope. MANAGER — this is day-to-day work. */
+export function grantPermission(
+  externalId: string,
+  body: PermissionRequest,
+): Promise<Permission> {
+  return api.post<Permission>(
+    `/api/v1/console/people/${encodeURIComponent(externalId)}/permissions`,
+    body,
+  )
+}
+
+/** Addressed by the permission's own id, not by the person's. */
+export function revokePermission(permissionId: string): Promise<void> {
+  return api.delete<void>(`/api/v1/console/permissions/${encodeURIComponent(permissionId)}`)
+}
+
+export function fetchSchedules(): Promise<SchedulesResponse> {
+  return api.get<SchedulesResponse>('/api/v1/console/schedules')
+}
+
+export function createSchedule(body: ScheduleRequest): Promise<Schedule> {
+  return api.post<Schedule>('/api/v1/console/schedules', body)
+}
+
+export function updateSchedule(scheduleId: string, body: ScheduleRequest): Promise<Schedule> {
+  return api.put<Schedule>(
+    `/api/v1/console/schedules/${encodeURIComponent(scheduleId)}`,
+    body,
+  )
+}
+
+/**
+ * Deletes a schedule.
+ *
+ * REFUSED WITH 409 while any permission still references it. Cascading would
+ * silently WIDEN every rule that used it — a permission restricted to office
+ * hours would become one with no time restriction at all — so the server refuses
+ * and the console has to say which rules are in the way.
+ */
+export function deleteSchedule(scheduleId: string): Promise<{ deleted: boolean }> {
+  return api.delete<{ deleted: boolean }>(
+    `/api/v1/console/schedules/${encodeURIComponent(scheduleId)}`,
+  )
+}
+
+/**
+ * "Would this person get in at this terminal, right now, and why."
+ *
+ * WRITES NO EVENT. A preview that recorded a door event would put a
+ * presentation that never happened into the trail an attendance report is built
+ * from — so this is a POST because it carries a body, not because it changes
+ * anything.
+ */
+export function evaluateAccess(
+  serial: string,
+  body: AccessEvaluationRequest,
+): Promise<AccessDecision> {
+  return api.post<AccessDecision>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/evaluate`,
+    body,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Field events
+// ---------------------------------------------------------------------------
+
+/**
+ * The door log. VIEWER, and narrowed by site grant inside the handler.
+ *
+ * VIEWER unlike the audit trail, which is ADMIN, and the distinction is the
+ * point: an event trail says what happened in the field, while an audit trail
+ * names which operators changed what — administrative information about
+ * colleagues rather than the product working.
+ */
+export function fetchEvents(query: EventQuery = {}): Promise<EventPage> {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') params.set(key, String(value))
+  }
+  const suffix = params.size > 0 ? `?${params}` : ''
+  return api.get<EventPage>(`/api/v1/console/events${suffix}`)
 }
 
 // ---------------------------------------------------------------------------

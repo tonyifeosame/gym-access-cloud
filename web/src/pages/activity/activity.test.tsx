@@ -295,16 +295,17 @@ describe('filtering', () => {
 // ---------------------------------------------------------------------------
 
 describe('what this page does not cover', () => {
-  it('says the door log is a separate stream that is not here yet', async () => {
+  it('sends somebody looking for the door log to the door log', async () => {
     // Somebody investigating why a person could not get in will come here
-    // first. Leaving them to conclude the trail is broken is the failure.
+    // first. Leaving them to conclude the trail is broken is the failure, and
+    // so is telling them the history does not exist once it does.
     signIn()
     renderActivity()
 
     expect(
       await screen.findByText('This is the operator trail, not the door log'),
     ).toBeInTheDocument()
-    expect(screen.getByText(/does not yet expose it to the console/i)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Events' })).toHaveAttribute('href', '/events')
   })
 
   it('reports a failed load as an error rather than as an empty trail', async () => {

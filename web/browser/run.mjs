@@ -53,6 +53,8 @@ const SCREENS = [
   { name: 'sites', path: '/sites', ready: 'table, .state--empty' },
   { name: 'operators', path: '/operators', ready: 'table, .state--empty' },
   { name: 'activity', path: '/activity', ready: 'table, .state--empty' },
+  { name: 'events', path: '/events', ready: 'table, .state--empty' },
+  { name: 'schedules', path: '/access/schedules', ready: '.rule-list, .notice' },
   { name: 'applications', path: '/settings/applications', ready: '.capability-list' },
   { name: 'settings', path: '/settings', ready: 'h1' },
 ]

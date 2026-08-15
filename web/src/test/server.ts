@@ -4,7 +4,11 @@ import { setupServer } from 'msw/node'
 import type {
   AuditRecord,
   ConfiguredApplication,
+  FieldEvent,
   FirmwareVersion,
+  Permission,
+  Schedule,
+  ScheduleWindow,
   OperatorAccount,
   Person,
   Session,
@@ -16,11 +20,14 @@ import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
   makeAuditRecord,
   makeCredentialToken,
+  makeEvent,
   makeFirmwareVersion,
   makeOperatorAccount,
+  makePermission,
   makePerson,
   makePlatformCompany,
   makePlatformSession,
+  makeSchedule,
   makeSession,
   makeSite,
   makeTerminal,
@@ -57,6 +64,9 @@ interface ServerState {
   settings: Record<string, { settings: Record<string, unknown>; settings_version: number }>
   audit: AuditRecord[]
   firmware: FirmwareVersion[]
+  permissions: Permission[]
+  schedules: Schedule[]
+  events: FieldEvent[]
   /** The platform administrator's session — a DIFFERENT identity from `session`. */
   platformSession: PlatformSession | null
   platformLoginStatus: number
@@ -94,6 +104,9 @@ function initialState(): ServerState {
     settings: {},
     audit: [],
     firmware: [],
+    permissions: [],
+    schedules: [],
+    events: [],
     platformSession: null,
     platformLoginStatus: 200,
     companies: [],
@@ -1248,6 +1261,293 @@ export const handlers = [
     return noContent()
   }),
 
+  // --- access control ------------------------------------------------------
+  //
+  // The engine's rule, reproduced so a console cannot ship assuming otherwise:
+  // ABSENCE OF PERMISSION IS NOT PERMISSION. A person with no rules is returned
+  // an empty list, and the console has to describe that as reaching nothing.
+
+  http.get('*/api/v1/console/people/:externalId/permissions', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const failure = takeFailure('permissions')
+    if (failure) return json({ error: 'Failed to retrieve permissions' }, failure)
+
+    const externalId = String(params.externalId)
+    const permissions = state.permissions.filter((entry) => entry.person_id === externalId)
+    return json({ count: permissions.length, permissions })
+  }),
+
+  http.post('*/api/v1/console/people/:externalId/permissions', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role === 'VIEWER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const body = (await request.json()) as {
+      scope_type?: string
+      site_id?: string
+      device_serial?: string
+      effect?: string
+      schedule_id?: string
+      application?: string
+      starts_at?: string
+      ends_at?: string
+    }
+
+    // The server validates a rule's internal consistency before it reaches the
+    // database, so a caller gets a message naming what is wrong rather than a
+    // constraint violation. Reproduced because the console relies on it.
+    if (!body.scope_type || !['COMPANY', 'SITE', 'TERMINAL'].includes(body.scope_type)) {
+      return json({ error: 'scope must be COMPANY, SITE or TERMINAL' }, 400)
+    }
+    if (body.scope_type === 'SITE' && !body.site_id) {
+      return json({ error: 'a SITE or TERMINAL scope must name one' }, 400)
+    }
+    if (body.scope_type === 'TERMINAL' && !body.device_serial) {
+      return json({ error: 'a SITE or TERMINAL scope must name one' }, 400)
+    }
+    if (body.scope_type === 'COMPANY' && (body.site_id || body.device_serial)) {
+      return json({ error: 'a COMPANY scope must not name a site or terminal' }, 400)
+    }
+
+    const site = state.sites.find((entry) => entry.id === body.site_id)
+    const terminal = state.terminals.find((entry) => entry.serial_number === body.device_serial)
+    const schedule = state.schedules.find((entry) => entry.id === body.schedule_id)
+
+    const permission: Permission = {
+      id: `permission-${state.permissions.length + 1}`,
+      person_id: String(params.externalId),
+      scope_type: body.scope_type as Permission['scope_type'],
+      site_id: body.site_id,
+      site_name: site?.name,
+      device_serial: body.device_serial,
+      device_name: terminal?.device_name,
+      application: body.application,
+      effect: (body.effect ?? 'ALLOW') as Permission['effect'],
+      schedule_id: body.schedule_id,
+      schedule_name: schedule?.name,
+      starts_at: body.starts_at,
+      ends_at: body.ends_at,
+      active: true,
+      created_at: '2026-08-15T00:00:00Z',
+      updated_at: '2026-08-15T00:00:00Z',
+    }
+    state.permissions = [...state.permissions, permission]
+
+    // A schedule's permission_count is what the console shows before an edit.
+    if (schedule) {
+      state.schedules = state.schedules.map((entry) =>
+        entry.id === schedule.id
+          ? { ...entry, permission_count: entry.permission_count + 1 }
+          : entry,
+      )
+    }
+
+    return json(permission, 201)
+  }),
+
+  http.delete('*/api/v1/console/permissions/:permissionId', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const id = String(params.permissionId)
+    const existing = state.permissions.find((entry) => entry.id === id)
+    if (!existing) return json({ error: 'Permission not found' }, 404)
+
+    state.permissions = state.permissions.filter((entry) => entry.id !== id)
+    if (existing.schedule_id) {
+      state.schedules = state.schedules.map((entry) =>
+        entry.id === existing.schedule_id
+          ? { ...entry, permission_count: Math.max(0, entry.permission_count - 1) }
+          : entry,
+      )
+    }
+    return noContent()
+  }),
+
+  // --- schedules -----------------------------------------------------------
+
+  http.get('*/api/v1/console/schedules', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const failure = takeFailure('schedules')
+    if (failure) return json({ error: 'Failed to retrieve schedules' }, failure)
+
+    return json({ count: state.schedules.length, schedules: state.schedules })
+  }),
+
+  http.post('*/api/v1/console/schedules', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const body = (await request.json()) as { name?: string; windows?: ScheduleWindow[] }
+    if (!body.name) return json({ error: 'a name is required' }, 400)
+    if (!body.windows || body.windows.length === 0) {
+      return json({ error: 'a schedule must have at least one window' }, 400)
+    }
+    if (state.schedules.some((entry) => entry.name === body.name)) {
+      return json({ error: 'a schedule with that name already exists' }, 409)
+    }
+
+    const schedule = makeSchedule({
+      id: `schedule-${state.schedules.length + 1}`,
+      name: body.name,
+      windows: body.windows,
+      permission_count: 0,
+    })
+    state.schedules = [...state.schedules, schedule]
+    return json(schedule, 201)
+  }),
+
+  http.put('*/api/v1/console/schedules/:scheduleId', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const id = String(params.scheduleId)
+    const existing = state.schedules.find((entry) => entry.id === id)
+    if (!existing) return json({ error: 'Schedule not found' }, 404)
+
+    const body = (await request.json()) as Partial<Schedule>
+    const updated: Schedule = {
+      ...existing,
+      name: body.name ?? existing.name,
+      description: body.description ?? existing.description,
+      timezone: body.timezone ?? existing.timezone,
+      windows: body.windows ?? existing.windows,
+    }
+    state.schedules = state.schedules.map((entry) => (entry.id === id ? updated : entry))
+    return json(updated)
+  }),
+
+  http.delete('*/api/v1/console/schedules/:scheduleId', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const id = String(params.scheduleId)
+    const existing = state.schedules.find((entry) => entry.id === id)
+    if (!existing) return json({ error: 'Schedule not found' }, 404)
+
+    // REFUSED WHILE RULES DEPEND ON IT. The foreign key is ON DELETE SET NULL,
+    // which would silently WIDEN every rule that used it — a permission
+    // restricted to office hours would become one with no time restriction at
+    // all. 409 rather than 400: the request is well formed and would be valid
+    // once those rules change.
+    if (existing.permission_count > 0) {
+      return json({ error: 'schedule is still used by permissions' }, 409)
+    }
+
+    state.schedules = state.schedules.filter((entry) => entry.id !== id)
+    return json({ deleted: true, schedule_id: id })
+  }),
+
+  // --- the decision preview ------------------------------------------------
+
+  http.post('*/api/v1/console/terminals/:serial/evaluate', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'MANAGER')
+    if (refused) return refused
+
+    const body = (await request.json()) as { external_id?: string }
+    if (!body.external_id) return json({ error: 'external_id is required' }, 400)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+    const person = state.people.find((entry) => entry.external_id === body.external_id)
+
+    // A tiny evaluator, deliberately reproducing the ENGINE'S ORDER rather than
+    // a convenient one: deny beats allow at every scope, and no matching rule
+    // means refused. A mock that granted by default would let a console ship
+    // describing the opposite of what the platform does.
+    if (!person) {
+      return json({
+        granted: false,
+        reason: 'PERSON_UNKNOWN',
+        external_id: body.external_id,
+        decided_at: '2026-08-15T12:00:00Z',
+      })
+    }
+
+    const rules = state.permissions.filter((entry) => entry.person_id === person.external_id)
+    const applies = (rule: Permission) =>
+      rule.active &&
+      (rule.scope_type === 'COMPANY' ||
+        (rule.scope_type === 'SITE' && rule.site_id === terminal.site_public_id) ||
+        (rule.scope_type === 'TERMINAL' && rule.device_serial === serial))
+
+    const deny = rules.find((rule) => rule.effect === 'DENY' && applies(rule))
+    const allow = rules.find((rule) => rule.effect === 'ALLOW' && applies(rule))
+
+    const decision =
+      deny !== undefined
+        ? { granted: false, reason: 'EXPLICIT_DENY', matched_permission: deny.id }
+        : allow !== undefined
+          ? { granted: true, reason: 'ALLOWED', matched_permission: allow.id }
+          : { granted: false, reason: 'NO_PERMISSION' }
+
+    return json({
+      ...decision,
+      person_id: person.id,
+      person_name: person.full_name,
+      external_id: person.external_id,
+      decided_at: '2026-08-15T12:00:00Z',
+    })
+  }),
+
+  // --- field events --------------------------------------------------------
+
+  http.get('*/api/v1/console/events', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const failure = takeFailure('events')
+    if (failure) return json({ error: 'Failed to retrieve events' }, failure)
+
+    const url = new URL(request.url)
+    const decision = url.searchParams.get('decision') ?? ''
+    const eventType = url.searchParams.get('event_type') ?? ''
+    const serial = url.searchParams.get('serial') ?? ''
+    const search = (url.searchParams.get('q') ?? '').toLowerCase()
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+
+    // FILTERED HERE, as the API does it, so a console that narrowed a fetched
+    // page in the browser would fail against this mock exactly as it would
+    // against the server.
+    const matched = state.events.filter((event) => {
+      if (decision && event.decision !== decision) return false
+      if (eventType && event.event_type !== eventType) return false
+      if (serial && event.device_serial !== serial) return false
+      if (from && event.occurred_at < from) return false
+      if (to && event.occurred_at > to) return false
+      if (search) {
+        const haystack = `${event.person_name ?? ''} ${event.subject_external_id ?? ''}`.toLowerCase()
+        if (!haystack.includes(search)) return false
+      }
+      return true
+    })
+
+    const page = matched.slice(offset, offset + limit)
+    return json({
+      count: page.length,
+      total: matched.length,
+      limit,
+      offset,
+      has_more: offset + page.length < matched.length,
+      events: page,
+    })
+  }),
+
   // --- audit ---------------------------------------------------------------
 
   /**
@@ -1458,11 +1758,14 @@ export const server = setupServer(...handlers)
 export {
   makeAuditRecord,
   makeCredentialToken,
+  makeEvent,
   makeFirmwareVersion,
   makeOperatorAccount,
+  makePermission,
   makePerson,
   makePlatformCompany,
   makePlatformSession,
+  makeSchedule,
   makeSite,
   makeTerminal,
 }

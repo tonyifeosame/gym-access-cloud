@@ -120,9 +120,35 @@ describe('secrets stay out of URLs and logs', () => {
     // token because the recipient has nothing else to authenticate with — and
     // RedeemPage strips it from the address bar on arrival. Everything else
     // that builds a URL must not.
-    const building = offenders(/searchParams\.set\(|params\.set\(/)
-    const suspicious = building.filter((entry) => /token|key|password|secret/i.test(entry))
-    expect(suspicious).toEqual([])
+    //
+    // MATCHED ON THE LITERAL PARAMETER NAME, not on the line. An earlier version
+    // of this test matched any line mentioning "key" and flagged
+    // `params.set(key, …)` inside a loop over a filter object — a variable named
+    // `key`, carrying nothing secret. A check that cries wolf gets deleted, so
+    // it reads the name being SET rather than the words nearby.
+    const names = new Set<string>()
+    for (const path of productionFiles()) {
+      for (const match of read(path).matchAll(/params\.set\(\s*'([^']+)'/g)) {
+        names.add(match[1] as string)
+      }
+    }
+
+    const secretish = [...names].filter((name) =>
+      /token|password|secret|api[-_]?key|credential/i.test(name),
+    )
+    expect(secretish).toEqual([])
+  })
+
+  it('builds a computed query parameter in only one place, over a typed filter', () => {
+    // `params.set(variable, …)` cannot be checked by name, so the places that do
+    // it are allowlisted instead. The one that exists loops over an EventQuery,
+    // whose fields are filters — a decision, a serial, a date — and none of them
+    // is a credential. A new computed builder has to argue its case in review.
+    const computed = offenders(/params\.set\(\s*[A-Za-z_$]/)
+    const unexpected = computed.filter((entry) => !entry.includes(join('src', 'api', 'endpoints.ts')))
+    expect(unexpected).toEqual([])
+    // And there is exactly one, so this cannot quietly become the normal way.
+    expect(computed).toHaveLength(1)
   })
 
   it('logs nothing but the error boundary’s message', () => {

@@ -9,6 +9,8 @@ import {
 
 import * as endpoints from '../api/endpoints'
 import type {
+  AccessDecision,
+  AccessEvaluationRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
@@ -21,6 +23,8 @@ import type {
   CreateOperatorResponse,
   CreateSiteRequest,
   CreateSiteResponse,
+  EventPage,
+  EventQuery,
   FirmwareResponse,
   FirmwareVersion,
   FleetSummary,
@@ -30,11 +34,17 @@ import type {
   OperatorsResponse,
   PeoplePage,
   PeopleQuery,
+  Permission,
+  PermissionRequest,
+  PermissionsResponse,
   Person,
   PersonRequest,
   ResetResponse,
   RetireSiteResponse,
   RotateSiteKeyResponse,
+  Schedule,
+  ScheduleRequest,
+  SchedulesResponse,
   Site,
   SiteGrantsRequest,
   SiteSettings,
@@ -686,6 +696,147 @@ export function useUpdateApplication(): UseMutationResult<
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
     },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Access control
+// ---------------------------------------------------------------------------
+
+export function usePersonPermissions(
+  externalId: string | undefined,
+): UseQueryResult<PermissionsResponse> {
+  return useQuery({
+    queryKey: keys.permissions.forPerson(externalId ?? ''),
+    queryFn: () => endpoints.fetchPersonPermissions(externalId as string),
+    enabled: Boolean(externalId),
+  })
+}
+
+/**
+ * Grants or denies at one scope.
+ *
+ * INVALIDATES THE EVENT TRAIL as well as the person's rules, which is the part
+ * that is easy to miss: the next presentation at a door will be decided by this
+ * rule, so an events view open beside it is about to disagree with the
+ * configuration it is being read against.
+ */
+export function useGrantPermission(
+  externalId: string,
+): UseMutationResult<Permission, Error, PermissionRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: PermissionRequest) => endpoints.grantPermission(externalId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
+      // A schedule's permission_count has just changed.
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+export function useRevokePermission(
+  externalId: string,
+): UseMutationResult<void, Error, string> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (permissionId: string) => endpoints.revokePermission(permissionId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+export function useSchedules(): UseQueryResult<SchedulesResponse> {
+  return useQuery({
+    queryKey: keys.schedules.list(),
+    queryFn: () => endpoints.fetchSchedules(),
+    staleTime: 60_000,
+  })
+}
+
+export function useCreateSchedule(): UseMutationResult<Schedule, Error, ScheduleRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ScheduleRequest) => endpoints.createSchedule(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Edits a schedule.
+ *
+ * INVALIDATES EVERY PERMISSION, not just the schedule list. Changing a window
+ * changes when every rule using it applies — an operator looking at a person's
+ * access while somebody widens "Office hours" is looking at something that has
+ * just stopped being true.
+ */
+export function useUpdateSchedule(
+  scheduleId: string,
+): UseMutationResult<Schedule, Error, ScheduleRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ScheduleRequest) => endpoints.updateSchedule(scheduleId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      void queryClient.invalidateQueries({ queryKey: keys.permissions.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/** Refused with 409 while any rule still references it. */
+export function useDeleteSchedule(): UseMutationResult<{ deleted: boolean }, Error, string> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (scheduleId: string) => endpoints.deleteSchedule(scheduleId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Previews a decision.
+ *
+ * A MUTATION HOOK FOR SOMETHING THAT CHANGES NOTHING, and deliberately so: it is
+ * a POST with a body, it is run on demand rather than on render, and its result
+ * belongs to one panel. Modelling it as a query would cache an answer that is
+ * only true for the instant it was asked — a schedule makes yesterday's decision
+ * wrong today — and INVALIDATES NOTHING, because the server writes no event for
+ * it.
+ */
+export function useEvaluateAccess(
+  serial: string,
+): UseMutationResult<AccessDecision, Error, AccessEvaluationRequest> {
+  return useMutation({
+    mutationFn: (body: AccessEvaluationRequest) => endpoints.evaluateAccess(serial, body),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Field events
+// ---------------------------------------------------------------------------
+
+/**
+ * One page of the door log.
+ *
+ * `placeholderData` keeps the previous page on screen while the next loads, and
+ * nothing here polls: an events view that refetched on a timer would move rows
+ * under somebody reading them, and the operator can refresh.
+ */
+export function useEvents(query: EventQuery = {}): UseQueryResult<EventPage> {
+  return useQuery({
+    queryKey: keys.events.list(query),
+    queryFn: () => endpoints.fetchEvents(query),
+    placeholderData: (previous) => previous,
   })
 }
 

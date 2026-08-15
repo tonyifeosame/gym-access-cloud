@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import type { AuditQuery, AuditRecord } from '../../api/types'
 import { Badge } from '../../components/Badge'
@@ -26,13 +27,13 @@ const PAGE_SIZE = 50
  * changed.
  *
  * WHAT THIS PAGE IS NOT, AND SAYS SO. It is the record of what OPERATORS did in
- * this console. It is not the record of what happened at a door: presentations,
- * grants, denials, enrolments and tamper events are a different event stream
- * with a different shape, and the platform has no console route serving it yet.
- * An operator who came here to find out why somebody could not get in on Tuesday
- * needs to be told that in a sentence, not left to conclude the trail is empty
- * or broken. That note is the most important thing on the page until the events
- * endpoint exists.
+ * this console. What happened at a door — presentations, grants, denials,
+ * enrolments, tamper — is a different stream with a different shape, a different
+ * endpoint and a different role, and it lives on Events. The two are kept apart
+ * because they answer different questions: "why could she not get in" and "who
+ * revoked that terminal" want different screens, and merging them would serve
+ * neither. Each page links to the other, once, so nobody concludes the trail is
+ * empty when they are simply on the wrong one.
  *
  * FILTERING IS SERVER-SIDE, without exception. Filtering a fetched page in the
  * browser filters the page rather than the trail — silently wrong the moment a
@@ -202,12 +203,16 @@ export function ActivityPage() {
         The sentence that keeps this page honest. Somebody investigating a door
         problem will come here first, and everything they need is elsewhere.
       */}
+      {/*
+        The two trails are separate on purpose — different endpoint, different
+        role, different question — so each page sends people asking the other
+        question to the other page, once, rather than leaving them to conclude
+        the trail is empty.
+      */}
       <InfoNote title="This is the operator trail, not the door log">
-        Every record here is a change somebody made in this console. Presentations
+        Every record here is a change somebody made in this console. What happened
         at a terminal — who was let in, who was refused and why, enrolments,
-        tamper — are a separate stream, and the platform does not yet expose it to
-        the console. It is being built; until it is, that history is not available
-        here.
+        tamper — is in <Link to="/events">Events</Link>.
       </InfoNote>
 
       <section className="panel" aria-labelledby="activity-filters-heading">

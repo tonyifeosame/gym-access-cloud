@@ -191,6 +191,60 @@ const AVAILABLE = [
   'VISITOR_MANAGEMENT',
 ]
 
+const SCHEDULES = [
+  {
+    id: 'schedule-1',
+    name: 'Office hours',
+    description: 'The shift most staff work, across every site.',
+    windows: [
+      { days_of_week: 31, start_time: '08:00', end_time: '18:00' },
+      { days_of_week: 32, start_time: '09:00', end_time: '13:00' },
+    ],
+    permission_count: 14,
+    active: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+  {
+    id: 'schedule-2',
+    name: 'Night shift',
+    // Crosses midnight, which is the window shape most likely to be rendered
+    // badly.
+    windows: [{ days_of_week: 127, start_time: '22:00', end_time: '06:00' }],
+    permission_count: 0,
+    active: true,
+    timezone: 'Africa/Lagos',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  },
+]
+
+const EVENTS = Array.from({ length: 40 }, (_, index) => {
+  const denied = index % 3 !== 0
+  const unknown = index % 11 === 0
+  return {
+    id: `event-${index}`,
+    event_type: denied ? 'ACCESS_DENIED' : 'ACCESS_GRANTED',
+    decision: denied ? 'DENIED' : 'GRANTED',
+    reason: unknown
+      ? 'PERSON_UNKNOWN'
+      : denied
+        ? ['NO_PERMISSION', 'OUTSIDE_SCHEDULE', 'EXPLICIT_DENY'][index % 3]
+        : 'ALLOWED',
+    application: 'ACCESS_CONTROL',
+    site_name: 'Lagos Distribution Centre',
+    device_serial: `AT-000${(index % 4) + 1}`,
+    device_name: 'North Gate (staff and contractor entrance)',
+    person_id: unknown ? undefined : `person-${index}`,
+    person_name: unknown ? undefined : 'Chukwuemeka Nwachukwu-Oluwaseun',
+    subject_external_id: unknown ? 'UNKNOWN-CARD-4471' : `P-${String(index).padStart(4, '0')}`,
+    occurred_at: '2026-08-15T02:00:00Z',
+    // Divergent, so the "reported later" line is exercised.
+    recorded_at: index % 5 === 0 ? '2026-08-15T11:00:00Z' : '2026-08-15T02:00:00Z',
+    occurred_at_trusted: index % 7 !== 0,
+  }
+})
+
 /** Routes matched in order; the first hit wins, so specific paths come first. */
 const ROUTES = [
   [/\/api\/v1\/auth\/me$/, () => SESSION],
@@ -266,6 +320,26 @@ const ROUTES = [
     available: AVAILABLE,
   })],
   [/\/api\/v1\/console\/firmware$/, () => ({ count: 0, firmware_versions: [] })],
+
+  // Access control and the door log. The event set deliberately mixes outcomes,
+  // an unrecognised presentation and a buffered upload, because the layout
+  // questions a browser answers -- does a long reason wrap, does the denial
+  // summary push the table off screen -- need the awkward rows present.
+  [/\/api\/v1\/console\/schedules$/, () => ({ count: SCHEDULES.length, schedules: SCHEDULES })],
+  [/\/api\/v1\/console\/permissions/, () => ({ count: 0, permissions: [] })],
+  [/\/api\/v1\/console\/events/, (url) => {
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    const page = EVENTS.slice(offset, offset + limit)
+    return {
+      count: page.length,
+      total: EVENTS.length,
+      limit,
+      offset,
+      has_more: offset + page.length < EVENTS.length,
+      events: page,
+    }
+  }],
 ]
 
 /** Installs the interception on a Playwright page. */

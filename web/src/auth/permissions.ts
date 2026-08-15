@@ -88,6 +88,19 @@ export const ACTION_ROLES = {
   configureTerminals: 'MANAGER',
   manageSiteSettings: 'MANAGER',
 
+  /**
+   * Who may go where, and when, and the schedules those rules use.
+   *
+   * MANAGER rather than ADMIN, matching the server. Deciding who comes in on
+   * Tuesday is day-to-day work at any customer with more than a handful of
+   * people; putting it behind the gate that mints site provisioning credentials
+   * would mean every rota change needed an administrator.
+   */
+  manageAccess: 'MANAGER',
+
+  /** The door log. VIEWER, unlike the audit trail, which is ADMIN. */
+  viewEvents: 'VIEWER',
+
   /** Operator administration. */
   manageOperators: 'ADMIN',
 

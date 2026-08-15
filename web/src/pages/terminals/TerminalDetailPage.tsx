@@ -11,6 +11,7 @@ import { Timestamp } from '../../components/Timestamp'
 import { useTerminal } from '../../data/console'
 import { useSession } from '../../session/useSession'
 import { ApplicationModeDialog } from './ApplicationModeDialog'
+import { EvaluateAccessDialog } from './EvaluateAccessDialog'
 import {
   MoveTerminalDialog,
   ResyncTerminalDialog,
@@ -387,6 +388,28 @@ export function TerminalDetailPage() {
 
           <li className="lifecycle__option">
             <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Check who would get in</h3>
+              <p className="lifecycle__detail">
+                Asks the access engine what it would decide for one person at this
+                terminal, and why. Records nothing and moves no door — the
+                question to ask after changing a rule, instead of sending
+                somebody to stand at it.
+              </p>
+            </div>
+            {/* MANAGER: it is a preview, and the people who write rules are the
+                people who need to test them. */}
+            <button
+              type="button"
+              className="button"
+              disabled={!mayConfigure}
+              onClick={() => setLifecycle('evaluate')}
+            >
+              Check access
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
               <h3 className="lifecycle__title">Force a resync</h3>
               <p className="lifecycle__detail">
                 Replaces what is queued with a fresh snapshot of the people and
@@ -444,8 +467,11 @@ export function TerminalDetailPage() {
       {lifecycle === 'resync' ? (
         <ResyncTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
       ) : null}
+      {lifecycle === 'evaluate' ? (
+        <EvaluateAccessDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
     </div>
   )
 }
 
-type LifecycleAction = 'state' | 'revoke' | 'retire' | 'move' | 'resync'
+type LifecycleAction = 'state' | 'revoke' | 'retire' | 'move' | 'resync' | 'evaluate'

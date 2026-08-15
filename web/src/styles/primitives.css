@@ -1276,6 +1276,149 @@ textarea.field__input {
 }
 
 /* ===========================================================================
+ * Access rules and schedules
+ *
+ * A DENY rule is marked by its left edge AND by a badge reading "Deny", never
+ * by colour alone — the difference between letting somebody in and keeping them
+ * out is not something to encode in a hue.
+ * ======================================================================== */
+
+.rule-list {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.rule {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  border-inline-start: 3px solid var(--border);
+}
+
+.rule[data-effect='ALLOW'] {
+  border-inline-start-color: var(--success);
+}
+
+.rule[data-effect='DENY'] {
+  border-inline-start-color: var(--danger);
+}
+
+/* A rule that is expired, not yet valid or switched off is dimmed as well as
+ * badged — it is on the page because it exists, not because it applies. */
+.rule[data-standing='EXPIRED'],
+.rule[data-standing='NOT_YET'],
+.rule[data-standing='INACTIVE'] {
+  border-inline-start-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.rule__main {
+  min-width: 0;
+}
+
+.rule__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.rule__detail {
+  margin: 0 0 var(--space-1);
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 68ch;
+}
+
+.rule__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.window-list {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.window {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.window-editor {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-block-end: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+@media (max-width: 680px) {
+  .rule {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ===========================================================================
+ * Field events
+ * ======================================================================== */
+
+.event__when,
+.event__where,
+.event__what,
+.event__unknown {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* When a terminal reported an event long after it happened, said quietly beside
+ * the door time rather than replacing it. */
+.event__delay {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.decision {
+  margin-block-start: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.decision__verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-3);
+  font-size: 16px;
+}
+
+/* ===========================================================================
  * Activity / audit
  * ======================================================================== */
 

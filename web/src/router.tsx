@@ -8,6 +8,8 @@ import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
 import { ActivityPage } from './pages/activity/ActivityPage'
+import { SchedulesPage } from './pages/access/SchedulesPage'
+import { EventsPage } from './pages/events/EventsPage'
 import { ApplicationDetailPage } from './pages/applications/ApplicationDetailPage'
 import { ApplicationsPage } from './pages/applications/ApplicationsPage'
 import { OperatorDetailPage } from './pages/operators/OperatorDetailPage'
@@ -87,6 +89,16 @@ export const router = createBrowserRouter([
           </RequireRole>
         ),
       },
+      // The door log. VIEWER, unlike Activity below, which is ADMIN — an event
+      // trail says what happened in the field, while an audit trail names which
+      // operators changed what.
+      { path: 'events', element: <EventsPage /> },
+
+      // Who may go where, and when. MANAGER to change, VIEWER to read, and the
+      // write gate lives on the controls rather than the route so a viewer can
+      // still answer "why was she refused".
+      { path: 'access/schedules', element: <SchedulesPage /> },
+
       // ADMIN, matching the server's route group: an audit trail names which
       // operators did what, which is administrative information rather than
       // something every viewer needs.

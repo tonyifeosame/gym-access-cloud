@@ -647,6 +647,272 @@ export interface PasswordResetAcceptedResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Access control
+// ---------------------------------------------------------------------------
+
+/**
+ * THE RULE THE WHOLE MODEL RESTS ON, restated here because every screen in front
+ * of it has to convey it:
+ *
+ *   Absence of permission is not permission.
+ *
+ * A person with no rules reaches nothing. That is the opposite of what the
+ * platform did before the engine existed — nothing read the permissions table,
+ * so every active person with a credential opened every terminal in their
+ * company — and it is the single most important thing an operator must not get
+ * backwards, because the mistake admits people rather than locking them out and
+ * so nobody reports it.
+ */
+
+/** A rule names exactly one scope. */
+export type PermissionScope = 'COMPANY' | 'SITE' | 'TERMINAL'
+
+/**
+ * `DENY` beats any `ALLOW` at any scope.
+ *
+ * Exclusion cannot be expressed with allow-only rules without enumerating
+ * everybody who is not excluded and re-enumerating them whenever anyone joins.
+ */
+export type PermissionEffect = 'ALLOW' | 'DENY'
+
+export interface Permission {
+  id: string
+  person_id: string
+  scope_type: PermissionScope
+  /** Exactly one pair is set, matching `scope_type`. Public ids. */
+  site_id?: string
+  site_name?: string
+  device_serial?: string
+  device_name?: string
+  /** Empty means EVERY capability, not none. */
+  application?: string
+  effect: PermissionEffect
+  schedule_id?: string
+  schedule_name?: string
+  starts_at?: string
+  ends_at?: string
+  active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface PermissionsResponse {
+  count: number
+  permissions: Permission[]
+}
+
+export interface PermissionRequest {
+  scope_type: PermissionScope
+  site_id?: string
+  device_serial?: string
+  application?: string
+  effect?: PermissionEffect
+  schedule_id?: string
+  starts_at?: string
+  ends_at?: string
+  active?: boolean
+}
+
+/**
+ * Day-of-week bits. Monday is 1 through Sunday 64; 127 is every day.
+ *
+ * A BITMASK, not a list of days, because that is what the server stores and what
+ * a terminal evaluates. The console converts at the edge so no screen has to
+ * think in powers of two.
+ */
+export const DAY_BITS = {
+  MONDAY: 1,
+  TUESDAY: 2,
+  WEDNESDAY: 4,
+  THURSDAY: 8,
+  FRIDAY: 16,
+  SATURDAY: 32,
+  SUNDAY: 64,
+} as const
+
+export const EVERY_DAY = 127
+
+/**
+ * One span within a schedule.
+ *
+ * A window whose end is NOT AFTER its start CROSSES MIDNIGHT: a 22:00–06:00
+ * night shift is one window, and `days_of_week` names the day it STARTS on.
+ * Splitting it in two would make Sunday night's shift look like Monday's, which
+ * is wrong by a whole day for exactly the people most likely to be affected.
+ */
+export interface ScheduleWindow {
+  days_of_week: number
+  /** "HH:MM" or "HH:MM:SS", wall clock in the schedule's zone. */
+  start_time: string
+  end_time: string
+}
+
+export interface Schedule {
+  id: string
+  name: string
+  description?: string
+  /** Empty means "the timezone of the site the terminal is at", the common case. */
+  timezone?: string
+  windows: ScheduleWindow[]
+  /** How many rules depend on it. Deleting one that any rule uses is refused. */
+  permission_count: number
+  active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface SchedulesResponse {
+  count: number
+  schedules: Schedule[]
+}
+
+export interface ScheduleRequest {
+  name: string
+  description?: string
+  timezone?: string
+  active?: boolean
+  windows: ScheduleWindow[]
+}
+
+/**
+ * Why a decision went the way it did.
+ *
+ * An OPEN set — an application may define its own — but each of these is a
+ * distinct thing an operator would do something different about, which is the
+ * whole reason the field exists instead of a bare boolean.
+ */
+export type KnownDecisionReason =
+  | 'ALLOWED'
+  | 'NO_PERMISSION'
+  | 'EXPLICIT_DENY'
+  | 'OUTSIDE_SCHEDULE'
+  | 'PERMISSION_EXPIRED'
+  | 'PERMISSION_NOT_YET_VALID'
+  | 'PERSON_INACTIVE'
+  | 'PERSON_UNKNOWN'
+  | 'CREDENTIAL_UNKNOWN'
+  | 'CREDENTIAL_REVOKED'
+  | 'CREDENTIAL_SUSPENDED'
+  | 'CREDENTIAL_EXPIRED'
+  | 'CREDENTIAL_NOT_YET_VALID'
+  | 'APPLICATION_NOT_ENABLED'
+  | 'TERMINAL_DISABLED'
+  | 'SITE_INACTIVE'
+  | 'COMPANY_INACTIVE'
+  | 'OFFLINE_POLICY'
+
+export type DecisionReason = KnownDecisionReason | (string & {})
+
+/**
+ * The outcome of evaluating one presentation.
+ *
+ * `reason` is present on a GRANT as well as a refusal. A trail that records why
+ * somebody was turned away but not why somebody was admitted answers half the
+ * question a security review asks.
+ */
+export interface AccessDecision {
+  granted: boolean
+  reason: DecisionReason
+  person_id?: string
+  person_name?: string
+  external_id?: string
+  credential_id?: string
+  application?: string
+  /** The rule that decided it. Empty on a deny-by-default, which IS the answer. */
+  matched_permission?: string
+  decided_at: string
+}
+
+/**
+ * Ask the engine what it WOULD decide.
+ *
+ * The terminal is the path parameter, not a body field — an operator must not be
+ * able to preview a decision at a terminal they are not scoped to. `at` makes a
+ * schedule testable without waiting until Tuesday.
+ *
+ * THIS WRITES NO EVENT, by design. A preview that recorded a door event would
+ * put a presentation that never happened into the trail an attendance report is
+ * built from.
+ */
+export interface AccessEvaluationRequest {
+  external_id: string
+  credential_id?: string
+  application?: string
+  at?: string
+}
+
+// ---------------------------------------------------------------------------
+// Field events
+// ---------------------------------------------------------------------------
+
+export type EventDecision = 'GRANTED' | 'DENIED' | 'RECORDED' | 'ERROR'
+
+/**
+ * One thing that happened in the field.
+ *
+ * TWO TIMES, AND THE DIFFERENCE IS NOT PEDANTRY. `occurred_at` is when somebody
+ * stood at the terminal; `recorded_at` is when the platform heard about it. A
+ * terminal buffers while offline, so an event that appears now may have happened
+ * hours ago — and a console showing only one of them cannot explain that to the
+ * person reading it.
+ *
+ * `occurred_at_trusted` says whether the terminal's clock was believable when it
+ * stamped the first one. A terminal that has never reached NTP sends nothing and
+ * the server stamps its own arrival; presenting that as a door time would be a
+ * quiet lie, and the flag is what lets the console avoid telling it.
+ *
+ * `person_id` is EMPTY when the presentation matched nobody, which is a real
+ * outcome and the more interesting half of a security trail —
+ * `subject_external_id` keeps what the terminal actually read, so the attempt is
+ * still traceable.
+ */
+export interface FieldEvent {
+  id: string
+  event_type: string
+  application?: string
+  decision: EventDecision
+  reason?: string
+  direction?: string
+  site_name?: string
+  device_serial?: string
+  device_name?: string
+  person_id?: string
+  person_name?: string
+  subject_external_id?: string
+  credential_id?: string
+  credential_type?: string
+  payload?: unknown
+  occurred_at: string
+  recorded_at: string
+  occurred_at_trusted: boolean
+}
+
+export interface EventPage {
+  count: number
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
+  events: FieldEvent[]
+}
+
+export interface EventQuery {
+  event_type?: string
+  decision?: EventDecision
+  application?: string
+  site_id?: string
+  serial?: string
+  external_id?: string
+  person_id?: string
+  direction?: string
+  q?: string
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
+// ---------------------------------------------------------------------------
 // Audit trail
 // ---------------------------------------------------------------------------
 

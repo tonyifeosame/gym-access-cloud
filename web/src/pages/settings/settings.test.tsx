@@ -259,6 +259,8 @@ describe('console navigation', () => {
       'dashboard',
       'people',
       'terminals',
+      'events',
+      'schedules',
       'sites',
       'operators',
       'activity',
