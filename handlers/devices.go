@@ -232,7 +232,12 @@ func GetDeviceSettings(c *gin.Context) {
 		return
 	}
 
-	settings, err := database.GetSiteSettings(c.GetInt64("site_id"))
+	// GetDeviceSettings, not GetSiteSettings: the device-facing object layers
+	// the validated offline-policy columns over the site's free-form settings
+	// blob. GetSiteSettings returns the blob alone and is what the OPERATOR
+	// endpoints read, because an operator edits the blob and must not be shown
+	// the merged result as though it were what they had stored.
+	settings, err := database.GetDeviceSettings(c.GetInt64("site_id"))
 	if err != nil {
 		logError(c, "get device settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve settings"})

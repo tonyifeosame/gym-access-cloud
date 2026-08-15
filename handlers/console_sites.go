@@ -101,7 +101,41 @@ func ConsoleUpdateSite(c *gin.Context) {
 		return
 	}
 
-	site, err := database.UpdateSite(c.GetInt64("company_id"), c.GetInt64("site_id"),
+	companyID := c.GetInt64("company_id")
+	siteID := c.GetInt64("site_id")
+
+	// The offline policy is applied SEPARATELY and FIRST, because it is the only
+	// field here that has to reach hardware: it bumps settings_version and fans
+	// a SETTINGS job out to every terminal at the site. Folding it into the
+	// metadata UPDATE would mean a rename also bumped the version and pushed a
+	// job to every door, which is noise the terminals would have to process on
+	// every typo correction.
+	//
+	// First, so that a policy change which cannot be applied fails before any
+	// metadata is written -- a caller sending both must not get the rename
+	// without the safety control.
+	policy := database.OfflinePolicyUpdate{
+		Policy:       req.OfflinePolicy,
+		GraceMinutes: req.OfflineGraceMinutes,
+	}
+	if !policy.Empty() {
+		if _, err := database.SetSiteOfflinePolicy(companyID, siteID, policy); err != nil {
+			switch {
+			case errors.Is(err, models.ErrInvalidOfflinePolicy),
+				errors.Is(err, models.ErrInvalidOfflineGrace):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			case errors.Is(err, models.ErrSiteNotFound):
+				c.JSON(http.StatusNotFound, gin.H{"error": "Site not found"})
+			default:
+				logError(c, "console set offline policy", err)
+				c.JSON(http.StatusInternalServerError,
+					gin.H{"error": "Failed to update site"})
+			}
+			return
+		}
+	}
+
+	site, err := database.UpdateSite(companyID, siteID,
 		database.SiteUpdate{
 			Name:     req.Name,
 			Address:  req.Address,
@@ -139,6 +173,15 @@ func ConsoleUpdateSite(c *gin.Context) {
 	}
 	if req.Active != nil {
 		changes["active"] = *req.Active
+	}
+	// Recorded because it is a safety decision about what happens at a door
+	// during an outage. "Who set this site to CACHED_INDEFINITE" is a question
+	// somebody will ask after an incident.
+	if req.OfflinePolicy != nil {
+		changes["offline_policy"] = *req.OfflinePolicy
+	}
+	if req.OfflineGraceMinutes != nil {
+		changes["offline_grace_minutes"] = *req.OfflineGraceMinutes
 	}
 	recordAudit(c, auditSiteUpdated, auditTargetSite, site.ID, site.Name, changes)
 

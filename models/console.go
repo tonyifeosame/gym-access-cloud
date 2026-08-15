@@ -217,6 +217,20 @@ type ConsoleSiteUpdateRequest struct {
 	Address  *string `json:"address,omitempty"`
 	Timezone *string `json:"timezone,omitempty"`
 	Active   *bool   `json:"active,omitempty"`
+
+	// What the site's terminals do when they cannot reach the platform.
+	//
+	// A SAFETY CONTROL, not metadata, and it is on this request rather than in
+	// the free-form settings object for that reason: it is validated, it has a
+	// closed set of values, and changing it must bump settings_version and push
+	// a SETTINGS job or the terminals never hear about it. The free-form blob
+	// offers none of those guarantees.
+	//
+	// 016_terminal_lifecycle.sql added the columns; until now nothing set them
+	// and nothing delivered them, so every terminal ran CACHED_INDEFINITE while
+	// the console displayed whatever the column happened to default to.
+	OfflinePolicy       *string `json:"offline_policy,omitempty"`
+	OfflineGraceMinutes *int    `json:"offline_grace_minutes,omitempty"`
 }
 
 // ConsoleSiteCreated is the ONLY response shape that carries a site key, and it

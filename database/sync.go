@@ -177,12 +177,18 @@ func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSet
 
 	// The job payload carries the version so a device can discard a stale
 	// settings push it receives after a newer one.
-	payload, err := json.Marshal(models.SettingsSyncPayload{
-		SettingsVersion: result.Version,
-		Settings:        stored,
-	})
+	//
+	// Built by deviceSettingsPayloadTx rather than from `stored` directly, so
+	// the validated offline-policy columns are layered over the free-form blob
+	// exactly as GET /devices/settings does it. Marshalling `stored` here --
+	// which is what this did -- meant an operator editing the settings object
+	// pushed a payload with NO offline policy in it, and a terminal that had
+	// been told DENY_ALL would keep the policy only because absent keys are
+	// treated as "leave it alone". The two paths must not be able to describe
+	// different configurations.
+	payload, _, err := deviceSettingsPayloadTx(tx, siteID)
 	if err != nil {
-		return nil, fmt.Errorf("building settings payload: %w", err)
+		return nil, err
 	}
 
 	if err := enqueueSettingsFanoutTx(tx, siteID, payload); err != nil {
@@ -535,7 +541,22 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
 		                       payload, protocol_version, status)
 		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
-		       jsonb_build_object('settings_version', s.settings_version, 'settings', s.settings),
+		       jsonb_build_object(
+		           'settings_version', s.settings_version,
+		           -- The SAME merge mergeDeviceSettings performs in Go: the
+		           -- validated policy columns layered OVER the free-form blob,
+		           -- with a non-object blob treated as empty rather than
+		           -- failing the whole snapshot. Concatenation takes the
+		           -- right-hand side on a key collision, which is the column
+		           -- precedence the policy needs -- an operator must not be able
+		           -- to override a safety control by writing raw JSON.
+		           'settings',
+		           (CASE WHEN jsonb_typeof(s.settings) = 'object'
+		                 THEN s.settings ELSE '{}'::jsonb END)
+		           || jsonb_build_object(
+		                  'offline_policy', s.offline_policy,
+		                  'offline_grace_minutes', s.offline_grace_minutes)
+		       ),
 		       $2, 'PENDING'
 		  FROM devices d JOIN sites s ON s.id = d.site_id
 		 WHERE d.id = $1 AND d.deleted_at IS NULL`,

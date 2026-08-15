@@ -341,3 +341,31 @@ var OfflinePolicies = map[string]bool{
 
 // IsOfflinePolicy reports whether a value is one the platform understands.
 func IsOfflinePolicy(name string) bool { return OfflinePolicies[name] }
+
+// MaxOfflineGraceMinutes is 30 days.
+//
+// The SAME bound the firmware enforces (offline_policy.h,
+// kMaxOfflineGraceMinutes) and the same one 016's CHECK constraint carries.
+// Three copies of one number is not ideal, but the alternative -- the server
+// accepting a value the terminal silently drops -- is a site being told its
+// grace window is longer than the one actually running.
+const MaxOfflineGraceMinutes = 43200
+
+// The keys the offline policy travels under, inside the `settings` object of
+// both GET /devices/settings and every SETTINGS job payload.
+//
+// Named constants because they are a WIRE CONTRACT with deployed firmware
+// (docs/firmware-protocol-requirements.md §1), not internal field names. A
+// typo here is a safety control that silently stops arriving.
+const (
+	SettingsKeyOfflinePolicy       = "offline_policy"
+	SettingsKeyOfflineGraceMinutes = "offline_grace_minutes"
+)
+
+// Offline policy errors.
+var (
+	ErrInvalidOfflinePolicy = errors.New(
+		"offline_policy must be DENY_ALL, CACHED_GRACE or CACHED_INDEFINITE")
+	ErrInvalidOfflineGrace = errors.New(
+		"offline_grace_minutes must be between 0 and 43200")
+)
