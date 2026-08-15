@@ -260,6 +260,16 @@ func ConsoleSetApplication(c *gin.Context) {
 		return
 	}
 
+	// OWNER-only and company-wide: this decides what the whole deployment is for.
+	// The settings blob is NOT recorded -- it is an open JSON object whose
+	// contents this layer does not know the shape of, and database/audit.go is
+	// explicit that redaction is the caller's job. Recording that settings
+	// changed, without their contents, is the honest thing a caller can say.
+	recordAudit(c, auditApplicationSet, auditTargetApplication, "", code, gin.H{
+		"enabled":          enabled,
+		"settings_changed": req.Settings != nil,
+	})
+
 	c.JSON(http.StatusOK, app)
 }
 
@@ -581,6 +591,15 @@ func ConsoleCreatePerson(c *gin.Context) {
 		return
 	}
 
+	// A PERSON IS NAMED BY THEIR EXTERNAL ID, not by a UUID: that is the
+	// identifier an operator recognises and the one the wire carries. The
+	// natural-key case recordAudit documents.
+	recordAudit(c, auditPersonCreated, auditTargetPerson, "", member.MemberID, gin.H{
+		"full_name": member.FullName,
+		"category":  member.MembershipType,
+		"active":    member.Active,
+	})
+
 	c.JSON(http.StatusCreated, consolePerson(member))
 }
 
@@ -643,6 +662,22 @@ func ConsoleUpdatePerson(c *gin.Context) {
 		return
 	}
 
+	// BEFORE AND AFTER for the fields that changed, not just the new value. "Who
+	// deactivated this person" is answerable from the new value alone; "was this
+	// person active last Tuesday" is not, and that is the question a disputed
+	// access refusal turns into.
+	changes := gin.H{}
+	if member.FullName != existing.FullName {
+		changes["full_name"] = gin.H{"from": existing.FullName, "to": member.FullName}
+	}
+	if member.MembershipType != existing.MembershipType {
+		changes["category"] = gin.H{"from": existing.MembershipType, "to": member.MembershipType}
+	}
+	if member.Active != existing.Active {
+		changes["active"] = gin.H{"from": existing.Active, "to": member.Active}
+	}
+	recordAudit(c, auditPersonUpdated, auditTargetPerson, "", externalID, changes)
+
 	c.JSON(http.StatusOK, consolePerson(member))
 }
 
@@ -656,6 +691,12 @@ func ConsoleDeletePerson(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete person"})
 		return
 	}
+
+	// The record OUTLIVES the row, which is the point. A soft-deleted person is
+	// invisible to every console query, so without this the only trace that they
+	// ever existed would be the sync job that told the terminals to forget them.
+	recordAudit(c, auditPersonDeleted, auditTargetPerson, "", c.Param("external_id"), nil)
+
 	c.Status(http.StatusNoContent)
 }
 
@@ -752,12 +793,39 @@ func ConsoleCreateOperator(c *gin.Context) {
 	}
 
 	companyID := c.GetInt64("company_id")
-	user, err := database.CreateUser(companyID, models.NewUser{
+
+	// AN EMPTY PASSWORD MEANS AN INVITATION, and that is the path the console
+	// offers (PPL-02).
+	//
+	// The old behaviour -- the caller chooses the new operator's password -- is
+	// kept for a deployment that cannot deliver a link at all, but it is no longer
+	// the default and no longer the only option. The realistic consequence of it
+	// being the only option was not hypothetical: initial credentials travelled by
+	// chat in plain text, typically stayed unchanged, and the administrator who
+	// created the account knew the password indefinitely with nothing recording
+	// that they did.
+	//
+	// The invited account is created with a credential nobody holds, so it cannot
+	// be signed in to at all until its owner redeems the link.
+	newUser := models.NewUser{
 		Email:    req.Email,
 		FullName: req.FullName,
 		Password: req.Password,
 		Role:     req.Role,
-	})
+	}
+
+	var (
+		user  *models.User
+		token *models.CredentialToken
+		err   error
+	)
+	if strings.TrimSpace(req.Password) == "" {
+		user, token, err = database.CreateInvitedUser(companyID, newUser,
+			caller.UserID, caller.Email)
+	} else {
+		user, err = database.CreateUser(companyID, newUser)
+	}
+
 	switch {
 	case database.IsUniqueViolation(err):
 		c.JSON(http.StatusConflict, gin.H{"error": "That email address is already in use"})
@@ -799,7 +867,29 @@ func ConsoleCreateOperator(c *gin.Context) {
 		grants = nil
 	}
 
-	c.JSON(http.StatusCreated, consoleOperator(*user, grants))
+	action := auditOperatorCreated
+	if token != nil {
+		action = auditOperatorInvited
+	}
+	recordAudit(c, action, auditTargetOperator, user.PublicID, user.Email, gin.H{
+		"role":    user.Role,
+		"invited": token != nil,
+		"sites":   len(req.SiteIDs),
+	})
+
+	// The operator body is unchanged, and the invitation is an ADDITIONAL field.
+	// A client written against the previous shape keeps working; one that knows
+	// about invitations finds the link where it expects it.
+	if token == nil {
+		c.JSON(http.StatusCreated, consoleOperator(*user, grants))
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"operator":   consoleOperator(*user, grants),
+		"invitation": token,
+		"delivery":   invitationDeliveryNotice,
+	})
 }
 
 // ConsoleUpdateOperator handles PUT /console/operators/:operator_id
@@ -850,6 +940,13 @@ func ConsoleUpdateOperator(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update operator"})
 			return
 		}
+
+		// ITS OWN AUDIT ACTION, not a field inside OPERATOR_UPDATED. A privilege
+		// change is the single most consequential thing this endpoint does, and
+		// somebody scanning the trail for it should not have to open every update
+		// record to find out whether it contained one.
+		recordAudit(c, auditOperatorRoleSet, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"from": target.Role, "to": *req.Role})
 	}
 
 	if req.Active != nil {
@@ -873,6 +970,18 @@ func ConsoleUpdateOperator(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update operator"})
 			return
 		}
+
+		// The administrator now knows this operator's password, which is exactly
+		// what the reset-link route exists to avoid -- so the trail says an
+		// administrator chose it rather than recording it as an ordinary update.
+		// The password itself never reaches this call.
+		recordAudit(c, auditOperatorPasswordSet, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"chosen_by": "administrator"})
+	}
+
+	if req.Active != nil {
+		recordAudit(c, auditOperatorUpdated, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"active": gin.H{"from": target.Active, "to": *req.Active}})
 	}
 
 	updated, grants, ok := loadConsoleOperator(c)
@@ -908,6 +1017,12 @@ func ConsoleDeleteOperator(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove operator"})
 		return
 	}
+
+	// The role goes into the record because the account is gone by the time
+	// anybody reads it. audit_events denormalises its actor for the same reason,
+	// in the other direction.
+	recordAudit(c, auditOperatorDeleted, auditTargetOperator, target.PublicID,
+		target.Email, gin.H{"role": target.Role})
 
 	c.Status(http.StatusNoContent)
 }
@@ -976,6 +1091,16 @@ func ConsoleSetOperatorSites(c *gin.Context) {
 	if grants == nil {
 		grants = []models.SiteGrant{}
 	}
+
+	// The COUNT and whether the operator ended up unrestricted, rather than the
+	// list of site ids. The distinction that matters afterwards is "were they
+	// narrowed or widened", and an empty grant set means unrestricted -- which
+	// reads as the opposite of what it is unless it is stated.
+	recordAudit(c, auditOperatorSitesSet, auditTargetOperator, target.PublicID,
+		target.Email, gin.H{
+			"sites":     len(grants),
+			"all_sites": middleware.RoleAtLeast(target.Role, models.RoleAdmin) || len(grants) == 0,
+		})
 
 	c.JSON(http.StatusOK, gin.H{
 		"count":     len(grants),
