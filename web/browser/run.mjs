@@ -51,6 +51,11 @@ const SCREENS = [
   { name: 'terminals', path: '/terminals', ready: 'table, .state--empty' },
   { name: 'terminal detail', path: '/terminals/AT-0001', ready: '.lifecycle' },
   { name: 'sites', path: '/sites', ready: 'table, .state--empty' },
+  // The site detail page carries the offline-policy radio group: three options,
+  // each with a paragraph of consequence, which is the widest block of prose
+  // inside a form control anywhere in the console and the one most likely to
+  // overflow a phone.
+  { name: 'site detail', path: '/sites/site-a', ready: '.choice-list' },
   { name: 'operators', path: '/operators', ready: 'table, .state--empty' },
   { name: 'activity', path: '/activity', ready: 'table, .state--empty' },
   { name: 'events', path: '/events', ready: 'table, .state--empty' },
@@ -293,6 +298,42 @@ async function main() {
         )
 
         await page.keyboard.press('Escape')
+      }
+
+      // --- the one-time credential panel ------------------------------------
+      //
+      // Swept separately for the same reason the revoke dialog is: it is only
+      // reachable through two interactions, and it is where a credential, a
+      // warning fill, a copy control and an acknowledgement checkbox all sit
+      // inside a wide dialog. On a phone that is the densest thing the console
+      // renders, and the acknowledgement checkbox is the control that must not
+      // fall below the touch-target floor.
+      await page.goto(`${site.url}/sites/site-a`, { waitUntil: 'networkidle' })
+      const provision = page.locator('button', { hasText: /^Provision a terminal$/ }).first()
+      // Checked rather than skipped silently. A sweep that quietly does nothing
+      // reports "no violations" and has measured nothing, which is the failure
+      // mode a conditional block invites.
+      if (check(
+        (await provision.count()) > 0,
+        `${viewport.name}: the site page offers no way to provision a terminal, so the claim-code panel was never swept`,
+      )) {
+        await provision.click()
+        await page.waitForSelector('[role="dialog"]', { timeout: 5000 })
+        await page.fill('input[type="text"]', 'AT-0042')
+        await page.locator('button', { hasText: /^Issue claim code$/ }).click()
+        await page.waitForSelector('.credential', { timeout: 5000 })
+        await runAxe(page, `${viewport.name}/claim code panel`)
+
+        const credentialFits = await page.evaluate(() => {
+          const panel = document.querySelector('.credential')
+          if (!panel) return null
+          const box = panel.getBoundingClientRect()
+          return { overflowsX: box.right > window.innerWidth + 1 || box.left < -1 }
+        })
+        check(
+          credentialFits !== null && !credentialFits.overflowsX,
+          `${viewport.name}: the claim-code panel overflows the viewport horizontally`,
+        )
       }
 
       // --- the focus ring is actually visible -------------------------------

@@ -8,6 +8,8 @@ import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components
 import { Timestamp } from '../../components/Timestamp'
 import { useSite } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { ProvisionTerminalDialog } from './ClaimCodeDialog'
+import { OfflinePolicyPanel } from './OfflinePolicyPanel'
 import { SiteFormDialog } from './SiteFormDialog'
 import {
   RetireSiteDialog,
@@ -19,10 +21,16 @@ import { SiteSettingsPanel } from './SiteSettingsPanel'
 /**
  * One site: what it is, what state it is in, and what can be done to it.
  *
- * THE LIFECYCLE ACTIONS ARE ORDERED AND SEPARATED BY CONSEQUENCE — edit, then
- * rotate, then deactivate, then retire — with the irreversible one last and
+ * THE LIFECYCLE ACTIONS ARE ORDERED AND SEPARATED BY CONSEQUENCE — provision,
+ * edit, rotate, deactivate, then retire — with the irreversible one last and
  * visually apart. A row of equal-looking buttons is how somebody retires a live
  * location while meaning to rename it.
+ *
+ * PROVISIONING COMES FIRST AND ROTATION IS NOT NEXT TO IT, deliberately.
+ * "Register a terminal here" is the common, harmless act; "replace the secret
+ * every terminal here may depend on" is neither, and the two used to be reachable
+ * only through the same key. A claim code is now the answer to the first, so the
+ * provisioning key never has to leave the platform to bring hardware up.
  */
 export function SiteDetailPage() {
   const { siteId } = useParams<{ siteId: string }>()
@@ -31,6 +39,7 @@ export function SiteDetailPage() {
   const query = useSite(siteId)
 
   const [editing, setEditing] = useState(false)
+  const [provisioning, setProvisioning] = useState(false)
   const [rotating, setRotating] = useState(false)
   const [changingActivation, setChangingActivation] = useState(false)
   const [retiring, setRetiring] = useState(false)
@@ -87,6 +96,13 @@ export function SiteDetailPage() {
         actions={
           mayManage ? (
             <>
+              <button
+                type="button"
+                className="button button--primary"
+                onClick={() => setProvisioning(true)}
+              >
+                Provision a terminal
+              </button>
               <button type="button" className="button" onClick={() => setEditing(true)}>
                 Edit
               </button>
@@ -149,17 +165,29 @@ export function SiteDetailPage() {
             {site.api_key_prefix ? (
               <code className="mono">{site.api_key_prefix}…</code>
             ) : (
-              <span className="muted">Not shown</span>
+              <span className="muted">Not reported</span>
             )}
           </p>
           <p className="card__detail">
             {/*
-              The full key is deliberately unreachable. It is stored as a hash
-              and returned only when created or rotated; there is no endpoint
-              that could show it here, which is the intended design rather than
-              a missing feature.
+              TWO SEPARATE FACTS, and they used to be run together as "not
+              shown", which reads as a deliberate redaction and is only half
+              right.
+
+              The KEY is deliberately unreachable: stored as a SHA-256, returned
+              only when created or rotated. That is the design.
+
+              The PREFIX is not secret and is meant to be readable — it is the
+              12 characters that say which key a site is on without being
+              reconstructible. The column exists and the create and rotate
+              responses carry it, but `models.ConsoleSite` has no field for it,
+              so no GET returns one. This card can therefore only show a prefix
+              during the session that minted it. That is a gap in the API rather
+              than a decision, and calling it "not shown" implied otherwise.
             */}
-            Shown once when issued. Rotate to replace it.
+            {site.api_key_prefix
+              ? 'The non-secret prefix of the key issued in this session. The key itself is shown once and cannot be recovered.'
+              : 'The key itself is shown once and cannot be recovered. The non-secret prefix is not returned by any read endpoint, so it can only be displayed just after the key is created or rotated.'}
           </p>
         </article>
 
@@ -171,10 +199,21 @@ export function SiteDetailPage() {
         </article>
       </section>
 
+      {/*
+        ORDER MATTERS HERE. The outage policy is a safety decision about the
+        building and sits above the device configuration, which is a list of
+        preferences. It is also where the settings panel below points for the
+        grace period it no longer edits, so it has to be the thing you find first.
+      */}
+      <OfflinePolicyPanel site={site} />
+
       <SiteSettingsPanel siteId={site.id} siteName={site.name} />
 
       {editing ? (
         <SiteFormDialog open site={site} onClose={() => setEditing(false)} />
+      ) : null}
+      {provisioning ? (
+        <ProvisionTerminalDialog open site={site} onClose={() => setProvisioning(false)} />
       ) : null}
       {rotating ? (
         <RotateSiteKeyDialog open site={site} onClose={() => setRotating(false)} />

@@ -122,13 +122,23 @@ describe('disable, revoke and retire are presented as different operations', () 
     expect(within(dialog()).getByText(/no site visit/i)).toBeInTheDocument()
   })
 
-  it('says the hardware must RE-REGISTER after a revoke', async () => {
+  it('says the hardware must be RE-PROVISIONED after a revoke, and how', async () => {
     signIn()
     renderTerminal()
     await openLifecycle(/^revoke$/i)
 
     expect(within(dialog()).getByText(/destroyed/i)).toBeInTheDocument()
-    expect(within(dialog()).getByText(/re-register/i)).toBeInTheDocument()
+    // THE RECOVERY PATH, AND THE CORRECT ONE. This used to tell the operator to
+    // re-register with the site's provisioning key — which works, and is the
+    // habit claim codes exist to break: recovering one terminal does not need a
+    // credential that registers every terminal at the site for ever.
+    expect(within(dialog()).getByText(/claim code/i)).toBeInTheDocument()
+    // The serial appears twice in this dialog — in the recovery instruction and
+    // in the typed-confirmation label — and both are wanted.
+    expect(within(dialog()).getAllByText(/AT-0001/).length).toBeGreaterThan(1)
+    expect(
+      within(dialog()).queryByText(/re-register at the door using its site/i),
+    ).not.toBeInTheDocument()
     // And it names the situation it is for, not only what it does.
     expect(within(dialog()).getByText(/missing, stolen/i)).toBeInTheDocument()
   })

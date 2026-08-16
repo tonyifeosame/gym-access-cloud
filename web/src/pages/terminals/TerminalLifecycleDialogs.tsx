@@ -28,10 +28,12 @@ import {
  *             it. This is "it is faulty" or "this entrance is closed this month".
  *
  *   REVOKE    The device credential is destroyed. The hardware still exists and
- *             must re-register with the site's provisioning key. This is "it has
- *             been stolen" — and it is the operation that did not exist at all
- *             before, which meant a stolen terminal could only be dealt with by
- *             retiring its entire site.
+ *             must be re-provisioned to come back — with a CLAIM CODE for its
+ *             serial, not with the site's provisioning key, which is the whole
+ *             point of claim codes existing. This is "it has been stolen", and it
+ *             is the operation that did not exist at all before, which meant a
+ *             stolen terminal could only be dealt with by retiring its entire
+ *             site.
  *
  *   RETIRE    One-way. The row goes, the credential goes, the terminal leaves
  *             every list. Requires typing the serial. This is "the unit is
@@ -143,10 +145,25 @@ export function RevokeTerminalDialog({
         <>
           Use this when the hardware is <strong>missing, stolen, or out of your
           control</strong> — revoking is the only operation that makes the
-          credential itself stop working. To bring the unit back afterwards it must
-          re-register at the door using its site&apos;s provisioning key. Work
-          already queued for it will never be delivered. If the terminal is simply
-          faulty and still in your possession, disable it instead.
+          credential itself stop working. Work already queued for it will never be
+          delivered. If the terminal is simply faulty and still in your possession,
+          disable it instead.
+          <br />
+          <br />
+          {/*
+            THE RECOVERY PATH, CORRECTED. This used to say the unit must
+            re-register "using its site's provisioning key" — which is one way and
+            is now the worse one. Recovering a single terminal does not need a
+            credential that registers every terminal at the site for ever; it needs
+            a claim code for this serial, which is one use and expires. Naming the
+            key first was the console teaching the habit that claim codes exist to
+            break.
+          */}
+          To bring this unit back afterwards, issue a <strong>claim code</strong> for{' '}
+          <code className="mono">{terminal.serial_number}</code> from{' '}
+          <strong>{terminal.site_name}</strong> and redeem it at the terminal. That
+          gives this one unit a fresh credential without the site&apos;s provisioning
+          key leaving the platform.
         </>
       }
       // Typing the serial, because this is not reversible and the serial is
@@ -157,11 +174,15 @@ export function RevokeTerminalDialog({
       onConfirm={async () => {
         const result = await revoke.mutateAsync({ reason: reason.trim() || undefined })
         const cancelled = result.pending_jobs_cancelled ?? 0
-        notifications.success(
+        const queued =
           cancelled > 0
-            ? `${name} revoked. ${cancelled} queued change${cancelled === 1 ? '' : 's'} cancelled.`
-            : `${name} revoked`,
-        )
+            ? ` ${cancelled} queued change${cancelled === 1 ? '' : 's'} cancelled.`
+            : ''
+        // The SERVER'S OWN WORDS on recovery, appended rather than paraphrased.
+        // It is the authority on what re-registration requires, and a console
+        // sentence that drifted from it would be the one an operator followed.
+        const recovery = result.recovery ? ` ${result.recovery}` : ''
+        notifications.success(`${name} revoked.${queued}${recovery}`)
       }}
       onClose={onClose}
     >

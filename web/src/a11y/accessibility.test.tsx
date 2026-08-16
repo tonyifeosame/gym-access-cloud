@@ -16,6 +16,7 @@ import { ApplicationsPage } from '../pages/applications/ApplicationsPage'
 import { DashboardPage } from '../pages/DashboardPage'
 import { OperatorsListPage } from '../pages/operators/OperatorsListPage'
 import { PeopleListPage } from '../pages/people/PeopleListPage'
+import { SiteDetailPage } from '../pages/sites/SiteDetailPage'
 import { SitesListPage } from '../pages/sites/SitesListPage'
 import { TerminalDetailPage } from '../pages/terminals/TerminalDetailPage'
 import { TerminalsListPage } from '../pages/terminals/TerminalsListPage'
@@ -133,6 +134,7 @@ function renderInShell(path: string, client = makeTestQueryClient()) {
           { path: 'terminals', element: <TerminalsListPage /> },
           { path: 'terminals/:serial', element: <TerminalDetailPage /> },
           { path: 'sites', element: <SitesListPage /> },
+          { path: 'sites/:siteId', element: <SiteDetailPage /> },
           { path: 'operators', element: <OperatorsListPage /> },
           { path: 'activity', element: <ActivityPage /> },
           { path: 'events', element: <EventsPage /> },
@@ -161,6 +163,16 @@ describe('every screen passes the automated sweep', () => {
     ['terminals', '/terminals', () => screen.findByText('AT-0001')],
     ['one terminal', '/terminals/AT-0001', () => screen.findByRole('heading', { name: 'Lifecycle' })],
     ['sites', '/sites', () => screen.findByText(SITE_A.site_name)],
+    // The site detail page carries the offline-policy radio group, whose options
+    // each have a paragraph of description wired by aria-describedby. A fieldset
+    // built the obvious way — descriptions inside the labels, or referenced by
+    // ids that do not exist — is exactly what axe catches and a sighted review
+    // does not.
+    [
+      'one site',
+      `/sites/${SITE_A.site_id}`,
+      () => screen.findByRole('heading', { name: 'Behaviour during an outage' }),
+    ],
     ['operators', '/operators', () => screen.findByText('viewer@example.com')],
     ['activity', '/activity', () => screen.findByRole('heading', { name: 'Activity' })],
     ['events', '/events', () => screen.findByRole('heading', { name: 'Events' })],
@@ -210,6 +222,26 @@ describe('dialogs', () => {
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: /^move$/i }))
     await screen.findByRole('dialog')
+    await expectNoViolations()
+  })
+
+  it('the claim-code panel is free of violations', async () => {
+    // A one-time credential inside an alertdialog inside a dialog. Nested
+    // dialog roles and a heading made programmatically focusable are both easy
+    // to get wrong, and neither is visible without a sweep.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell(`/sites/${SITE_A.site_id}`)
+
+    await screen.findByRole('heading', { name: 'Behaviour during an outage' })
+    await user.click(screen.getByRole('button', { name: 'Provision a terminal' }))
+    await screen.findByRole('dialog')
+    await expectNoViolations()
+
+    await user.type(screen.getByLabelText(/Serial number/), 'AT-0099')
+    await user.click(screen.getByRole('button', { name: 'Issue claim code' }))
+
+    await screen.findByLabelText('Claim code')
     await expectNoViolations()
   })
 })

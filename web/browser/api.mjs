@@ -44,6 +44,8 @@ const SITES = [
     active: true,
     terminal_count: 3,
     created_at: '2026-01-01T00:00:00Z',
+    offline_policy: 'CACHED_GRACE',
+    offline_grace_minutes: 720,
   },
   {
     id: 'site-b',
@@ -53,6 +55,10 @@ const SITES = [
     active: false,
     terminal_count: 1,
     created_at: '2026-02-01T00:00:00Z',
+    // A different policy from its neighbour, so the sites table renders both
+    // badge tones and the contrast check sees each.
+    offline_policy: 'DENY_ALL',
+    offline_grace_minutes: 0,
   },
 ]
 
@@ -297,7 +303,24 @@ const ROUTES = [
     return { ...found, application_mode: 'MULTI_PURPOSE', effective_applications: ['ACCESS_CONTROL', 'ATTENDANCE'] }
   }],
   [/\/api\/v1\/console\/terminals$/, () => ({ count: TERMINALS.length, terminals: TERMINALS })],
-  [/\/api\/v1\/console\/sites\/[^/]+\/settings$/, () => ({ settings: {}, settings_version: 1 })],
+  [/\/api\/v1\/console\/sites\/[^/]+\/settings$/, () => ({
+    // Two keys the console deliberately no longer edits, so the browser pass
+    // renders the "settings this console no longer edits" notice and its list.
+    settings: { unlock_duration_seconds: 5, tamper_alarm: true, offline_grace_minutes: 720 },
+    settings_version: 4,
+  })],
+  // Before the bare `/sites/{id}` pattern, which would otherwise swallow it.
+  [/\/api\/v1\/console\/sites\/[^/]+\/claim-codes$/, () => ({
+    claim_code: 'H7K2-M9PX',
+    code_prefix: 'H7K2',
+    serial_number: 'AT-0042',
+    site_name: SITES[0].name,
+    expires_at: '2026-08-15T13:00:00Z',
+    shown_once: true,
+    // Non-zero, so the "an earlier code stopped working" warning is rendered and
+    // its contrast measured.
+    superseded_codes: 1,
+  })],
   [/\/api\/v1\/console\/sites\/[^/]+$/, () => SITES[0]],
   [/\/api\/v1\/console\/sites$/, () => ({ count: SITES.length, sites: SITES })],
   [/\/api\/v1\/console\/people\/[^/]+$/, () => PEOPLE[0]],

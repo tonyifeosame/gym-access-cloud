@@ -30,6 +30,10 @@ const SITES = [
     timezone: 'Africa/Abuja',
     active: false,
     terminal_count: 0,
+    // A different outage policy from its neighbour, so a list rendering one
+    // value for every row cannot pass.
+    offline_policy: 'DENY_ALL',
+    offline_grace_minutes: 0,
   }),
 ]
 
@@ -199,6 +203,21 @@ describe('site detail', () => {
     expect(screen.getByText(/does not exist, or it is not part of your company/)).toBeInTheDocument()
   })
 
+  it('SHOWS WHAT EACH SITE DOES DURING AN OUTAGE, in the list', async () => {
+    // "Which of our locations keeps opening when the network goes" is a question
+    // asked about a whole estate, and answering it by opening each site in turn
+    // is how it stops being asked. The columns are on every site projection, so
+    // this costs no extra request.
+    signIn()
+    renderSites()
+
+    const lagos = (await screen.findByText(SITE_A.site_name)).closest('tr') as HTMLElement
+    expect(within(lagos).getByText('Keep working for a limited time')).toBeInTheDocument()
+
+    const abuja = screen.getByText(SITE_B.site_name).closest('tr') as HTMLElement
+    expect(within(abuja).getByText('Refuse everybody')).toBeInTheDocument()
+  })
+
   it('explains a 403 as a scope problem rather than as a failure', async () => {
     signIn('MANAGER', { all_sites: false, sites: [SITE_A] })
     renderSites(`/sites/${SITE_B.site_id}`)
@@ -212,7 +231,13 @@ describe('site detail', () => {
 
     await screen.findByRole('heading', { name: SITE_A.site_name, level: 1 })
     expect(screen.getByText('Provisioning key')).toBeInTheDocument()
-    expect(screen.getByText(/Shown once when issued/)).toBeInTheDocument()
+    // TWO SEPARATE FACTS, and the card now keeps them apart. The KEY is
+    // unrecoverable by design; the non-secret PREFIX is simply not returned by
+    // any read endpoint, which is a gap in the API rather than a decision. The
+    // card used to run them together as "not shown", which implied the prefix
+    // was being withheld on purpose.
+    expect(screen.getByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+    expect(screen.getByText(/not returned by any read endpoint/i)).toBeInTheDocument()
     // No GET populates a full key, and nothing on the page requests one.
     expect(document.body.textContent).not.toMatch(/ats_[0-9a-f]{64}/)
   })
@@ -395,10 +420,13 @@ describe('deactivation and retirement are different actions', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Retire' }))
 
+    // Scoped to the dialog: the offline-policy panel behind it also counts the
+    // site's terminals, and an unscoped match would pass on the wrong element.
+    const confirm = within(screen.getByRole('dialog'))
     // Site A has two terminals in the fixture.
-    expect(screen.getByText(/2 terminals/)).toBeInTheDocument()
-    expect(screen.getByText(/cannot be undone/)).toBeInTheDocument()
-    expect(screen.getByText(/deactivate it instead/)).toBeInTheDocument()
+    expect(confirm.getByText(/2 terminals/)).toBeInTheDocument()
+    expect(confirm.getByText(/cannot be undone/)).toBeInTheDocument()
+    expect(confirm.getByText(/deactivate it instead/)).toBeInTheDocument()
   })
 
   it('retirement requires typing the site name', async () => {
@@ -480,7 +508,12 @@ describe('rotating the provisioning key', () => {
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate key' }),
     )
 
-    expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+    // Scoped to the dialog: the provisioning-key card on the page behind it says
+    // the same thing about the key it cannot show.
+    const credential = within(screen.getByRole('dialog'))
+    expect(
+      await credential.findByText(/shown once and cannot be recovered/i),
+    ).toBeInTheDocument()
     const key = screen.getByLabelText('Site API key') as HTMLInputElement
     expect(key.value).toMatch(/^ats_[0-9a-f]{64}$/)
 
