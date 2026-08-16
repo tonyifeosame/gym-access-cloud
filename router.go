@@ -441,6 +441,11 @@ func NewRouter() *gin.Engine {
 		// Access endpoints
 		access := v1.Group("/access")
 		{
+			// DEPRECATED, and now truthful (S4). It answers from the
+			// authorization engine and REQUIRES ?terminal=SERIAL, because a
+			// decision without a door is not a decision. The console's
+			// POST /console/terminals/:serial/evaluate is the successor: same
+			// engine, operator identity, and a grant check on the terminal.
 			access.GET("/:member_id", handlers.CheckAccess)
 			access.POST("/log", handlers.LogAccess)
 			access.GET("/logs", handlers.GetAccessLogs)

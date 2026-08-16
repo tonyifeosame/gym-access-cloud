@@ -145,12 +145,13 @@ type AccessCheckRequest struct {
 	MemberID string `json:"member_id" binding:"required"`
 }
 
-// AccessCheckResponse is the response for access check
-type AccessCheckResponse struct {
-	Granted bool   `json:"granted"`
-	Message string `json:"message"`
-	Status  string `json:"status"`
-}
+// AccessCheckResponse is gone with the function that built it (S4).
+//
+// It carried `granted`, `message` and `status` for an answer computed from
+// `people.active` alone. GET /access/{member_id} still emits those three keys so
+// an existing client keeps parsing, but they now come from AccessDecision --
+// which is the type that actually knows what it is talking about, and the one a
+// new field belongs on.
 
 // EnrollmentStartRequest is the request to start enrollment
 type EnrollmentStartRequest struct {
@@ -396,6 +397,25 @@ type DeviceHeartbeatRequest struct {
 	Status           string `json:"status,omitempty"` // ONLINE, UPDATING or ERROR
 	Error            string `json:"error,omitempty"`
 	IPAddress        string `json:"ip_address,omitempty"`
+
+	// MemberCapacity is how many people this terminal can hold at once (FW-01).
+	//
+	// OPTIONAL, AND ITS ABSENCE IS MEANINGFUL. Every terminal in the field today
+	// omits it, and the server treats "not reported" as "unknown" rather than
+	// substituting a constant -- the on-device ceiling has already changed once
+	// (64 to 256) and a server that guessed would refuse rosters a terminal can
+	// hold. See database/capacity.go.
+	//
+	// A pointer so a terminal reporting 0 is distinguishable from one reporting
+	// nothing. Zero is refused rather than stored: a terminal that can hold
+	// nobody is not a state the firmware can be in, and accepting it would
+	// silently stop that door being given a roster at all.
+	//
+	// THE FIRMWARE HALF IS NOT BUILT (AI #2). The exact contract is written out
+	// in docs/sync-protocol.md; this side is ready for it and is useful before
+	// it lands, because the column is also settable by an operator who knows
+	// what they installed.
+	MemberCapacity *int `json:"member_capacity,omitempty"`
 }
 
 // DeviceInventory is a device as the dashboard sees it, including whether it is
@@ -430,6 +450,20 @@ type DeviceInventory struct {
 	LastHeartbeatAt        *time.Time `json:"last_heartbeat_at,omitempty"`
 	CurrentFirmwareVersion string     `json:"current_firmware_version"`
 	FirmwareOutdated       bool       `json:"firmware_outdated"`
+
+	// Capacity (FW-01).
+	//
+	// MemberCapacity is OMITTED when the terminal has never reported one, and a
+	// client must render that as "unknown" rather than as unlimited or as zero.
+	// Every terminal in the field today omits it.
+	//
+	// RosterOverflowAt is when this terminal was last found to have more
+	// permitted people than it can hold, and RosterOverflowCount how many that
+	// was. Both are stored state rather than a live count, so a list read costs
+	// nothing extra -- the live number is on the single-terminal read.
+	MemberCapacity      *int       `json:"member_capacity,omitempty"`
+	RosterOverflowAt    *time.Time `json:"roster_overflow_at,omitempty"`
+	RosterOverflowCount *int       `json:"roster_overflow_count,omitempty"`
 }
 
 // FleetSummary is the device-count rollup a dashboard header shows
@@ -553,6 +587,22 @@ type SyncJobResult struct {
 type SiteSettings struct {
 	Settings json.RawMessage `json:"settings"`
 	Version  int             `json:"settings_version"`
+
+	// THE EFFECTIVE POLICY, ALWAYS PRESENT (F2/F3/F4).
+	//
+	// `settings` is the free-form object an operator writes. The offline policy
+	// is NOT in it -- it lives in validated columns, and the terminal is sent
+	// those columns layered over the blob (database/device_settings.go).
+	//
+	// Without these two fields a caller reading this endpoint saw the blob and
+	// had no way to learn what the terminals at that site are actually running.
+	// If somebody had written `offline_grace_minutes` into the free-form object,
+	// the read showed THAT number -- convincing, and inert, because the merge
+	// overwrites it on the way to the device. Writing the reserved keys is now
+	// refused outright, and these fields say what is really in force, so the two
+	// halves of that trap are both closed.
+	OfflinePolicy       string `json:"offline_policy"`
+	OfflineGraceMinutes int    `json:"offline_grace_minutes"`
 }
 
 // SettingsSyncPayload is the snapshot a device applies for a SETTINGS job. The

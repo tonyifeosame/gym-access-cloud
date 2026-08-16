@@ -138,6 +138,15 @@ func GetMembersChangedSince(companyID int64, since string) ([]models.Member, err
 // CreateMember creates a new member within a company and queues a CREATE sync
 // job for every device that must learn about them.
 func CreateMember(companyID int64, member *models.Member) error {
+	// FW-09, enforced at the store rather than only at the two handlers above
+	// it. Both call this, and so would a third; a person whose id no terminal
+	// can hold must not be creatable through any of them, because the failure
+	// does not appear here -- it appears at a door, ten retries later, as a
+	// counter.
+	if err := models.ValidateExternalID(member.MemberID); err != nil {
+		return err
+	}
+
 	tx, err := DB.Begin()
 	if err != nil {
 		return err
@@ -515,41 +524,19 @@ func GetSiteAccessLogsByMember(companyID, siteID int64, memberID string, limit i
 	return scanAccessLogs(rows)
 }
 
-// CheckMemberAccess checks if a member has access.
+// CheckMemberAccess IS DELETED, DELIBERATELY, AND THIS NOTE REPLACES IT (S4).
 //
-// This deliberately still checks only membership status. Evaluating the
-// `permissions` table (door/site scope, schedules, validity windows) is
-// business logic held back for a later sprint.
-func CheckMemberAccess(companyID int64, memberID string) (*models.AccessCheckResponse, error) {
-	var active bool
-	var membershipType string
-
-	query := `SELECT active, membership_type FROM people
-	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
-	err := DB.QueryRow(query, memberID, companyID).Scan(&active, &membershipType)
-
-	if err == sql.ErrNoRows {
-		return &models.AccessCheckResponse{
-			Granted: false,
-			Message: "Member not found",
-			Status:  "NOT_FOUND",
-		}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if !active {
-		return &models.AccessCheckResponse{
-			Granted: false,
-			Message: "Membership inactive",
-			Status:  "INACTIVE",
-		}, nil
-	}
-
-	return &models.AccessCheckResponse{
-		Granted: true,
-		Message: "Access Granted",
-		Status:  "ACTIVE",
-	}, nil
-}
+// It answered "is this person allowed" from `people.active` and nothing else,
+// and returned the string "Access Granted" when the answer was yes. Its own
+// comment said the permission model was "held back for a later sprint" -- that
+// sprint was APP-02, the engine exists in database/authorization.go, and this
+// function outlived the reason it was allowed to be wrong.
+//
+// It is removed rather than deprecated because the hazard is that it LOOKS like
+// the thing you want. A future handler needing an authorization answer that
+// found a function called CheckMemberAccess would reasonably use it, and would
+// ship a door that ignores every rule an operator wrote. Authorize is the only
+// implementation of this question.
+//
+// The removal is safe: handlers.CheckAccess was the sole caller and now calls
+// Authorize with the terminal it resolved.
