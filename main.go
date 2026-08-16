@@ -14,6 +14,7 @@ import (
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/maintenance"
+	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -133,6 +134,19 @@ func main() {
 	// was the audit's first blocker (GP-01).
 	if _, err := bootstrap.EnsureFirstPlatformAdmin(); err != nil {
 		log.Fatalf("Platform bootstrap: %v", err)
+	}
+
+	// SEC-05. Announced at startup rather than left to be discovered, because
+	// this is the one setting that lets a site's provisioning key authenticate
+	// as any terminal at that site -- and the deployment that has it on is
+	// usually the one that turned it on for a migration and forgot.
+	if middleware.LegacyDeviceAuthEnabled() {
+		log.Printf("SECURITY: %s is enabled. A site provisioning key plus a serial "+
+			"can authenticate AS a terminal, which means holding that key is "+
+			"equivalent to holding every device key at the site. This exists only "+
+			"to keep firmware predating per-device credentials working while a "+
+			"fleet is upgraded. Claim the remaining terminals and unset it.",
+			middleware.LegacyDeviceAuthEnv)
 	}
 
 	r := NewRouter()

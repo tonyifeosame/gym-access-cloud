@@ -83,12 +83,22 @@ func TestDeviceAuthentication(t *testing.T) {
 		{"no credential", nil, http.StatusUnauthorized},
 		{"unknown device key", deviceAuth("atd_" + "0"), http.StatusUnauthorized},
 		{"site key without serial", siteAuth(env.siteAKey), http.StatusUnauthorized},
+
+		// SEC-05. This pair used to be 200, and that was the finding: the site
+		// PROVISIONING key plus a serial anybody can read off a label was
+		// accepted as proof of being that terminal. It is off by default now.
+		// The behaviour behind LEGACY_DEVICE_AUTH, and the reason it still
+		// exists, are in device_auth_hardening_test.go.
 		{"legacy site key plus serial", map[string]string{
 			"X-API-Key": env.siteAKey, "X-Device-Serial": "ESP32-0001",
-		}, http.StatusOK},
+		}, http.StatusUnauthorized},
+
+		// Also 401 rather than the 404 it used to be. A caller with no accepted
+		// credential must not be able to probe which serials are registered at
+		// a site -- the refusal has to happen before the lookup.
 		{"legacy pair naming an unknown serial", map[string]string{
 			"X-API-Key": env.siteAKey, "X-Device-Serial": "ESP32-NOPE",
-		}, http.StatusNotFound},
+		}, http.StatusUnauthorized},
 	}
 
 	for _, tc := range cases {
@@ -530,8 +540,11 @@ func TestEnrollingAnActiveMemberLeavesThemActive(t *testing.T) {
 		t.Error("an active member became inactive after enrolment")
 	}
 
-	// And the door still opens for them.
-	check := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	// And the door still opens for them. The check names the terminal now (S4):
+	// an authorization answer without a door was never meaningful, and the
+	// endpoint no longer pretends otherwise.
+	check := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := check.Body["granted"].(bool); !granted {
 		t.Errorf("active member was denied after enrolment (body %s)", check.Raw)
 	}
@@ -574,7 +587,8 @@ func TestASuspendedMemberCannotGainAccessByEnrolling(t *testing.T) {
 		t.Fatalf("suspending got %d, want 200 (body %s)", susp.Code, susp.Raw)
 	}
 
-	before := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	before := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := before.Body["granted"].(bool); granted {
 		t.Fatalf("fixture wrong: suspended member was already granted (body %s)", before.Raw)
 	}
@@ -583,7 +597,8 @@ func TestASuspendedMemberCannotGainAccessByEnrolling(t *testing.T) {
 		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
 		deviceAuth(key))
 
-	after := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	after := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := after.Body["granted"].(bool); granted {
 		t.Errorf("a suspended member was granted access after enrolling (body %s)", after.Raw)
 	}

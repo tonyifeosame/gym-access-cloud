@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
 	"access-terminal-cloud-api/models"
 )
 
@@ -92,14 +93,30 @@ func TestLegacyAuthCannotClaimAnotherSitesSerial(t *testing.T) {
 	env := newTestEnv(t)
 	env.registerDevice(env.siteAKey, "ESP32-AAA")
 
-	// The deprecated path trusts a claimed serial, so it must still be checked
-	// against the site the key belongs to.
-	res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, map[string]string{
+	crossSite := map[string]string{
 		"X-API-Key": env.siteBKey, "X-Device-Serial": "ESP32-AAA",
-	})
-	if res.Code != http.StatusNotFound {
-		t.Errorf("legacy cross-site auth got %d, want 404 (body %s)", res.Code, res.Raw)
 	}
+
+	// SEC-05: by default the pair is refused before the serial is even looked
+	// up, so this cannot be used to discover what is registered where.
+	t.Run("refused outright by default", func(t *testing.T) {
+		defaultDeviceAuth(t)
+		res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, crossSite)
+		if res.Code != http.StatusUnauthorized {
+			t.Errorf("legacy cross-site auth got %d, want 401 (body %s)", res.Code, res.Raw)
+		}
+	})
+
+	// And when a deployment mid-upgrade re-opens the path, the ORIGINAL property
+	// still holds: the path trusts a claimed serial, so the serial must be
+	// checked against the site the key belongs to.
+	t.Run("still scoped to the key's own site when enabled", func(t *testing.T) {
+		t.Setenv(middleware.LegacyDeviceAuthEnv, "1")
+		res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, crossSite)
+		if res.Code != http.StatusNotFound {
+			t.Errorf("legacy cross-site auth got %d, want 404 (body %s)", res.Code, res.Raw)
+		}
+	})
 }
 
 func TestCredentialRotationInvalidatesTheOldKey(t *testing.T) {
