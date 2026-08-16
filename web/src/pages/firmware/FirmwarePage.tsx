@@ -14,40 +14,56 @@ import { Timestamp } from '../../components/Timestamp'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import { useCreateFirmware, useFirmware, useSetCurrentFirmware, useTerminals } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { firmwareOfferability, terminalsOffered } from './offerability'
 
 /**
  * The firmware catalogue.
  *
  * WHAT MARKING A BUILD "CURRENT" ACTUALLY DOES, because it is the one thing an
- * operator will assume wrongly and the assumption is expensive:
+ * operator will assume wrongly and the assumption is now expensive in the other
+ * direction:
  *
- *   It changes what the fleet is COMPARED TO. Nothing is sent anywhere. No
- *   terminal downloads, installs or restarts. The platform has no OTA (FW-02),
- *   so `is_current` is the value every "is this terminal outdated" report is
- *   measured against and is nothing else.
+ *   IT STARTS A ROLLOUT. Every terminal of that device type on that release
+ *   channel is offered the build on its next heartbeat, and a terminal that
+ *   takes an offer downloads the image, verifies its digest, writes it to flash
+ *   and reboots into a trial boot that rolls itself back only if the new
+ *   firmware cannot reach its sensor or the platform.
  *
- * Somebody who publishes a build, marks it current, and walks away believing the
- * fleet is updating has been misled by a screen — so the sentence appears on the
- * page, in the publish dialog, and in the confirmation, rather than once at the
- * top where it can be scrolled past.
+ * THIS PAGE PREVIOUSLY SAID THE OPPOSITE. It said AccessLink had no
+ * over-the-air update and that promoting a build changed nothing but a report —
+ * which was true when it was written and stopped being true when the heartbeat
+ * began carrying `firmware_update`. A screen that tells an operator a dangerous
+ * action is safe is worse than one that says nothing, so the sentence is now the
+ * warning it should be, and it appears on the page, in the publish dialog and in
+ * the confirmation rather than once at the top where it can be scrolled past.
  *
- * WHY THIS SCREEN EXISTS AT ALL. These routes used to live in the site-key tree,
- * where any provisioning secret — a value that lives on hardware bolted to a wall
- * — could add a build and move the deployment target every outdated report is
- * measured against. They are ADMIN console routes now, and this is the surface
- * for them.
+ * WHAT THE CONSOLE ADDS THAT THE API DOES NOT. The server refuses to offer a
+ * build it could not populate — no digest, no size, a plaintext URL, a string
+ * longer than the device's buffer — and logs the reason server-side where no
+ * operator will ever see it. So each row here states whether the platform would
+ * actually offer it, and promotion of an undeliverable build is confirmed as
+ * what it is: a change of target that will update nothing. See `offerability.ts`.
+ *
+ * WHY THIS SCREEN IS ADMIN. These routes used to live in the site-key tree,
+ * where any provisioning secret — a value that lives on hardware bolted to a
+ * wall — could add a build and move the deployment target. That was a leaked
+ * door credential with control of the firmware target; now that the target
+ * drives an actual rollout, it would have been a leaked door credential with
+ * control of what every terminal runs.
  *
  * THE STRUCTURE MIRRORS THE MODEL. "Current" is per company, device type AND
- * release channel: promoting a build demotes only its own peers. Grouping the
- * catalogue that way is what makes "make current" unambiguous — a flat list
- * invites somebody to believe there is one current build for everything.
+ * release channel: promoting a build offers it to that pair and nothing else.
+ * Grouping the catalogue that way is what makes "make current" unambiguous — a
+ * flat list invites somebody to believe there is one current build for
+ * everything.
  */
 export function FirmwarePage() {
   const { session } = useSession()
   const firmware = useFirmware()
-  // The fleet, so each group can say what it is actually describing. Scoped by
-  // the operator's grants exactly as the Terminals page is, which is stated
-  // rather than left to be inferred from a number that looks company-wide.
+  // The fleet, so each group can say what it is actually describing AND how many
+  // terminals a promotion would reach. Scoped by the operator's grants exactly
+  // as the Terminals page is, which is stated rather than left to be inferred
+  // from a number that looks company-wide.
   const terminals = useTerminals()
 
   const [publishing, setPublishing] = useState(false)
@@ -71,11 +87,15 @@ export function FirmwarePage() {
     )
   }
 
+  const promotingGroup = promoting
+    ? (groups.find((group) => group.key === targetKey(promoting)) ?? null)
+    : null
+
   return (
     <div className="page">
       <PageHeader
         title="Firmware"
-        lead="The builds this company knows about, and which one each part of the fleet is measured against."
+        lead="The builds this company knows about, and which one each part of the fleet is being offered."
         actions={
           mayManage ? (
             <button
@@ -91,19 +111,22 @@ export function FirmwarePage() {
 
       {/*
         THE LOAD-BEARING SENTENCE. Every other honest thing on this page is a
-        restatement of it.
+        restatement of it, and it is the exact opposite of what this notice said
+        before over-the-air updates existed.
       */}
-      <InfoNote tone="warning" title="Nothing here updates a terminal">
+      <InfoNote tone="warning" title="Making a build current updates terminals">
         <p>
-          AccessLink has <strong>no over-the-air update</strong>. Publishing a
-          build records that it exists; marking one current sets the version the
-          fleet is <strong>compared to</strong>. No terminal downloads anything,
-          and none will change its firmware as a result of anything on this page.
+          AccessLink <strong>does</strong> update terminals over the air. Marking a
+          build current offers it to every terminal of that device type on that
+          release channel, on its next heartbeat — and a terminal that takes the
+          offer <strong>downloads it, writes it to flash and reboots</strong>,
+          without anybody visiting the site.
         </p>
         <p>
-          Installing firmware is a separate, physical operation. What this
-          catalogue gives you is an accurate answer to “which terminals are
-          behind”, on <Link to="/terminals">Terminals</Link>.
+          Publishing a build only records that it exists; nothing is offered until
+          it is made current. That second step is the one to be careful with, and
+          it is confirmed separately. Which terminals are behind is on{' '}
+          <Link to="/terminals">Terminals</Link>.
         </p>
       </InfoNote>
 
@@ -111,12 +134,14 @@ export function FirmwarePage() {
         <InfoNote title="No builds recorded">
           <p>
             Nothing has been published, so every terminal reports as up to date —
-            not because it is, but because there is nothing to compare it with.
+            not because it is, but because there is nothing to compare it with, and
+            nothing is being offered to anything.
           </p>
           <p>
             Publishing the first build for a device type and channel is what makes
-            “outdated” mean anything, and it may mark terminals outdated the
-            moment it lands. Nothing about those terminals will have changed.
+            “outdated” mean anything, and it may mark terminals outdated the moment
+            it lands. Nothing about those terminals will have changed until a build
+            is made current.
           </p>
         </InfoNote>
       ) : (
@@ -141,11 +166,11 @@ export function FirmwarePage() {
                 ) : (
                   <>
                     {group.terminalCount} terminal{group.terminalCount === 1 ? '' : 's'} you can
-                    see {group.terminalCount === 1 ? 'is' : 'are'} measured against it
+                    see {group.terminalCount === 1 ? 'is' : 'are'} on it
                     {group.current ? (
                       <>
                         , of which <strong>{group.onCurrent}</strong>{' '}
-                        {group.onCurrent === 1 ? 'is' : 'are'} running{' '}
+                        {group.onCurrent === 1 ? 'is' : 'are'} already running{' '}
                         <code className="mono">{group.current.version}</code>
                       </>
                     ) : null}
@@ -157,71 +182,21 @@ export function FirmwarePage() {
 
             {!group.current ? (
               <InfoNote title="No current build for this combination">
-                Terminals here are compared with nothing, so they all report as up
-                to date. Mark a build current to change that.
+                Nothing is being offered to terminals here, and they all report as up
+                to date because there is nothing to compare them with. Making a build
+                current changes both.
               </InfoNote>
             ) : null}
 
             <ul className="rule-list">
               {group.versions.map((version) => (
-                <li key={version.id} className="rule" data-effect={version.is_current ? 'ALLOW' : undefined}>
-                  <div className="rule__main">
-                    <h3 className="rule__title">
-                      <code className="mono">{version.version}</code>
-                      {version.is_current ? (
-                        <Badge tone="positive">Current target</Badge>
-                      ) : (
-                        <Badge>Recorded</Badge>
-                      )}
-                      {version.is_mandatory ? <Badge tone="warning">Marked mandatory</Badge> : null}
-                    </h3>
-
-                    {version.release_notes ? (
-                      <p className="rule__detail">{version.release_notes}</p>
-                    ) : null}
-
-                    <p className="rule__detail">
-                      Published{' '}
-                      <Timestamp value={version.published_at ?? version.created_at} relative />
-                      {version.size_bytes ? <> · {formatBytes(version.size_bytes)}</> : null}
-                    </p>
-
-                    {version.checksum_sha256 ? (
-                      <p className="rule__detail">
-                        Checksum <code className="mono">{version.checksum_sha256}</code>
-                      </p>
-                    ) : null}
-
-                    {/*
-                      Shown as text and never as a link. There is no OTA, so this
-                      is a note about where a human can find the file — offering
-                      it as something to click would suggest the platform fetches
-                      it, which is exactly the belief this page exists to prevent.
-                    */}
-                    {version.download_url ? (
-                      <p className="rule__detail">
-                        Stored at <code className="mono">{version.download_url}</code>
-                      </p>
-                    ) : null}
-
-                    {version.is_mandatory ? (
-                      <p className="rule__detail">
-                        <strong>“Mandatory” is recorded, not enforced.</strong> Nothing
-                        in the platform acts on it, because nothing installs firmware.
-                      </p>
-                    ) : null}
-                  </div>
-
-                  {mayManage && !version.is_current ? (
-                    <button
-                      type="button"
-                      className="button"
-                      onClick={() => setPromoting(version)}
-                    >
-                      Make current
-                    </button>
-                  ) : null}
-                </li>
+                <VersionRow
+                  key={version.id}
+                  version={version}
+                  terminals={group.terminals}
+                  mayManage={mayManage}
+                  onPromote={() => setPromoting(version)}
+                />
               ))}
             </ul>
           </section>
@@ -233,9 +208,9 @@ export function FirmwarePage() {
         than an omission. Unlike Applications — which any operator may read and
         only an OWNER may change — the catalogue's READ is ADMIN too
         (`admin.GET("/firmware")`), so anybody who can open this page can also
-        publish and promote. The `mayManage` guards below are kept as
-        defence in depth and as documentation of the role, but a "you can look
-        but not touch" notice would describe a state no operator can be in.
+        publish and promote. The `mayManage` guards are kept as defence in depth
+        and as documentation of the role, but a "you can look but not touch"
+        notice would describe a state no operator can be in.
       */}
 
       {publishing ? (
@@ -245,14 +220,145 @@ export function FirmwarePage() {
         <MakeCurrentDialog
           open
           version={promoting}
-          previous={
-            groups.find((group) => group.key === targetKey(promoting))?.current ?? null
-          }
-          affected={groups.find((group) => group.key === targetKey(promoting))?.terminalCount ?? 0}
+          previous={promotingGroup?.current ?? null}
+          terminals={promotingGroup?.terminals ?? []}
           onClose={() => setPromoting(null)}
         />
       ) : null}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// One build
+// ---------------------------------------------------------------------------
+
+/**
+ * A catalogue row.
+ *
+ * The row says three separate things and keeps them separate: what the build is,
+ * whether it is the target, and whether the platform would actually send it. The
+ * third is the one that did not exist before and is the one that turns "OTA does
+ * not work" into a line naming the field to fix.
+ */
+function VersionRow({
+  version,
+  terminals,
+  mayManage,
+  onPromote,
+}: {
+  version: FirmwareVersion
+  /** The fleet on this device type and channel, for the "would reach" count. */
+  terminals: Terminal[]
+  mayManage: boolean
+  onPromote: () => void
+}) {
+  const offerability = firmwareOfferability(version)
+  const wouldReach = terminalsOffered(version, terminals).length
+
+  return (
+    <li className="rule" data-effect={version.is_current ? 'ALLOW' : undefined}>
+      <div className="rule__main">
+        <h3 className="rule__title">
+          <code className="mono">{version.version}</code>
+          {version.is_current ? (
+            <Badge tone="positive">Current target</Badge>
+          ) : (
+            <Badge>Recorded</Badge>
+          )}
+          {version.is_mandatory ? <Badge tone="warning">Mandatory</Badge> : null}
+          {offerability.deliverable ? null : <Badge tone="danger">Cannot be sent</Badge>}
+        </h3>
+
+        {version.release_notes ? (
+          <p className="rule__detail">{version.release_notes}</p>
+        ) : null}
+
+        <p className="rule__detail">
+          Published{' '}
+          <Timestamp value={version.published_at ?? version.created_at} relative />
+          {version.size_bytes ? <> · {formatBytes(version.size_bytes)}</> : null}
+        </p>
+
+        {version.checksum_sha256 ? (
+          <p className="rule__detail">
+            Checksum <code className="mono">{version.checksum_sha256}</code>
+          </p>
+        ) : null}
+
+        {/*
+          Shown as text and never as a link. Terminals fetch this; an operator
+          should not, and offering it as something to click invites somebody to
+          download a firmware image into their browser by accident.
+        */}
+        {version.download_url ? (
+          <p className="rule__detail">
+            Terminals download it from <code className="mono">{version.download_url}</code>
+          </p>
+        ) : null}
+
+        {version.is_mandatory ? (
+          <p className="rule__detail">
+            <strong>“Mandatory” changes when, not whether.</strong> A terminal treats
+            it as a signal to apply the update sooner rather than at a quiet moment.
+            Every other check it makes is unchanged.
+          </p>
+        ) : null}
+
+        {/*
+          THE PART THE SERVER KNOWS AND NOBODY COULD SEE. An undeliverable build
+          can be published and promoted and will silently never be sent; the
+          reason is logged where only an operator with server access could read
+          it.
+        */}
+        {offerability.deliverable ? (
+          version.is_current ? (
+            <p className="rule__detail">
+              <strong>
+                {wouldReach === 0
+                  ? 'Every terminal you can see on this combination is already running it.'
+                  : `Being offered to ${wouldReach} terminal${wouldReach === 1 ? '' : 's'} you can see.`}
+              </strong>{' '}
+              A terminal takes the offer on its next heartbeat.
+            </p>
+          ) : (
+            <p className="rule__detail">
+              Making this current would offer it to{' '}
+              <strong>
+                {wouldReach} terminal{wouldReach === 1 ? '' : 's'}
+              </strong>{' '}
+              you can see.
+            </p>
+          )
+        ) : (
+          <div className="rule__detail">
+            <p>
+              <strong>The platform will not send this build to anything</strong>, whether
+              or not it is the current target:
+            </p>
+            <ul>
+              {offerability.problems.map((problem) => (
+                <li key={problem}>{problem}</li>
+              ))}
+            </ul>
+            <p>
+              A published build cannot be edited. Publish a corrected entry and make
+              that one current.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {mayManage && !version.is_current ? (
+        <button
+          type="button"
+          className={offerability.deliverable ? 'button button--danger' : 'button'}
+          onClick={onPromote}
+        >
+          Make current
+        </button>
+      ) : null}
+    </li>
   )
 }
 
@@ -267,6 +373,7 @@ interface TargetGroup {
   versions: FirmwareVersion[]
   current: FirmwareVersion | null
   /** Terminals the OPERATOR CAN SEE on this combination. */
+  terminals: Terminal[]
   terminalCount: number
   /** How many of those are already running the current build. */
   onCurrent: number
@@ -284,8 +391,8 @@ function targetKey(version: { device_type: string; release_channel: string }): s
  * because a number that looks company-wide and is not is worse than no number.
  *
  * Exported for the tests: the grouping is where an off-by-one in "how many are
- * already on this build" would hide, and that number is what an operator reads
- * before deciding whether an update is worth doing.
+ * already on this build" would hide, and that number is now the difference
+ * between an update that reaches nobody and one that reaches a fleet.
  */
 export function groupByTarget(
   versions: FirmwareVersion[],
@@ -301,6 +408,7 @@ export function groupByTarget(
       releaseChannel: version.release_channel,
       versions: [],
       current: null,
+      terminals: [],
       terminalCount: 0,
       onCurrent: 0,
     }
@@ -315,6 +423,7 @@ export function groupByTarget(
         terminal.device_type === group.deviceType &&
         terminal.release_channel === group.releaseChannel,
     )
+    group.terminals = matching
     group.terminalCount = matching.length
     group.onCurrent = group.current
       ? matching.filter((terminal) => terminal.firmware_version === group.current?.version).length
@@ -349,6 +458,7 @@ interface PublishValues extends Record<string, unknown> {
   release_channel: string
   download_url: string
   checksum_sha256: string
+  size_bytes: string
   release_notes: string
   is_mandatory: boolean
 }
@@ -356,10 +466,17 @@ interface PublishValues extends Record<string, unknown> {
 /**
  * Adding a build to the catalogue.
  *
- * PUBLISHING DOES NOT MAKE IT CURRENT. Two decisions, two calls, on the server
- * as well as here: recording that a build exists and deciding a fleet should be
- * measured against it are different, and collapsing them would mean every
- * upload silently moved the target.
+ * PUBLISHING DOES NOT START A ROLLOUT. Two decisions, two calls, on the server
+ * as well as here: recording that a build exists and deciding a fleet should
+ * install it are different, and collapsing them would mean every upload silently
+ * began updating hardware.
+ *
+ * THE THREE DELIVERY FIELDS ARE ASKED FOR AS THOUGH THEY WERE REQUIRED, because
+ * in practice they are. The API accepts a build without a digest, a size or a
+ * URL; the platform then withholds every offer for it, so promoting it would
+ * move the target and update nothing. They are validated as optional — a
+ * catalogue entry for a build distributed some other way is legitimate — and the
+ * form says plainly what omitting them costs.
  */
 function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const publish = useCreateFirmware()
@@ -372,6 +489,7 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
       release_channel: 'STABLE',
       download_url: '',
       checksum_sha256: '',
+      size_bytes: '',
       release_notes: '',
       is_mandatory: false,
     },
@@ -379,23 +497,33 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
       version: validators.required(values.version, 'A version'),
       device_type: validators.required(values.device_type, 'A device type'),
       release_channel: validators.required(values.release_channel, 'A release channel'),
+      // LOWER CASE, matching the server and the device exactly. Accepting an
+      // upper-case digest here would store one that never matches, and the
+      // symptom would be a rollout that fails verification after every download.
       checksum_sha256:
-        values.checksum_sha256.trim() && !/^[0-9a-f]{64}$/i.test(values.checksum_sha256.trim())
-          ? 'A SHA-256 is 64 hexadecimal characters.'
+        values.checksum_sha256.trim() && !/^[0-9a-f]{64}$/.test(values.checksum_sha256.trim())
+          ? 'A SHA-256 is 64 lower-case hexadecimal characters. The platform and the terminal compare it exactly.'
           : undefined,
+      download_url:
+        values.download_url.trim() && !/^https:\/\//i.test(values.download_url.trim())
+          ? 'The download address must be https. A terminal refuses a plaintext download.'
+          : undefined,
+      size_bytes: sizeError(values.size_bytes),
     }),
     onSubmit: async (values) => {
+      const size = values.size_bytes.trim()
       const created = await publish.mutateAsync({
         version: values.version.trim(),
         device_type: values.device_type.trim(),
         release_channel: values.release_channel.trim(),
         download_url: values.download_url.trim() || undefined,
         checksum_sha256: values.checksum_sha256.trim() || undefined,
+        size_bytes: size ? Number(size) : undefined,
         release_notes: values.release_notes.trim() || undefined,
         is_mandatory: values.is_mandatory,
       })
       notifications.success(
-        `${created.version} recorded. It is not the current target until you make it one.`,
+        `${created.version} recorded. Nothing has been sent to any terminal — it is not the current target until you make it one.`,
       )
       onClose()
     },
@@ -408,7 +536,7 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
     <Dialog
       open={open}
       title="Publish a build"
-      description="Records that a build exists. It does not become the deployment target, and nothing is sent to any terminal."
+      description="Records that a build exists. It does not become the deployment target, and no terminal is offered it."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"
@@ -423,7 +551,7 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
           onChange={(value) => form.setValue('version', value)}
           onBlur={() => form.touch('version')}
           disabled={form.submitting}
-          hint="Exactly as the firmware reports itself. A terminal is counted as outdated when this string differs from what it reports, so a mismatch in formatting reads as a whole fleet being behind."
+          hint="Exactly as the firmware reports itself. A terminal is offered this build when the string differs from what it runs, so a mismatch in formatting reads as a whole fleet being behind — and would offer every one of them an update."
         />
 
         <TextField
@@ -434,7 +562,7 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
           onChange={(value) => form.setValue('device_type', value)}
           onBlur={() => form.touch('device_type')}
           disabled={form.submitting}
-          hint="Must match what the terminals report. Terminals of another type are not compared with this build at all."
+          hint="Must match what the terminals report. Terminals of another type are never offered this build."
         />
 
         <TextField
@@ -445,15 +573,17 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
           onChange={(value) => form.setValue('release_channel', value)}
           onBlur={() => form.touch('release_channel')}
           disabled={form.submitting}
-          hint="Terminals are compared only with builds on their own channel."
+          hint="Terminals are only ever offered builds on their own channel."
         />
 
         <TextField
-          label="Where the file is stored"
+          label="Download address"
           value={form.values.download_url}
+          error={form.errors.download_url}
           onChange={(value) => form.setValue('download_url', value)}
+          onBlur={() => form.touch('download_url')}
           disabled={form.submitting}
-          hint="Optional, and a note for people rather than an instruction to the platform — nothing fetches it."
+          hint="Where the terminal fetches the image from. Must be https and at most 127 characters. Without it the platform never offers the build."
         />
 
         <TextField
@@ -464,7 +594,18 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
           onChange={(value) => form.setValue('checksum_sha256', value)}
           onBlur={() => form.touch('checksum_sha256')}
           disabled={form.submitting}
-          hint="Optional. Recorded so whoever installs the build by hand can verify what they are installing."
+          hint="64 lower-case hexadecimal characters. The terminal verifies the downloaded image against it and refuses an update without one."
+        />
+
+        <TextField
+          label="File size in bytes"
+          type="number"
+          value={form.values.size_bytes}
+          error={form.errors.size_bytes}
+          onChange={(value) => form.setValue('size_bytes', value)}
+          onBlur={() => form.touch('size_bytes')}
+          disabled={form.submitting}
+          hint="The terminal uses it to size the flash write, and trusts it over whatever the download server claims. Without it the platform never offers the build."
         />
 
         <TextField
@@ -482,13 +623,13 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
           checked={form.values.is_mandatory}
           onChange={(checked) => form.setValue('is_mandatory', checked)}
           disabled={form.submitting}
-          hint="RECORDED, NOT ENFORCED. Nothing in the platform acts on this, because nothing installs firmware. It is a note to whoever plans the rollout."
+          hint="Changes WHEN a terminal applies the update, not whether. It still verifies the digest and can still refuse — a mandatory build is not a trusted one."
         />
 
-        <InfoNote title="This does not become the target">
-          A published build sits in the catalogue until somebody marks it current.
-          That is a separate, deliberate decision — and even then, nothing is sent
-          to a terminal.
+        <InfoNote title="This does not update anything yet">
+          A published build sits in the catalogue until somebody makes it current.
+          That is the separate, deliberate decision that starts terminals
+          downloading it.
         </InfoNote>
 
         <FormError
@@ -518,74 +659,136 @@ function PublishFirmwareDialog({ open, onClose }: { open: boolean; onClose: () =
   )
 }
 
+/** A size is optional, and a nonsense one is refused before the server sees it. */
+function sizeError(raw: string): string | undefined {
+  const trimmed = raw.trim()
+  if (trimmed === '') return undefined
+  const parsed = Number(trimmed)
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return 'A file size is a whole number of bytes, greater than zero.'
+  }
+  return undefined
+}
+
 // ---------------------------------------------------------------------------
 // Make current
 // ---------------------------------------------------------------------------
 
 /**
- * Moving the deployment target.
+ * Moving the deployment target — which is to say, starting a rollout.
  *
- * The confirmation says the two things an operator would otherwise assume
- * wrongly: that this pushes something (it does not), and that it affects the
- * whole fleet (it affects one device type on one channel). It also names the
- * build being demoted, because "current" is a single slot and the previous
- * occupant leaves it silently.
+ * THE CONFIRMATION IS THE SAFETY CONTROL, so it does four things rather than
+ * ask a question:
+ *
+ *   - it states, first, that terminals will download and install the build;
+ *   - it counts the terminals that would be offered it, using the server's own
+ *     narrowing (same device type, same channel, not already running it);
+ *   - it names the build being demoted, because "current" is a single slot and
+ *     the previous occupant leaves it silently;
+ *   - it requires the version to be TYPED when a rollout would actually start.
+ *
+ * The typed phrase is deliberately conditional. Asking for it when nothing would
+ * be sent — an undeliverable build, or a fleet already on this version — trains
+ * operators to type it without reading, which costs the protection exactly when
+ * it matters. It appears when, and only when, hardware is about to change.
+ *
+ * AN UNDELIVERABLE BUILD IS STILL PROMOTABLE. Refusing here would be the console
+ * inventing a rule the platform does not have, and there are legitimate reasons
+ * to move the target for a build distributed some other way. It is confirmed as
+ * what it is instead: a change of report that will update nothing.
  */
 function MakeCurrentDialog({
   open,
   version,
   previous,
-  affected,
+  terminals,
   onClose,
 }: {
   open: boolean
   version: FirmwareVersion
   previous: FirmwareVersion | null
-  affected: number
+  /** The fleet on this device type and channel, as the operator can see it. */
+  terminals: Terminal[]
   onClose: () => void
 }) {
   const promote = useSetCurrentFirmware()
   const notifications = useNotifications()
 
+  const offerability = firmwareOfferability(version)
+  const affected = terminalsOffered(version, terminals).length
+  const wouldUpdate = offerability.deliverable && affected > 0
+
   return (
     <ConfirmDialog
       open={open}
-      tone="default"
-      title={`Make ${version.version} the target for ${humaniseCode(version.device_type)} · ${humaniseCode(version.release_channel)}?`}
+      tone={offerability.deliverable ? 'danger' : 'default'}
+      title={`Make ${version.version} the current build for ${humaniseCode(version.device_type)} · ${humaniseCode(version.release_channel)}?`}
       consequence={
-        <>
-          {affected === 0 ? (
-            <>No terminal you can see is on this device type and channel.</>
-          ) : (
-            <>
-              The {affected} terminal{affected === 1 ? '' : 's'} you can see on this
-              device type and channel will be reported as up to date or behind{' '}
-              <strong>by comparison with {version.version}</strong>.
-            </>
-          )}{' '}
-          <strong>Nothing is sent to any of them.</strong>
-        </>
+        offerability.deliverable ? (
+          <>
+            <strong>This can update terminals.</strong>{' '}
+            {affected === 0 ? (
+              <>
+                No terminal you can see would be offered it right now — they are all
+                already running {version.version} — but any terminal on this device
+                type and channel that reports an older version will be offered it on
+                its next heartbeat.
+              </>
+            ) : (
+              <>
+                {affected} terminal{affected === 1 ? '' : 's'} you can see{' '}
+                {affected === 1 ? 'is' : 'are'} not running{' '}
+                <code className="mono">{version.version}</code> and{' '}
+                {affected === 1 ? 'will be offered it' : 'will be offered it'} on{' '}
+                {affected === 1 ? 'its' : 'their'} next heartbeat. A terminal that
+                takes the offer <strong>downloads the image, writes it to flash and
+                reboots</strong>.
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <strong>Nothing will be updated.</strong> The platform will not offer this
+            build to any terminal, so making it current changes only what the fleet is
+            reported against.
+          </>
+        )
       }
       detail={
         <>
+          {offerability.deliverable ? null : (
+            <>
+              It cannot be sent because: {offerability.problems.join(' ')} Publish a
+              corrected entry and make that one current instead.{' '}
+            </>
+          )}
           {previous ? (
             <>
-              <code className="mono">{previous.version}</code> stops being the
-              target — there is one current build per device type and channel, and
-              this replaces it.{' '}
+              <code className="mono">{previous.version}</code> stops being the current
+              build — there is one per device type and channel, and this replaces it.
+              A terminal already running it is not rolled back.{' '}
             </>
           ) : null}
           Terminals on other device types or other channels are unaffected.
-          AccessLink has no over-the-air update: changing this changes what the
-          fleet is measured against, and installing firmware remains a separate,
-          physical operation.
+          {offerability.deliverable ? (
+            <>
+              {' '}
+              There is no undo: making the previous build current again stops further
+              offers, but a terminal that has already installed this one has already
+              installed it.
+            </>
+          ) : null}
         </>
       }
-      confirmLabel="Make it the target"
+      // Typed only when hardware would actually change. See the note above.
+      confirmPhrase={wouldUpdate ? version.version : undefined}
+      confirmLabel={wouldUpdate ? 'Start the rollout' : 'Make it the current build'}
       onConfirm={async () => {
         await promote.mutateAsync(version.id)
         notifications.success(
-          `${version.version} is now what ${humaniseCode(version.device_type)} terminals on ${humaniseCode(version.release_channel)} are compared with. Nothing was sent to them.`,
+          offerability.deliverable
+            ? `${version.version} is now the current build for ${humaniseCode(version.device_type)} terminals on ${humaniseCode(version.release_channel)}. Terminals not running it will be offered it on their next heartbeat.`
+            : `${version.version} is now the current build for ${humaniseCode(version.device_type)} terminals on ${humaniseCode(version.release_channel)}. It cannot be sent to anything, so no terminal will change.`,
         )
       }}
       onClose={onClose}

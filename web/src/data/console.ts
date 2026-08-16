@@ -16,6 +16,8 @@ import type {
   ApplicationsResponse,
   AuditPage,
   AuditQuery,
+  ClaimCodeRequest,
+  ClaimCodeResponse,
   CompanyDetail,
   ConfiguredApplication,
   CreateFirmwareRequest,
@@ -156,7 +158,20 @@ export function useCreateSite(): UseMutationResult<CreateSiteResponse, Error, Cr
 }
 
 /**
- * Updates a site's metadata, including reversible deactivation.
+ * Updates a site's metadata, its reversible deactivation, AND its offline
+ * policy.
+ *
+ * ONE ROUTE, TWO KINDS OF CHANGE, and a caller has to know which it is making.
+ * A rename edits a record. `offline_policy` or `offline_grace_minutes`
+ * RECONFIGURES HARDWARE: the server applies it first and separately, bumps
+ * `settings_version` and fans a SETTINGS job out to every terminal at the site.
+ * The settings cache is therefore invalidated too — the version it holds is now
+ * behind.
+ *
+ * THE RESPONSE DOES NOT ECHO THE POLICY BACK. `models.ConsoleSite` has no field
+ * for either column, so the site written into the cache below carries the
+ * metadata and nothing about the outage behaviour. A caller must not read the
+ * result and conclude it knows what is in force; see the note on `Site`.
  *
  * Terminals are invalidated as well: deactivating a site stops every terminal
  * there authenticating, so a fleet view showing them as they were is stale in
@@ -171,6 +186,7 @@ export function useUpdateSite(
     onSuccess: (site) => {
       queryClient.setQueryData(keys.sites.detail(siteId), site)
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.sites.settings(siteId) })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
     },
   })
@@ -222,6 +238,33 @@ export function useRotateSiteKey(
     mutationFn: () => endpoints.rotateSiteKey(siteId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+    },
+  })
+}
+
+/**
+ * Mints a one-time claim code for one terminal serial.
+ *
+ * THE RESPONSE CARRIES A CREDENTIAL, and this hook treats it exactly as site
+ * creation treats a provisioning key: nothing is written into the QUERY cache,
+ * because that would outlive the panel that displayed it and be readable by
+ * anything holding the key factory. The code lives in the mutation's own `data`
+ * for the life of one panel, and the caller resets the mutation when that panel
+ * closes.
+ *
+ * ONLY THE AUDIT TRAIL IS INVALIDATED. Issuing a code changes no resource the
+ * console reads — no terminal exists yet, and the site is untouched. The trail
+ * records the issue (prefix, serial, expiry, how many codes it superseded), so
+ * an activity view open beside this is stale the moment it succeeds.
+ */
+export function useIssueClaimCode(
+  siteId: string,
+): UseMutationResult<ClaimCodeResponse, Error, ClaimCodeRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ClaimCodeRequest) => endpoints.issueClaimCode(siteId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
   })
 }
@@ -890,11 +933,17 @@ export function useCreateFirmware(): UseMutationResult<
 }
 
 /**
- * Marks a build as the deployment target.
+ * Marks a build as the deployment target, WHICH STARTS A ROLLOUT.
  *
- * INVALIDATES TERMINALS, which is the whole point: `firmware_outdated` on every
+ * INVALIDATES TERMINALS for two reasons now. `firmware_outdated` on every
  * terminal is computed against this value, so moving it changes what the fleet
- * view says about hardware nobody has touched.
+ * view says about hardware nobody has touched — and the hardware itself is
+ * about to change, because terminals of that type and channel are offered the
+ * build on their next heartbeat and apply it themselves.
+ *
+ * The caller must confirm before reaching this hook. There is no undo: promoting
+ * the previous build back stops further offers, but a terminal that has already
+ * flashed has already flashed.
  */
 export function useSetCurrentFirmware(): UseMutationResult<FirmwareVersion, Error, number> {
   const queryClient = useQueryClient()

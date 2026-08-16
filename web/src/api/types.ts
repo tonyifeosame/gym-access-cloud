@@ -102,6 +102,42 @@ export interface CompanyDetail extends Company {
   created_at: string
 }
 
+/**
+ * What a terminal does when it cannot reach the platform.
+ *
+ * A SAFETY CONTROL, NOT A PREFERENCE, and the three values are genuinely
+ * different products for the customer:
+ *
+ *   DENY_ALL           The terminal refuses everybody the moment it loses
+ *                      contact. Nothing opens during an outage.
+ *   CACHED_GRACE       It keeps deciding from the roster it already holds, for
+ *                      a bounded number of minutes, then falls back to
+ *                      DENY_ALL.
+ *   CACHED_INDEFINITE  It keeps deciding from the roster it already holds for
+ *                      as long as the outage lasts.
+ *
+ * The set is closed on the server (`sites_offline_policy_check`), so an unknown
+ * value is a contract violation rather than something to render politely.
+ */
+export type OfflinePolicy = 'DENY_ALL' | 'CACHED_GRACE' | 'CACHED_INDEFINITE'
+
+export const OFFLINE_POLICIES: OfflinePolicy[] = [
+  'DENY_ALL',
+  'CACHED_GRACE',
+  'CACHED_INDEFINITE',
+]
+
+/**
+ * The grace period's upper bound: 30 days, in minutes.
+ *
+ * THE PLATFORM'S NUMBER, NOT THIS CONSOLE'S. `models.MaxOfflineGraceMinutes`,
+ * the `CHECK` constraint added by 016, and the firmware's
+ * `kMaxOfflineGraceMinutes` are all 43,200. A console that enforced a smaller
+ * limit of its own would refuse a configuration the platform accepts, and would
+ * do it with an error message that named no real rule.
+ */
+export const MAX_OFFLINE_GRACE_MINUTES = 43_200
+
 export interface Site {
   id: string
   name: string
@@ -119,13 +155,34 @@ export interface Site {
    * The first 12 characters of the site's provisioning key. NOT SECRET — it
    * identifies which key a site is on without being reconstructible.
    *
-   * OPTIONAL BECAUSE THE READ ENDPOINTS DO NOT YET RETURN IT. The column exists
-   * and `database.SiteKeyPrefix` reads it, but `consoleSiteColumns` does not
-   * select it, so today this is populated only from a create or rotate
-   * response. Typed optional rather than assumed, so adding it to the projection
-   * is a backend-only change with nothing to alter here.
+   * OPTIONAL BECAUSE NO READ ENDPOINT RETURNS IT, and that is still true after
+   * the terminal-lifecycle pass. `sites.api_key_prefix` exists and
+   * `database.SiteKeyPrefix` reads it, but `consoleSiteColumns`
+   * (database/console.go) does not select it and `models.ConsoleSite` has no
+   * field for it — so neither `GET /console/sites` nor
+   * `GET /console/sites/{id}` carries one. This is populated ONLY from a create
+   * or rotate response, for the life of that panel.
+   *
+   * Typed optional rather than assumed, so adding it to the projection is a
+   * backend-only change with nothing to alter here. Recorded in
+   * docs/frontend-backend-requirements.md as CO-01.
    */
   api_key_prefix?: string
+  /**
+   * The site's outage behaviour, and the grace period `CACHED_GRACE` uses.
+   *
+   * REQUIRED, NOT OPTIONAL, and on EVERY site projection — the list as well as
+   * the detail. These are the validated columns the platform actually sends to
+   * terminals, not a copy of something in the free-form settings object, so what
+   * is shown here is what a door will do.
+   *
+   * That matters for a reason worth stating: this is the one field pair where a
+   * console showing a plausible default instead of the real value would be
+   * telling an operator their building behaves in a way it does not. Because the
+   * API returns them on every read, no screen has to guess and none may.
+   */
+  offline_policy: OfflinePolicy
+  offline_grace_minutes: number
 }
 
 /**
@@ -154,6 +211,22 @@ export interface UpdateSiteRequest {
   address?: string
   timezone?: string
   active?: boolean
+  /**
+   * The site's outage behaviour, and the grace period `CACHED_GRACE` uses.
+   *
+   * ON THIS REQUEST RATHER THAN IN THE FREE-FORM SETTINGS OBJECT, and the
+   * difference is not filing. The server applies these FIRST and SEPARATELY:
+   * they are validated against a closed set and a bound, they bump
+   * `settings_version`, and they fan a SETTINGS job out to every terminal at the
+   * site. The free-form blob offers none of those guarantees, and a value
+   * written there is IGNORED — `mergeDeviceSettings` layers the validated column
+   * over it, so the column wins.
+   *
+   * Sending either of these reconfigures hardware. Any UI in front of it has to
+   * say so.
+   */
+  offline_policy?: OfflinePolicy
+  offline_grace_minutes?: number
 }
 
 /**
@@ -202,6 +275,71 @@ export interface RetireSiteResponse {
   terminals_retired: number
 }
 
+// ---------------------------------------------------------------------------
+// Claim codes
+// ---------------------------------------------------------------------------
+
+/**
+ * Asking for a claim code.
+ *
+ * A CLAIM CODE IS THE REPLACEMENT FOR PUTTING THE SITE KEY ON AN INSTALLER'S
+ * LAPTOP. The provisioning key registers any terminal at the site, for ever,
+ * and cannot be recovered if it leaks. A claim code registers ONE serial, ONCE,
+ * for minutes. Anywhere the console offers to provision hardware, this is the
+ * thing it offers — the site key is never presented as the easier alternative.
+ *
+ * `serial_number` is bound into the code server-side and checked at redemption,
+ * which is what makes an intercepted code close to worthless. The firmware
+ * holds a serial in `char[16]`, so the server refuses anything longer than 15
+ * characters rather than letting it fail at a door.
+ *
+ * `expires_in_minutes` is optional. The server defaults it to 120 and CAPS it
+ * at 1440 silently rather than refusing — so a client asking for a week gets a
+ * day and no error, and must not tell the operator otherwise.
+ */
+export interface ClaimCodeRequest {
+  serial_number: string
+  expires_in_minutes?: number
+}
+
+/** The serial length the firmware can hold. `models.MaxDeviceSerialLength`. */
+export const MAX_SERIAL_LENGTH = 15
+
+/** The server's default and maximum claim-code lifetimes, in minutes. */
+export const DEFAULT_CLAIM_MINUTES = 120
+export const MAX_CLAIM_MINUTES = 1440
+
+/**
+ * A minted claim code.
+ *
+ * `claim_code` IS A CREDENTIAL and is returned exactly once, by the call that
+ * created it. The server stores only its SHA-256, so no read endpoint can give
+ * it back. Everything that applies to a site provisioning key applies here: it
+ * must not be written to storage of any kind, put in a query key, logged, or
+ * left in the React Query cache after the panel showing it closes.
+ *
+ * `shown_once` is the server saying so in the payload rather than in
+ * documentation, because a client that stores it is the failure mode.
+ *
+ * `superseded_codes` counts outstanding codes THIS ONE JUST INVALIDATED for the
+ * same serial. Issuing a second code for a terminal silently kills the first,
+ * so an installer already holding a printout is now holding a dead one — which
+ * is exactly the thing an operator has to be told before they walk away.
+ *
+ * `code_prefix` is the non-secret leading group, which is what the audit trail
+ * records. It identifies WHICH code was issued without being able to reproduce
+ * it.
+ */
+export interface ClaimCodeResponse {
+  claim_code: string
+  code_prefix: string
+  serial_number: string
+  site_name: string
+  expires_at: string
+  shown_once: boolean
+  superseded_codes: number
+}
+
 export interface ConfiguredApplication {
   id: string
   code: ApplicationCode
@@ -248,8 +386,18 @@ export interface SiteSettings {
  * are removed, not merged. Any editor must therefore send the complete object,
  * which is why the guided form is built on top of the fetched settings rather
  * than on its own idea of the shape.
+ *
+ * TWO KEYS ARE REFUSED HERE WITH A 400. `offline_policy` and
+ * `offline_grace_minutes` are validated columns on the site, and a copy of them
+ * inside this object would be silently ignored — the merge layers the columns
+ * over it on the way to a terminal. Rather than accept a value that does
+ * nothing, the server refuses the write with `code: "RESERVED_SETTINGS_KEY"`.
+ * They are set through `UpdateSiteRequest` instead.
  */
 export type SiteSettingsRequest = Record<string, unknown>
+
+/** Keys `PUT /console/sites/:id/settings` refuses. See the note above. */
+export const RESERVED_SETTINGS_KEYS = ['offline_policy', 'offline_grace_minutes'] as const
 
 // ---------------------------------------------------------------------------
 // Terminals
@@ -974,11 +1122,23 @@ export interface AuditQuery {
 /**
  * A build in the company's catalogue.
  *
- * `is_current` IS THE DEPLOYMENT TARGET, and it is the value every "is this
- * terminal outdated" report is measured against. The platform does not push
- * firmware — there is no OTA — so marking a build current changes what the fleet
- * is COMPARED TO and nothing else. A console that implied otherwise would have
- * operators believing a fleet had been updated.
+ * `is_current` IS THE DEPLOYMENT TARGET, AND THE PLATFORM ACTS ON IT. Every
+ * heartbeat from a terminal of this `device_type` on this `release_channel` is
+ * answered with a `firmware_update` offer when the terminal is not already
+ * running `version` — and the device downloads it, verifies the digest, flashes
+ * it and reboots into a trial boot that rolls itself back if the new image
+ * cannot reach its sensor or the platform (`database/firmware_offer.go`,
+ * `models.FirmwareUpdateOffer`).
+ *
+ * So marking a build current is not a reporting change. It is the act that
+ * starts a rollout, and any screen in front of it has to say so.
+ *
+ * THE SERVER WITHHOLDS AN OFFER IT COULD NOT POPULATE. A row missing a digest,
+ * a positive size or an `https` URL — or one whose URL or version overruns the
+ * device's fixed buffers — is never offered, and the reason is logged against
+ * the catalogue row rather than surfacing at the terminal. `firmwareOfferability`
+ * in the firmware page mirrors those rules so an operator learns it before
+ * promoting rather than from a fleet that will not move.
  */
 export interface FirmwareVersion {
   id: number
@@ -986,10 +1146,20 @@ export interface FirmwareVersion {
   version: string
   device_type: string
   release_channel: string
+  /** Fetched by the terminal itself. Must be `https` and at most 127 characters. */
   download_url?: string
+  /** 64 LOWER-CASE hex. The device's only end-to-end integrity check. */
   checksum_sha256?: string
+  /** Sizes the flash write, and is trusted over `Content-Length` deliberately. */
   size_bytes?: number
   release_notes?: string
+  /**
+   * Changes WHEN a terminal applies an update, not WHETHER.
+   *
+   * The device treats it as a scheduling signal and applies every other check
+   * unchanged — if it could relax one, "mandatory" would be the word an attacker
+   * used.
+   */
   is_mandatory: boolean
   is_current: boolean
   published_at?: string
@@ -1001,12 +1171,22 @@ export interface FirmwareResponse {
   firmware_versions: FirmwareVersion[]
 }
 
+/**
+ * Adding a build to the catalogue.
+ *
+ * `download_url`, `checksum_sha256` and `size_bytes` are optional to the API and
+ * REQUIRED IN PRACTICE: without all three the server withholds every update
+ * offer for the build, so promoting it would move the target and update nothing.
+ * The publish form asks for them and explains that, rather than accepting a row
+ * that can only disappoint later.
+ */
 export interface CreateFirmwareRequest {
   version: string
   device_type?: string
   release_channel?: string
   download_url?: string
   checksum_sha256?: string
+  size_bytes?: number
   release_notes?: string
   is_mandatory?: boolean
 }

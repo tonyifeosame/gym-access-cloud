@@ -8,6 +8,8 @@ import type {
   ApplicationsResponse,
   AuditPage,
   AuditQuery,
+  ClaimCodeRequest,
+  ClaimCodeResponse,
   CompanyDetail,
   ConfiguredApplication,
   CreateFirmwareRequest,
@@ -168,6 +170,28 @@ export function retireSite(siteId: string): Promise<RetireSiteResponse> {
 export function rotateSiteKey(siteId: string): Promise<RotateSiteKeyResponse> {
   return api.post<RotateSiteKeyResponse>(
     `/api/v1/console/sites/${encodeURIComponent(siteId)}/api-key`,
+  )
+}
+
+/**
+ * Mints a one-time claim code for ONE terminal serial at this site. ADMIN.
+ *
+ * THE ALTERNATIVE TO HANDING OUT THE SITE KEY. The provisioning key registers
+ * any terminal at the site, for ever; this registers one serial, once, for
+ * minutes, and cannot be read back afterwards. Anywhere the console offers to
+ * provision hardware it offers this, and never the key as a shortcut.
+ *
+ * Same caching contract as `createSite` and `rotateSiteKey`: the code lives in
+ * the mutation's own `data` for the life of one panel, is never written to the
+ * query cache, and the caller resets the mutation when that panel closes.
+ */
+export function issueClaimCode(
+  siteId: string,
+  body: ClaimCodeRequest,
+): Promise<ClaimCodeResponse> {
+  return api.post<ClaimCodeResponse>(
+    `/api/v1/console/sites/${encodeURIComponent(siteId)}/claim-codes`,
+    body,
   )
 }
 
@@ -624,9 +648,15 @@ export function createFirmware(body: CreateFirmwareRequest): Promise<FirmwareVer
 /**
  * Moves the deployment target for a device type and release channel.
  *
- * NOTHING IS PUSHED. The platform has no OTA, so this changes what the fleet is
- * MEASURED AGAINST and nothing else. Any UI in front of it must say so, or
- * operators will believe hardware has been updated.
+ * THIS STARTS A ROLLOUT. Terminals of that type on that channel are offered the
+ * build on their next heartbeat, and a terminal that accepts one downloads it,
+ * verifies the digest, flashes it and reboots. Any UI in front of this must
+ * confirm before calling it and must say what it can set in motion.
+ *
+ * The response is the promoted build and says nothing about how many terminals
+ * were affected — the count has to be derived from the fleet the caller already
+ * holds, using the same device-type, channel and version rule the server's offer
+ * query applies.
  *
  * Addressed by the numeric `id`, not `public_id` — that is what the route takes.
  */

@@ -9,24 +9,45 @@ import { makeFirmwareVersion, makeSession, makeTerminal } from '../../test/fixtu
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { FirmwarePage, groupByTarget } from './FirmwarePage'
+import { firmwareOfferability, terminalsOffered } from './offerability'
 
 /**
  * The firmware catalogue.
  *
- * THE ONE BELIEF THIS SCREEN EXISTS TO PREVENT: that marking a build current
- * updates anything. It does not. AccessLink has no over-the-air update, so
- * `is_current` is the value every "is this terminal outdated" report is measured
- * against and is nothing else — and somebody who publishes a build, promotes it
- * and walks away thinking the fleet is updating has been misled by a screen.
+ * THIS SUITE USED TO ASSERT THE OPPOSITE OF WHAT IT NOW ASSERTS, and that is the
+ * point of the rewrite rather than an embarrassment to hide. It checked, in
+ * several places and quite carefully, that the page said AccessLink had no
+ * over-the-air update and that promoting a build sent nothing to anything. Those
+ * sentences were true when they were written and became false when the heartbeat
+ * began carrying `firmware_update` — at which point the tests were actively
+ * holding a dangerous screen in place: a well-tested claim that a fleet-updating
+ * action was inert.
  *
- * Several tests below therefore assert only on WORDS. They are the valuable ones:
- * the API calls are three lines each and could not plausibly be wrong, while the
- * sentence that stops a rollout being imagined is easy to soften and never
- * notice.
+ * So the tests below assert the new truth in the same shape, and several of them
+ * assert only on WORDS. Those are the valuable ones. The API calls are three
+ * lines each and could not plausibly be wrong; the sentence that stops somebody
+ * flashing a fleet by accident is easy to soften and never notice.
  */
 
+/**
+ * A build the platform would actually offer.
+ *
+ * DIGEST, SIZE AND AN HTTPS URL, because without all three the server withholds
+ * every offer for the row. A fixture missing them would be testing the promotion
+ * path against a build that can never be sent, which is exactly the trap the
+ * page exists to surface.
+ */
+function deliverable(overrides: Partial<FirmwareVersion> = {}): FirmwareVersion {
+  return makeFirmwareVersion({
+    checksum_sha256: 'a'.repeat(64),
+    download_url: 'https://builds.example/terminal/image.bin',
+    size_bytes: 1_842_000,
+    ...overrides,
+  })
+}
+
 const CATALOGUE: FirmwareVersion[] = [
-  makeFirmwareVersion({
+  deliverable({
     id: 1,
     version: '1.2.0',
     device_type: 'TERMINAL',
@@ -34,7 +55,7 @@ const CATALOGUE: FirmwareVersion[] = [
     is_current: true,
     created_at: '2026-06-01T00:00:00Z',
   }),
-  makeFirmwareVersion({
+  deliverable({
     id: 2,
     version: '1.3.0',
     device_type: 'TERMINAL',
@@ -45,7 +66,7 @@ const CATALOGUE: FirmwareVersion[] = [
   }),
   // A DIFFERENT CHANNEL. "Current" is scoped per device type AND channel, so
   // this one has its own target and is untouched by promotions on STABLE.
-  makeFirmwareVersion({
+  deliverable({
     id: 3,
     version: '2.0.0-beta1',
     device_type: 'TERMINAL',
@@ -95,11 +116,11 @@ function renderFirmware() {
 /**
  * The catalogue row for one version.
  *
- * A version string appears TWICE on the page when it is the current build: once
- * as the row's own heading and once in the group summary ("of which 2 are
- * running 1.2.0"). That duplication is intentional — the summary is where an
- * operator reads how much of the fleet is already there — so the tests address
- * the row rather than the first match.
+ * A version string appears more than once on the page when it is the current
+ * build: as the row's own heading and again in the group summary. That
+ * duplication is intentional — the summary is where an operator reads how much
+ * of the fleet is already there — so the tests address the row rather than the
+ * first match.
  */
 function versionRow(version: string): HTMLElement {
   const row = screen
@@ -113,13 +134,96 @@ function versionRow(version: string): HTMLElement {
 beforeEach(() => setCsrfToken(null))
 
 // ---------------------------------------------------------------------------
+// Whether the platform would actually send a build
+// ---------------------------------------------------------------------------
+
+describe('offerability mirrors what the server will withhold', () => {
+  it('accepts a build with a digest, a size and an https address', () => {
+    expect(firmwareOfferability(deliverable())).toEqual({ deliverable: true, problems: [] })
+  })
+
+  it('refuses one with no checksum, because a terminal refuses an offer without one', () => {
+    const result = firmwareOfferability(deliverable({ checksum_sha256: undefined }))
+    expect(result.deliverable).toBe(false)
+    expect(result.problems.join(' ')).toMatch(/no SHA-256 checksum/i)
+  })
+
+  it('refuses an UPPER-CASE digest, which is the mistake that looks fine', () => {
+    // The server's pattern is 64 lower-case hex and the device compares exactly.
+    // Folding case here would store a digest that never matches, and the symptom
+    // would be every download failing verification after it had been fetched.
+    const result = firmwareOfferability(deliverable({ checksum_sha256: 'A'.repeat(64) }))
+    expect(result.deliverable).toBe(false)
+    expect(result.problems.join(' ')).toMatch(/lower-case/i)
+  })
+
+  it('refuses a missing or zero size, which sizes the flash write', () => {
+    expect(firmwareOfferability(deliverable({ size_bytes: undefined })).deliverable).toBe(false)
+    expect(firmwareOfferability(deliverable({ size_bytes: 0 })).deliverable).toBe(false)
+  })
+
+  it('refuses a plaintext download address', () => {
+    const result = firmwareOfferability(
+      deliverable({ download_url: 'http://builds.example/image.bin' }),
+    )
+    expect(result.deliverable).toBe(false)
+    expect(result.problems.join(' ')).toMatch(/not https/i)
+  })
+
+  it('refuses strings longer than the device’s fixed buffers', () => {
+    const longUrl = `https://builds.example/${'x'.repeat(200)}.bin`
+    expect(firmwareOfferability(deliverable({ download_url: longUrl })).deliverable).toBe(false)
+    expect(firmwareOfferability(deliverable({ version: 'v'.repeat(30) })).deliverable).toBe(false)
+  })
+
+  it('reports EVERY problem at once rather than one per correction', () => {
+    const result = firmwareOfferability(
+      makeFirmwareVersion({ checksum_sha256: undefined, size_bytes: undefined, download_url: undefined }),
+    )
+    expect(result.problems).toHaveLength(3)
+  })
+})
+
+describe('who would be offered a build', () => {
+  it('narrows by device type, channel, and what a terminal already runs', () => {
+    // The server's own three-part narrowing. Getting any part wrong changes a
+    // number an operator reads immediately before starting a rollout.
+    const offered = terminalsOffered(
+      { version: '1.3.0', device_type: 'TERMINAL', release_channel: 'STABLE' },
+      FLEET,
+    )
+    expect(offered.map((terminal) => terminal.serial_number)).toEqual([
+      'AT-0001',
+      'AT-0002',
+      'AT-0003',
+    ])
+  })
+
+  it('leaves out terminals already running the version', () => {
+    const offered = terminalsOffered(
+      { version: '1.2.0', device_type: 'TERMINAL', release_channel: 'STABLE' },
+      FLEET,
+    )
+    expect(offered.map((terminal) => terminal.serial_number)).toEqual(['AT-0003'])
+  })
+
+  it('never crosses a release channel', () => {
+    const offered = terminalsOffered(
+      { version: '9.9.9', device_type: 'TERMINAL', release_channel: 'BETA' },
+      FLEET,
+    )
+    expect(offered.map((terminal) => terminal.serial_number)).toEqual(['AT-0004'])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Grouping, as a pure function
 // ---------------------------------------------------------------------------
 
 describe('grouping the catalogue', () => {
   it('groups by the pair that "current" is actually scoped to', () => {
-    // Not by version, and not into one flat list: promoting a build demotes only
-    // its own device type and channel, and a flat list invites somebody to
+    // Not by version, and not into one flat list: promoting a build offers it to
+    // one device type on one channel, and a flat list invites somebody to
     // believe there is one current build for everything.
     const groups = groupByTarget(CATALOGUE, FLEET)
 
@@ -139,8 +243,8 @@ describe('grouping the catalogue', () => {
   })
 
   it('counts how many are ALREADY on the current build', () => {
-    // The number an operator reads before deciding whether an update is worth
-    // doing, and where an off-by-one would hide.
+    // The number an operator reads before deciding whether a rollout is worth
+    // starting, and where an off-by-one would hide.
     const stable = groupByTarget(CATALOGUE, FLEET).find((g) => g.key === 'TERMINAL--STABLE')
     expect(stable?.current?.version).toBe('1.2.0')
     expect(stable?.onCurrent).toBe(2)
@@ -168,50 +272,58 @@ describe('grouping the catalogue', () => {
 // What the page says it does
 // ---------------------------------------------------------------------------
 
-describe('the catalogue is honest about doing nothing', () => {
-  it('SAYS NOTHING HERE UPDATES A TERMINAL, at the top of the page', async () => {
+describe('the catalogue is honest that promoting updates hardware', () => {
+  it('SAYS MAKING A BUILD CURRENT UPDATES TERMINALS, at the top of the page', async () => {
+    // The single most important sentence on the screen, and the one this page
+    // previously got backwards.
     signIn()
     renderFirmware()
 
-    expect(await screen.findByText('Nothing here updates a terminal')).toBeInTheDocument()
-    expect(screen.getByText(/no over-the-air update/i)).toBeInTheDocument()
+    expect(await screen.findByText('Making a build current updates terminals')).toBeInTheDocument()
+    expect(screen.getByText(/downloads it, writes it to flash and reboots/i)).toBeInTheDocument()
   })
 
-  it('describes the current build as what the fleet is COMPARED TO', async () => {
+  it('does NOT claim the platform has no over-the-air update', async () => {
+    // A regression guard on the exact wording this page used to carry. It read
+    // well, it was tested, and it was false.
     signIn()
     renderFirmware()
 
-    await screen.findByText('Nothing here updates a terminal')
-    expect(screen.getByText(/compared to/i)).toBeInTheDocument()
-    // And marks it as a target rather than as something installed.
-    expect(screen.getAllByText('Current target').length).toBeGreaterThan(0)
+    await screen.findByText('Making a build current updates terminals')
+    expect(screen.queryByText(/no over-the-air update/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Nothing here updates a terminal/i)).not.toBeInTheDocument()
+  })
+
+  it('separates publishing from promoting, because only one of them sends anything', async () => {
+    signIn()
+    renderFirmware()
+
+    await screen.findByText('Making a build current updates terminals')
+    expect(screen.getByText(/nothing is offered until it is made current/i)).toBeInTheDocument()
   })
 
   it('says an empty catalogue makes every terminal LOOK up to date', async () => {
-    // Not because they are, but because there is nothing to compare them with —
-    // and publishing the first build may mark terminals outdated the moment it
-    // lands, with nothing about them having changed.
+    // Not because they are, but because there is nothing to compare them with.
     signIn('ADMIN', [])
     renderFirmware()
 
     expect(await screen.findByText('No builds recorded')).toBeInTheDocument()
     expect(screen.getByText(/nothing to compare it with/i)).toBeInTheDocument()
-    expect(screen.getByText(/Nothing about those terminals will have changed/i)).toBeInTheDocument()
   })
 
-  it('says "mandatory" is recorded rather than enforced', async () => {
-    // The field exists in the model and NOTHING in the platform reads it,
-    // because nothing installs firmware. A badge with no caveat would imply the
-    // platform acts on it.
+  it('says "mandatory" changes WHEN a terminal updates, not whether', async () => {
+    // It used to say the field was recorded and never acted on. The device does
+    // act on it — as a scheduling signal — and it does NOT relax any check,
+    // which is the part that would be dangerous to imply.
     signIn()
     renderFirmware()
 
-    await screen.findByText('Marked mandatory')
-    expect(screen.getByText(/recorded, not enforced/i)).toBeInTheDocument()
+    await screen.findAllByText('Mandatory')
+    expect(screen.getByText(/changes when, not whether/i)).toBeInTheDocument()
   })
 
   it('warns when a group has no current build at all', async () => {
-    signIn('ADMIN', [makeFirmwareVersion({ id: 9, version: '1.4.0', is_current: false })])
+    signIn('ADMIN', [deliverable({ id: 9, version: '1.4.0', is_current: false })])
     renderFirmware()
 
     expect(await screen.findByText('No current build for this combination')).toBeInTheDocument()
@@ -219,30 +331,51 @@ describe('the catalogue is honest about doing nothing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// The structure teaches the model
+// A build that cannot be sent
 // ---------------------------------------------------------------------------
 
-describe('the page mirrors how "current" is scoped', () => {
-  it('shows one section per device type and channel', async () => {
-    signIn()
+describe('a build the platform will never offer', () => {
+  it('SAYS SO ON THE ROW, naming what is wrong with it', async () => {
+    // The server withholds the offer and logs the reason where no operator can
+    // read it. Without this the symptom is a fleet that silently never moves.
+    signIn('ADMIN', [
+      makeFirmwareVersion({ id: 7, version: '1.9.0', is_current: false, checksum_sha256: undefined }),
+    ])
     renderFirmware()
 
-    expect(
-      await screen.findByRole('heading', { name: 'Terminal · Stable' }),
-    ).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Terminal · Beta' })).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Terminal · Stable' })
+    const row = versionRow('1.9.0')
+    expect(within(row).getByText('Cannot be sent')).toBeInTheDocument()
+    expect(within(row).getByText(/no SHA-256 checksum/i)).toBeInTheDocument()
   })
 
-  it('says how many terminals a group actually describes, and that it is scoped', async () => {
-    signIn()
+  it('still offers to promote it rather than refusing on the platform’s behalf', async () => {
+    // Refusing here would be the console inventing a rule the API does not have.
+    signIn('ADMIN', [
+      makeFirmwareVersion({ id: 7, version: '1.9.0', is_current: false, checksum_sha256: undefined }),
+    ])
     renderFirmware()
 
-    const stable = (await screen.findByRole('heading', { name: 'Terminal · Stable' }))
-      .closest('section') as HTMLElement
-    // "you can see" — the fleet list is narrowed by site grants, and a number
-    // that looks company-wide and is not is worse than no number.
-    expect(within(stable).getByText(/3 terminals you can see/i)).toBeInTheDocument()
-    expect(within(stable).getByText(/of which/i)).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Terminal · Stable' })
+    expect(
+      within(versionRow('1.9.0')).getByRole('button', { name: 'Make current' }),
+    ).toBeInTheDocument()
+  })
+
+  it('confirms that promoting it will update nothing', async () => {
+    const user = userEvent.setup()
+    signIn('ADMIN', [
+      makeFirmwareVersion({ id: 7, version: '1.9.0', is_current: false, checksum_sha256: undefined }),
+    ])
+    renderFirmware()
+
+    await screen.findByRole('heading', { name: 'Terminal · Stable' })
+    await user.click(within(versionRow('1.9.0')).getByRole('button', { name: 'Make current' }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByText(/Nothing will be updated/i)).toBeInTheDocument()
+    // And no typed phrase, because nothing is at risk.
+    expect(within(dialog).queryByText(/to confirm/i)).not.toBeInTheDocument()
   })
 })
 
@@ -251,7 +384,7 @@ describe('the page mirrors how "current" is scoped', () => {
 // ---------------------------------------------------------------------------
 
 describe('publishing a build', () => {
-  it('does NOT make it the target, and says so before and after', async () => {
+  it('does NOT start a rollout, and says so before and after', async () => {
     const user = userEvent.setup()
     signIn()
     renderFirmware()
@@ -260,14 +393,14 @@ describe('publishing a build', () => {
     await user.click(screen.getByRole('button', { name: 'Publish a build' }))
 
     const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByText('This does not become the target')).toBeInTheDocument()
+    expect(within(dialog).getByText('This does not update anything yet')).toBeInTheDocument()
 
     await user.type(within(dialog).getByLabelText(/^Version/), '1.4.0')
     await user.click(within(dialog).getByRole('button', { name: 'Publish build' }))
 
     // The confirmation repeats it rather than saying "published".
     expect(
-      await screen.findByText(/It is not the current target until you make it one/i),
+      await screen.findByText(/Nothing has been sent to any terminal/i),
     ).toBeInTheDocument()
   })
 
@@ -282,12 +415,12 @@ describe('publishing a build', () => {
     await user.click(screen.getByRole('button', { name: 'Publish build' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    const row = (await screen.findByText('1.4.0')).closest('li') as HTMLElement
+    const row = versionRow('1.4.0')
     expect(within(row).getByText('Recorded')).toBeInTheDocument()
     expect(within(row).queryByText('Current target')).not.toBeInTheDocument()
   })
 
-  it('validates a checksum before asking the server', async () => {
+  it('refuses an UPPER-CASE checksum, which the platform would silently never send', async () => {
     const user = userEvent.setup()
     signIn()
     renderFirmware()
@@ -295,13 +428,43 @@ describe('publishing a build', () => {
     await screen.findByRole('heading', { name: 'Terminal · Stable' })
     await user.click(screen.getByRole('button', { name: 'Publish a build' }))
     await user.type(screen.getByLabelText(/^Version/), '1.4.0')
-    await user.type(screen.getByLabelText(/SHA-256/), 'not-a-checksum')
+    await user.type(screen.getByLabelText(/SHA-256/), 'A'.repeat(64))
 
     const before = state.requests.filter((entry) => entry.method === 'POST').length
     await user.click(screen.getByRole('button', { name: 'Publish build' }))
 
-    expect(await screen.findByText(/64 hexadecimal characters/i)).toBeInTheDocument()
+    // Matched on the error's own opening words: the field HINT also says
+    // "64 lower-case hexadecimal characters", so a looser matcher would pass
+    // whether or not the value was refused.
+    expect(await screen.findByText(/A SHA-256 is 64 lower-case/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/SHA-256/)).toHaveAttribute('aria-invalid', 'true')
     expect(state.requests.filter((entry) => entry.method === 'POST')).toHaveLength(before)
+  })
+
+  it('refuses a plaintext download address before the server sees it', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderFirmware()
+
+    await screen.findByRole('heading', { name: 'Terminal · Stable' })
+    await user.click(screen.getByRole('button', { name: 'Publish a build' }))
+    await user.type(screen.getByLabelText(/^Version/), '1.4.0')
+    await user.type(screen.getByLabelText(/Download address/), 'http://builds.example/x.bin')
+    await user.click(screen.getByRole('button', { name: 'Publish build' }))
+
+    expect(await screen.findByText(/The download address must be https/i)).toBeInTheDocument()
+  })
+
+  it('collects the size, because the platform withholds an offer without one', async () => {
+    // The field did not exist before, and its absence meant every build
+    // published from this console was undeliverable.
+    const user = userEvent.setup()
+    signIn()
+    renderFirmware()
+
+    await screen.findByRole('heading', { name: 'Terminal · Stable' })
+    await user.click(screen.getByRole('button', { name: 'Publish a build' }))
+    expect(screen.getByLabelText(/File size in bytes/)).toBeInTheDocument()
   })
 
   it('turns a duplicate version into something actionable', async () => {
@@ -319,80 +482,78 @@ describe('publishing a build', () => {
     ).toBeInTheDocument()
   })
 
-  it('says the version string is what a terminal is COMPARED WITH', async () => {
-    // A mismatch in formatting reads as a whole fleet being behind, which is the
-    // realistic way this field goes wrong.
-    const user = userEvent.setup()
-    signIn()
-    renderFirmware()
-
-    await screen.findByRole('heading', { name: 'Terminal · Stable' })
-    await user.click(screen.getByRole('button', { name: 'Publish a build' }))
-
-    expect(screen.getByText(/reads as a whole fleet being behind/i)).toBeInTheDocument()
-  })
-
   it('does not offer the stored location as a link', async () => {
-    // Nothing fetches it. A link would suggest the platform does.
-    signIn('ADMIN', [
-      makeFirmwareVersion({ id: 5, version: '1.5.0', download_url: 'https://builds.example/1.5.0.bin' }),
-    ])
+    // Terminals fetch it; an operator should not, and a link invites somebody to
+    // download a firmware image into their browser by accident.
+    signIn('ADMIN', [deliverable({ id: 5, version: '1.5.0' })])
     renderFirmware()
 
     await screen.findByRole('heading', { name: 'Terminal · Stable' })
     expect(
-      within(versionRow('1.5.0')).getByText('https://builds.example/1.5.0.bin'),
+      within(versionRow('1.5.0')).getByText('https://builds.example/terminal/image.bin'),
     ).toBeInTheDocument()
-    expect(
-      screen.queryByRole('link', { name: /builds\.example/ }),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /builds\.example/ })).not.toBeInTheDocument()
   })
 })
 
 // ---------------------------------------------------------------------------
-// Moving the target
+// Starting a rollout
 // ---------------------------------------------------------------------------
 
 describe('making a build current', () => {
-  it('STATES THAT NOTHING IS SENT, and names what it demotes', async () => {
+  async function openPromotion(version = '1.3.0') {
     const user = userEvent.setup()
     signIn()
     renderFirmware()
-
     await screen.findByRole('heading', { name: 'Terminal · Stable' })
-    await user.click(within(versionRow('1.3.0')).getByRole('button', { name: 'Make current' }))
+    await user.click(within(versionRow(version)).getByRole('button', { name: 'Make current' }))
+    return { user, dialog: screen.getByRole('dialog') }
+  }
 
-    const dialog = screen.getByRole('dialog')
-    expect(within(dialog).getByText(/Nothing is sent to any of them/i)).toBeInTheDocument()
-    // The previous occupant of the single current slot.
-    expect(within(dialog).getByText('1.2.0')).toBeInTheDocument()
-    // And that other channels are untouched.
-    expect(within(dialog).getByText(/other channels are unaffected/i)).toBeInTheDocument()
-  })
-
-  it('says how many terminals this changes the REPORT for', async () => {
-    const user = userEvent.setup()
-    signIn()
-    renderFirmware()
-
-    await screen.findByRole('heading', { name: 'Terminal · Stable' })
-    await user.click(within(versionRow('1.3.0')).getByRole('button', { name: 'Make current' }))
-
+  it('STATES THAT THIS CAN UPDATE TERMINALS, first', async () => {
+    const { dialog } = await openPromotion()
+    expect(within(dialog).getByText(/This can update terminals/i)).toBeInTheDocument()
     expect(
-      within(screen.getByRole('dialog')).getByText(/3 terminals you can see/i),
+      within(dialog).getByText(/downloads the image, writes it to flash and reboots/i),
     ).toBeInTheDocument()
   })
 
-  it('moves the target and demotes the previous build', async () => {
-    const user = userEvent.setup()
-    signIn()
-    renderFirmware()
+  it('SHOWS THE AFFECTED TERMINAL COUNT, narrowed as the server narrows it', async () => {
+    // Three terminals are on TERMINAL/STABLE and none of them runs 1.3.0, so all
+    // three would be offered it. The beta terminal is not counted.
+    const { dialog } = await openPromotion()
+    expect(within(dialog).getByText(/3 terminals you can see/i)).toBeInTheDocument()
+  })
 
-    await screen.findByRole('heading', { name: 'Terminal · Stable' })
-    await user.click(within(versionRow('1.3.0')).getByRole('button', { name: 'Make current' }))
-    await user.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Make it the target' }),
-    )
+  it('names the build it demotes and says a terminal is not rolled back', async () => {
+    const { dialog } = await openPromotion()
+    expect(within(dialog).getByText('1.2.0')).toBeInTheDocument()
+    expect(within(dialog).getByText(/is not rolled back/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/other channels are unaffected/i)).toBeInTheDocument()
+  })
+
+  it('says there is no undo', async () => {
+    const { dialog } = await openPromotion()
+    expect(within(dialog).getByText(/There is no undo/i)).toBeInTheDocument()
+  })
+
+  it('REQUIRES THE VERSION TO BE TYPED when hardware would actually change', async () => {
+    // The console's strongest available signal that this is not a reporting
+    // change. Reserved for the case where terminals will be offered the build.
+    const { user, dialog } = await openPromotion()
+
+    const confirm = within(dialog).getByRole('button', { name: 'Start the rollout' })
+    expect(confirm).toBeDisabled()
+
+    await user.type(within(dialog).getByLabelText(/to confirm/i), '1.3.0')
+    expect(confirm).toBeEnabled()
+  })
+
+  it('moves the target and demotes the previous build', async () => {
+    const { user, dialog } = await openPromotion()
+
+    await user.type(within(dialog).getByLabelText(/to confirm/i), '1.3.0')
+    await user.click(within(dialog).getByRole('button', { name: 'Start the rollout' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 
@@ -403,18 +564,24 @@ describe('making a build current', () => {
   })
 
   it('leaves the other channel’s target alone', async () => {
-    const user = userEvent.setup()
-    signIn()
-    renderFirmware()
+    const { user, dialog } = await openPromotion()
 
-    await screen.findByRole('heading', { name: 'Terminal · Stable' })
-    await user.click(within(versionRow('1.3.0')).getByRole('button', { name: 'Make current' }))
-    await user.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Make it the target' }),
-    )
+    await user.type(within(dialog).getByLabelText(/to confirm/i), '1.3.0')
+    await user.click(within(dialog).getByRole('button', { name: 'Start the rollout' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(within(versionRow('2.0.0-beta1')).getByText('Current target')).toBeInTheDocument()
+  })
+
+  it('confirms afterwards that terminals will be offered it', async () => {
+    const { user, dialog } = await openPromotion()
+
+    await user.type(within(dialog).getByLabelText(/to confirm/i), '1.3.0')
+    await user.click(within(dialog).getByRole('button', { name: 'Start the rollout' }))
+
+    expect(
+      await screen.findByText(/will be offered it on their next heartbeat/i),
+    ).toBeInTheDocument()
   })
 
   it('offers no promotion for the build that is already current', async () => {
@@ -435,13 +602,9 @@ describe('making a build current', () => {
 describe('role gating mirrors the server', () => {
   it('REFUSES A MANAGER THE CATALOGUE ENTIRELY, read included', async () => {
     // Unlike Applications, where any operator may read and only an OWNER may
-    // change, `admin.GET("/firmware")` is ADMIN — the catalogue's read is as
-    // privileged as its writes, because the current build is the value every
-    // "is this terminal outdated" report is measured against.
-    //
-    // So the page has no read-only state, and a MANAGER who reaches it by URL
-    // gets the server's refusal reported as an error rather than as an empty
-    // catalogue — which would say every terminal is up to date.
+    // change, `admin.GET("/firmware")` is ADMIN — and now that the current build
+    // is the one a fleet installs, the read is as privileged as the write for a
+    // stronger reason than before.
     signIn('MANAGER')
     renderFirmware()
 
