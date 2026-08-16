@@ -134,6 +134,40 @@ func registerDeviceTx(tx *sql.Tx, siteID int64,
 		ON CONFLICT (serial_number) WHERE deleted_at IS NULL
 		DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash,
 		              api_key_prefix = EXCLUDED.api_key_prefix,
+
+		              -- THE REVOCATION MARKER IS CLEARED WITH THE CREDENTIAL IT
+		              -- DESCRIBES, and without this line a revoked terminal
+		              -- could never be recovered by any route at all.
+		              --
+		              -- 016 states the invariant as a CHECK:
+		              --   credential_revoked_at IS NULL OR api_key_hash IS NULL
+		              -- "if a revocation is recorded, there is no hash left to
+		              -- authenticate with". Correct, and permanent as written:
+		              -- credential_revoked_at was set by revocation and cleared
+		              -- by nothing, so writing ANY new hash into that row broke
+		              -- the constraint for ever. Re-provisioning a stolen unit
+		              -- that had been recovered failed with a 500 naming a
+		              -- constraint, whichever credential was used.
+		              --
+		              -- Clearing it here is what makes the invariant mean what
+		              -- it says. The row's revocation refers to the credential
+		              -- that was destroyed; a NEW credential is not the revoked
+		              -- one, and recording otherwise would be the database
+		              -- asserting something untrue about the key it now holds.
+		              --
+		              -- THIS DOES NOT WEAKEN REVOCATION, and the reason is the
+		              -- DISABLED gate below rather than anything here.
+		              -- RevokeTerminalCredential sets status = 'DISABLED' and
+		              -- active = FALSE as well as clearing the hash, and this
+		              -- statement preserves DISABLED (see the status CASE below).
+		              -- Registration then REFUSES a disabled device and the
+		              -- whole transaction rolls back -- taking this clearing
+		              -- with it. So a revoked terminal is still refused, and
+		              -- still refused by the same check as before; what changed
+		              -- is that a terminal an operator has deliberately and
+		              -- audibly re-enabled can now be given a credential.
+		              credential_revoked_at = NULL,
+		              credential_revoked_reason = NULL,
 		              device_name = EXCLUDED.device_name,
 		              device_type = EXCLUDED.device_type,
 		              firmware_version = COALESCE(EXCLUDED.firmware_version, devices.firmware_version),

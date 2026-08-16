@@ -83,9 +83,11 @@ func ConsoleSetTerminalState(c *gin.Context) {
 // a revocation that depends on a check somewhere else is one a refactor can
 // lose.
 //
-// Irreversible for that credential. The terminal must re-register to work again,
-// which needs the site provisioning key, which is the authority to enrol
-// hardware at that site and always was.
+// Irreversible for that credential. The hardware still exists and comes back by
+// being RE-ENABLED and then given a fresh credential through a single-use claim
+// code -- not by handing somebody the site provisioning key, which enrols every
+// terminal at that site for ever. models.TerminalRecoveryInstruction is the
+// sentence an operator is shown, and the reasoning behind it is there.
 func ConsoleRevokeTerminalCredential(c *gin.Context) {
 	var req models.ConsoleTerminalRevokeRequest
 	if c.Request.ContentLength > 0 {
@@ -123,8 +125,10 @@ func ConsoleRevokeTerminalCredential(c *gin.Context) {
 		// Stated rather than left for an operator to discover: a revoked
 		// terminal will never apply what was queued for it.
 		"pending_jobs_cancelled": result.PendingJobsCancelled,
-		"recovery": "This terminal must re-register with the site provisioning " +
-			"key before it can authenticate again.",
+		// The constant, not a literal. The console appends this verbatim to what
+		// the operator sees, so a second copy of the sentence living here is a
+		// second thing to get wrong -- and it had been wrong.
+		"recovery": models.TerminalRecoveryInstruction,
 	})
 }
 

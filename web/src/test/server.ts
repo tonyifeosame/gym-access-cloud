@@ -997,9 +997,18 @@ export const handlers = [
       active: false,
       credential_cleared: true,
       pending_jobs_cancelled: 4,
+      // VERBATIM FROM models.TerminalRecoveryInstruction. The console appends
+      // this to what the operator sees without paraphrasing it, so a fixture
+      // carrying the server's OLD sentence would test a string the API no
+      // longer sends. It previously said "re-register with the site
+      // provisioning key", which omitted the re-enable step that provisioning
+      // refuses to proceed without and named the credential claim codes exist
+      // to keep off installers' laptops.
       recovery:
-        'This terminal must re-register with the site provisioning key before it ' +
-        'can authenticate again.',
+        'Re-enable this terminal, then issue a single-use claim code for its ' +
+        'serial and redeem it at the unit. Re-enabling first is required: ' +
+        'provisioning refuses a disabled terminal. The site provisioning key ' +
+        'is not needed and should not be used.',
     })
   }),
 

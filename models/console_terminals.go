@@ -27,6 +27,43 @@ type ConsoleTerminalRevokeRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// TerminalRecoveryInstruction is what an operator must actually do to bring a
+// revoked terminal back into service, and it is a constant so there is ONE
+// answer rather than one per surface that needs to say it.
+//
+// ---------------------------------------------------------------------------
+// WHAT IT USED TO SAY, AND WHY THAT WAS WRONG TWICE
+// ---------------------------------------------------------------------------
+//
+//	"This terminal must re-register with the site provisioning key before it
+//	 can authenticate again."
+//
+// The console appends this VERBATIM to the notification an operator sees the
+// moment they revoke, so it is an instruction rather than a description, and it
+// failed as one on both counts.
+//
+// IT OMITTED THE STEP THAT MAKES THE REST WORK. RevokeTerminalCredential sets
+// the terminal DISABLED as well as clearing its key hash -- deliberately, so a
+// stolen unit cannot quietly re-provision itself the moment somebody runs the
+// registration call. Registration and claim redemption both REFUSE a disabled
+// terminal (models.ErrDeviceDisabled, and TestClaimRefusesADisabledTerminal
+// pins it). So an operator who followed this sentence got a 403 and no
+// explanation of it.
+//
+// IT NAMED THE WRONG CREDENTIAL. Re-provisioning one terminal does not need the
+// key that enrols every terminal at that site for ever. A claim code is
+// single-use, bound to one serial, short-lived, and never puts the site's
+// provisioning secret on an installer's laptop -- which is the entire reason
+// claim codes were built. Pointing at the site key first taught the habit they
+// exist to break.
+//
+// The order below is the order the operations must happen in, and neither can be
+// skipped.
+const TerminalRecoveryInstruction = "Re-enable this terminal, then issue a " +
+	"single-use claim code for its serial and redeem it at the unit. " +
+	"Re-enabling first is required: provisioning refuses a disabled terminal. " +
+	"The site provisioning key is not needed and should not be used."
+
 // ConsoleTerminalRetireRequest soft-deletes a terminal.
 type ConsoleTerminalRetireRequest struct {
 	Reason string `json:"reason,omitempty"`
