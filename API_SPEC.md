@@ -114,18 +114,40 @@ that loses it re-registers and receives a new one.
 | Key unknown | `401` | `{"error":"Invalid device key"}` |
 | Device inactive or `DISABLED` | `403` | `{"error":"Device is inactive"}` |
 
-### Site key + serial (deprecated)
+### Site key + serial (deprecated, and OFF by default)
 
 ```
 X-API-Key: main-site-api-key-123
 X-Device-Serial: AT-0001
 ```
 
-Accepted on device endpoints so firmware built against the Sprint 4 protocol
-keeps working during a rollout. **Weaker by construction** — the site key is
-shared by every terminal at the site, so it cannot distinguish one device from
-another beyond the serial the caller claims. Migrate to `X-Device-Key`; this
-path will be removed.
+**This is refused with `401` unless `LEGACY_DEVICE_AUTH` is set** (SEC-05).
+
+It is not a terminal authenticating. It is whoever holds the site's
+**provisioning secret** asserting which terminal they are, and the server taking
+their word for it. That key registers devices and rotates their credentials, so
+it lives on installers' laptops — and while this path was open, holding it was
+equivalent to holding every device key at the site.
+
+It was kept because removing it would have stranded firmware predating
+per-device keys. That reason has expired: `POST /devices/claim` is shipped on
+both halves, so a terminal obtains its own credential from a single-use,
+serial-bound code without the site key ever reaching it. A factory-reset unit
+re-provisions the same way, because registration is idempotent by serial.
+
+**The refusal is `401` and identical whether or not the site key is valid**, so
+this path cannot be used to probe which serials are registered at a site.
+
+To re-open it for a fleet still being upgraded:
+
+```
+LEGACY_DEVICE_AUTH=1
+```
+
+Anything not parseable as a boolean true is treated as OFF, and the server logs
+a `SECURITY:` line at startup when it is on. Revocation applies on both paths —
+`RevokeTerminalCredential` clears the key hash **and** sets the device inactive,
+so a revoked terminal is refused however it presents itself.
 
 ### Protocol version header
 
@@ -287,11 +309,24 @@ Returns a single member object as above → `200`.
 
 | Field | Type | Required |
 |---|---|---|
-| `member_id` | string | yes |
+| `member_id` | string | yes — **at most 31 characters, printable ASCII, no spaces** |
 | `full_name` | string | yes |
 | `membership_type` | string | yes |
 | `active` | bool | no (default `false`) |
 | `fingerprint_template` | string | no |
+
+**`member_id` is validated against what a terminal can store** (FW-09). The
+device field holds 31 usable bytes and its parser refuses anything longer rather
+than truncating — a truncated identifier is not a shorter name for the same
+person, it is a different person. The character rule (`0x21`–`0x7E`, so no
+spaces and no control bytes) is the firmware's, and it exists because the value
+is composed into a URL path and a JSON body by the terminal's sync client.
+
+An id that does not fit is a `400` naming the limit, not a person who is created
+and then silently refused at every door.
+
+> A **UUID does not fit.** At 36 characters it is over the limit, and it is the
+> first thing an integrator reaches for. Use your own member number.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/members \
@@ -396,24 +431,53 @@ by the database server's offset, in the direction that silently skipped changes.
 
 **Auth: site API key.**
 
-### `GET /api/v1/access/{member_id}`
+### `GET /api/v1/access/{member_id}?terminal={serial}` — DEPRECATED
+
+Answers from the authorization engine — the same evaluator the door path and the
+console preview use. Responses carry `Deprecation: true` and a `Link` header
+naming the successor, `POST /api/v1/console/terminals/{serial}/evaluate`, which
+takes an operator identity rather than a machine credential.
+
+**`terminal` is required.** Authorization is a question about a person *at a
+door*: permissions are scoped to companies, sites and terminals, schedules are
+evaluated in the site's timezone, and the terminal's application mode decides
+which capability the question is even about. Without one there is no truthful
+answer, so the request is refused rather than answered.
+
+The serial is resolved **inside the authenticated site**. A key installed at one
+location cannot ask what another location's door would do.
 
 ```json
-{"granted":true,"message":"Access Granted","status":"ACTIVE"}
+{
+  "granted": false,
+  "message": "Access denied: no permission",
+  "status": "NO_PERMISSION",
+  "reason": "NO_PERMISSION",
+  "member_id": "M-1",
+  "terminal": "AT-0001",
+  "evaluated_at": "2026-08-16T09:14:00Z",
+  "decided_by": "authorization_engine",
+  "deprecated": true
+}
 ```
 
-Always `200`, including for a denial — the *decision* is in the body.
+`granted`, `message` and `status` are unchanged keys so an existing client keeps
+parsing; `reason` carries the engine's own code and is what a new client should
+read. `status` now holds that reason rather than the old `ACTIVE` /
+`INACTIVE` / `NOT_FOUND` trio.
 
-| `status` | `granted` | Meaning |
+| Error | Status | Body |
 |---|---|---|
-| `ACTIVE` | `true` | Member exists and is active |
-| `INACTIVE` | `false` | Member exists, marked inactive |
-| `NOT_FOUND` | `false` | No such member in this company |
+| `terminal` omitted | `400` | `{"error":"terminal is required...","code":"TERMINAL_REQUIRED"}` |
+| Serial not registered at the authenticated site | `404` | `{"error":"Terminal not registered for this site"}` |
 
-> **Current behaviour checks membership status only.** It does not consult the
-> `permissions` table — doors, schedules, and validity windows are not yet
-> evaluated. The permission engine is a future sprint; treat this as
-> "is this person a valid member", not "may they open this door".
+> **WHAT THIS USED TO RETURN, because an integrator may have built on it.** It
+> answered `{"granted": true, "message": "Access Granted", "status": "ACTIVE"}`
+> for any person who existed and was `active`, ignoring permissions, schedules,
+> validity windows, credential state, the terminal and whether the site was in
+> service. A client that assumed "granted means open the door" was admitting
+> everybody an operator had ever added. If you consumed this endpoint before
+> this change, re-read what your integration does with the answer.
 
 ### `POST /api/v1/access/log`
 
@@ -559,14 +623,22 @@ at that site inherits them.
 {
   "settings": {
     "tamper_alarm": true,
-    "offline_grace_minutes": 60,
     "sync_interval_seconds": 60,
     "unlock_duration_seconds": 5
   },
-  "settings_version": 1
+  "settings_version": 1,
+  "offline_policy": "CACHED_GRACE",
+  "offline_grace_minutes": 60
 }
 ```
 → `200`
+
+`offline_policy` and `offline_grace_minutes` are **outside** the `settings`
+object and always present. They are validated columns, not free-form keys, and
+they are what the terminals at this site are actually running — the server
+layers them over the free-form object on the way to a device. Reading the blob
+alone would tell you nothing about the setting that matters most during an
+outage.
 
 ### `PUT /api/v1/sites/settings`
 
@@ -587,9 +659,20 @@ curl -X PUT http://localhost:8080/api/v1/sites/settings \
 `settings_version` increments on every change. **Side effect:** queues a
 `SETTINGS` job to every device at the site.
 
+**`offline_policy` and `offline_grace_minutes` are REFUSED here** (`400`). They
+are validated columns, and a value written into the free-form object is
+overwritten before any terminal sees it. Accepting them silently is the trap
+this refusal closes: the write returned `200`, a read handed the number back,
+and no door was ever told — so an operator who set a grace window this way was
+given a receipt for a safety decision that never took effect.
+
+Set them with `PUT /api/v1/console/sites/{site_id}`, which validates the values,
+bumps `settings_version`, and fans the change out in the same transaction.
+
 | Error | Status | Body |
 |---|---|---|
 | Body is not a JSON object | `400` | `{"error":"Settings must be a JSON object"}` |
+| `offline_policy` or `offline_grace_minutes` present | `400` | `{"error":"...","code":"RESERVED_SETTINGS_KEY"}` |
 
 ---
 
@@ -688,6 +771,13 @@ the current build for their release channel.
 reported/known. `firmware_outdated` is `false` when no current build is marked
 for that type and channel.
 
+`member_capacity` appears once the terminal has reported one (FW-01), and its
+**absence must be rendered as "unknown", never as unlimited or zero**.
+`roster_overflow_at` and `roster_overflow_count` appear when the terminal's
+permitted roster last exceeded what it can hold; they are stored state, so this
+list read costs nothing extra. The live roster size is on the single-terminal
+read (`GET /console/terminals/{serial}`, as `roster_size` and `over_capacity`).
+
 **Device states:** `PROVISIONING`, `ONLINE`, `OFFLINE`, `UPDATING`, `ERROR`,
 `DISABLED`. See [docs/sync-protocol.md](docs/sync-protocol.md#device-states).
 
@@ -711,6 +801,29 @@ when a terminal is believed to have drifted.
 | Error | Status | Body |
 |---|---|---|
 | Serial not at this site | `404` | `{"error":"Device not registered for this site"}` |
+| Roster larger than the terminal can hold | `409` | see below |
+
+**`409` when the snapshot would not fit** (FW-01). A terminal that has reported
+a `member_capacity` smaller than its permitted roster cannot apply a `FULL_SYNC`
+— the firmware refuses an oversized roster wholesale rather than truncating it,
+because a short roster reads as a list of deletions. The server therefore
+declines to queue one, and **the existing queue is left untouched**: cancelling
+it and failing to replace it would be strictly worse than the backlog.
+
+```json
+{
+  "error": "terminal AT-0001 can hold 256 people and its permissions cover 312",
+  "code": "ROSTER_EXCEEDS_TERMINAL_CAPACITY",
+  "serial_number": "AT-0001",
+  "roster_size": 312,
+  "capacity": 256
+}
+```
+
+The same `409` is returned by `PUT /console/terminals/{serial}/site` when the
+destination site's roster would not fit — the relocation is rolled back whole,
+so the terminal has not moved. A terminal that has reported **no** capacity is
+never refused, because the server does not know its ceiling.
 
 ---
 
@@ -798,6 +911,20 @@ All fields optional; body may be omitted entirely.
 | `status` | string | `ONLINE`, `UPDATING`, or `ERROR` only |
 | `error` | string | recorded when `status` is `ERROR` |
 | `ip_address` | string | defaults to the caller's IP |
+| `member_capacity` | integer | how many people this terminal can hold (FW-01) |
+
+**`member_capacity` is the terminal's own ceiling, and its absence is
+meaningful.** The server treats "not reported" as *unknown* and never
+substitutes a constant: the on-device limit has already changed once (64 → 256)
+and a server that guessed would refuse rosters a terminal holds happily. A
+reported value is remembered — a later heartbeat omitting the field keeps it,
+because the hardware has not changed.
+
+Values ≤ 0 are ignored and the heartbeat still succeeds; a garbage field must
+not take a door out of service.
+
+**No firmware sends this yet.** The contract it has to meet is in
+`docs/sync-protocol.md`.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices/heartbeat \

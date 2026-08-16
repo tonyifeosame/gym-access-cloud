@@ -130,7 +130,10 @@ derived from what each fix needs to already exist.
 5. **Terminal lifecycle precedes firmware revocation.** `SEC-01` has to define
    the revoked state before `FW-07` can enforce it at the door.
 6. **Self-registration precedes removing legacy auth.** `FW-05` must land before
-   `SEC-05` can be removed without stranding terminals.
+   `SEC-05` can be removed without stranding terminals. **Satisfied by the claim
+   flow rather than by FW-05 as written:** `POST /devices/claim` is shipped on
+   both halves, so a terminal obtains its own credential without the site key,
+   and the legacy path is now off by default.
 7. **CI precedes nothing and protects everything.** `OPS-03` lands early so the
    rest of the work is guarded as it happens.
 
@@ -276,11 +279,37 @@ roster (SEC-04), which removes most of the pressure, and `devices` now
 carries `pending_job_count`, `failed_job_count` and `last_apply_error` so an
 exhausted table is visible rather than silent.
 
-**Remainder, and it is a finding in its own right.** `kMaxMembers = 64` is
-still a firmware constant, and a single site with more than 64 permitted
-people will still exhaust a terminal. The server does not yet refuse or warn
-when a roster exceeds a terminal's stated capacity, because the terminal does
-not report one. Needs AI #2.
+**The "64" in this finding is stale, and the way it went stale is the point.**
+`kMaxMembers` is 256 now — the member table moved behind a record store and the
+constant moved with it. Any number this repository had copied would have been
+wrong within one firmware release, and wrong in the dangerous direction: a
+server that believes 64 refuses rosters a terminal holds happily.
+
+**Done since, on the server (2026-08-16).** The capacity is REPORTED rather than
+assumed. `devices.member_capacity` records what a terminal says it can hold,
+carried on the heartbeat; when a terminal's permitted roster exceeds a capacity
+it has reported, the server declines to queue the `FULL_SYNC` it would refuse
+wholesale, answers `409` with both numbers, records the overflow on the device
+row, in `last_apply_error` and as a `ROSTER_CAPACITY_EXCEEDED` event, and leaves
+the existing queue intact. A relocation into a site that would not fit is
+refused and rolled back whole. `terminal_capacity_test.go`.
+
+**A terminal that has reported nothing is never refused.** That is the
+compatibility guarantee and it has its own test: every unit in the field today
+reports no capacity, and enforcing an assumed ceiling would break working
+installations. Above `AssumedMemberCapacity` (64, the smallest any shipped build
+has had) the server logs that it cannot tell. It does not act.
+
+**Remainder, and it needs AI #2.** The firmware does not send `member_capacity`
+yet. The exact contract — field name, value, cadence, and why it must be the
+ceiling rather than the headroom — is written out in `docs/sync-protocol.md`.
+Until it lands, the guard is inert on every deployed terminal.
+
+**Paging is deliberately not designed.** A roster larger than any single
+terminal can hold is a permissions decision or a paged protocol, and the shape
+paging would need is recorded in the same document. It should wait for a
+customer who actually has such a site, because their answer to "what should
+happen" is the requirement.
 
 **Root cause.** Two independent decisions that compound. `kMaxMembers = 64` sizes
 the on-device table, and the server fans the entire **company** roster to every
@@ -470,7 +499,14 @@ complete and tested.
 ---
 
 #### FW-05 — Firmware never self-registers
-**Subsystem** Firmware · **Status** OPEN — needs AI #2. Blocks SEC-05.
+**Subsystem** Firmware · **Status** SUPERSEDED by the claim flow, which is
+shipped on both halves. It no longer blocks SEC-05, and SEC-05 is closed.
+
+The finding as written asked for the firmware to hold a site key transiently.
+That is not what was built and is not what should be: the claim code is
+single-use, serial-bound and short-lived, and the site key never reaches the
+terminal at all. Registration by an operator holding the site key still exists
+for the console path.
 
 **Root cause.** Provisioning was designed as an operator action and never moved
 into the device. The firmware has no `X-API-Key` path at all.
@@ -490,9 +526,15 @@ failing terminal is visible. A roster reconciler runs every 15 minutes and is
 the recovery path: a terminal left with a partial roster converges without
 anybody noticing and forcing a resync.
 
+**Also done (2026-08-16).** One case of "this will never clear" is now decided
+on the server instead of being retried at the door: a roster larger than a
+terminal's reported capacity is refused at enqueue time rather than becoming ten
+failed attempts and a parked job. See FW-01.
+
 **Remainder.** No alarm threshold and no operator-facing notification — the
-counters exist and are readable, but nothing shouts. The firmware-side
-distinction between "retry, this may clear" and "this will never clear" is
+counters exist and are readable, and the capacity overflow now writes a typed
+event that can be alarmed on, but nothing pushes. The general firmware-side
+distinction between "retry, this may clear" and "this will never clear" is still
 AI #2's.
 
 **Root cause.** `kRetryable` is the correct classification — a delete may free a
@@ -518,7 +560,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 
 | ID | Finding | Root cause | Remediation | Status |
 |---|---|---|---|---|
-| SEC-05 | Legacy site-key + serial device auth still accepted | Kept for firmware predating per-device keys | Remove once FW-05 lands; gate behind an explicit opt-in until then | OPEN |
+| SEC-05 | Legacy site-key + serial device auth still accepted | Kept for firmware predating per-device keys | Remove once FW-05 lands; gate behind an explicit opt-in until then | FIXED — refused by default; `LEGACY_DEVICE_AUTH` re-opens it for a fleet mid-upgrade, announced at startup. `device_auth_hardening_test.go` |
 | SEC-06 | Registration rotates credentials without limit | Rate limiting lives only in the VPS nginx config | Application-level limiter plus repeat-registration alerting | OPEN |
 | SEC-07 | No operator action audit log | Never built; sessions are logged, mutations are not | Append-only `audit_events`, written in the mutation's transaction | FIXED |
 | SEC-08 | Access logs unreachable from an operator session | The only log route predates the console | Grant-scoped `GET /console/events` over the typed event model | FIXED |
@@ -533,7 +575,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 | FW-06 | Pinned root CA does not match documented production target | Bundle generated for Render; nginx documents Let's Encrypt | Pin both root sets; the bundle format already supports it | OPEN |
 | FW-07 | Revocation has no firmware-side effect | 401/403 correctly treated as retryable for uploads, but no degraded state exists | Parse `offline_grace_minutes`; defined degraded policy on sustained 403 | OPEN |
 | FW-08 | Two of four exposed settings are inert | Console schema written ahead of firmware support | Implement both, or remove them from the console | OPEN |
-| FW-09 | Field truncation silently excludes people | `copyExact` correctly refuses rather than truncating, but nothing validates upstream | Server-side length validation with a clear error; surface apply failures | OPEN |
+| FW-09 | Field truncation silently excludes people | `copyExact` correctly refuses rather than truncating, but nothing validates upstream | Server-side length validation with a clear error; surface apply failures | FIXED — `external_id` validated against the device's own rule (31 bytes, `0x21`–`0x7E`) on both creation paths, with an error naming the limit. `person_external_id_test.go` |
 | SYN-02 | Access-log queue is lossy | RAM-only ring, drops oldest on overflow | Persist to flash; upload a gap marker when entries are dropped | OPEN |
 | SYN-03 | Delivery failures consume the attempt budget | `AckJobFailed` cannot distinguish apply-failure from delivery-failure | Separate the two counters | OPEN |
 | SYN-04 | No sync visibility in the console | Terminal projection predates the sync engine's operational needs | Backlog and failure counts; console-authenticated resync | PARTIAL |
@@ -556,7 +598,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 | OPS-04 | Render free tier sleeps and expires | Paid plan or VPS before customer traffic | OPEN |
 | OPS-05 | Backups are a documented manual command | Scheduled, off-host, restore rehearsed | OPEN |
 | OPS-06 | `access_logs` has no retention policy | Configurable retention with a purge task | FIXED |
-| GP-04 | Two unvalidated open JSON settings objects | One declared-schema mechanism serving both | OPEN |
+| GP-04 | Two unvalidated open JSON settings objects | One declared-schema mechanism serving both | PARTIAL — still unvalidated, but the two keys where "accepted and inert" was a SAFETY problem (`offline_policy`, `offline_grace_minutes`) are now refused in the free-form object and stated on every site read. The general mechanism is still owed |
 | GP-05 | No capability dependency model | Model prerequisites when two capabilities first relate | OPEN |
 | GP-06 | Per-application settings unvalidated | Folds into GP-04 | OPEN |
 | PPL-03 | People API omits email, phone, validity window | Expose all four; enforce validity in the permission engine | PARTIAL |
@@ -651,11 +693,16 @@ viewports. Typecheck, lint and build clean.
   application status table below still says so. Building one of them on the new
   primitives is now a small piece of work; claiming five of them would have been
   the exact failure this register exists to prevent.
-- **Everything firmware.** FW-01 (the on-device constant), FW-02, FW-04, FW-05,
-  FW-06, FW-07, FW-09, SYN-02, SYN-03, SEC-03, HW-01, HW-02 need AI #2. Where
-  the server half exists and is tested, the finding says so.
-- **SEC-05.** Legacy site-key + serial device auth cannot be removed until
-  firmware self-registration (FW-05) exists, or deployed terminals are stranded.
+- **Everything firmware.** FW-02, FW-04, FW-06, FW-07, SYN-02, SYN-03, SEC-03,
+  HW-01, HW-02 need AI #2. Where the server half exists and is tested, the
+  finding says so. FW-09 closed on the server on 2026-08-16 and needs nothing
+  from the firmware; FW-01's server half landed the same day and needs one
+  optional heartbeat field from AI #2 before it does anything on a real
+  terminal.
+- **SEC-05 — CLOSED on 2026-08-16, and this entry is kept to record why the
+  earlier reasoning expired.** The claim flow shipped on both halves, so a
+  terminal reaches its own credential without the site key. The legacy pair is
+  refused by default.
 - **SEC-09.** Rate limiting is still in-process, so with more than one instance
   the effective rate multiplies by the instance count. It is documented in
   `API_SPEC.md` rather than quietly carried.
@@ -692,6 +739,85 @@ terminal now receives only the people its permissions cover. Companies that
 existed before the authorization engine were migrated to `COMPANY_ALLOW`, which
 reproduces their previous roster exactly; companies created after it start at
 `NONE`.
+
+---
+
+## Remediation pass 2026-08-16 — backend safety and contracts
+
+Backend only. No firmware file and no file under `web/` was touched. Every
+behaviour change below has a test that would have caught the original defect.
+
+### Closed
+
+| Finding | What changed | Proof |
+|---|---|---|
+| FW-09 | `external_id` is validated against the device's own rule — 31 bytes, `0x21`–`0x7E` — on both creation paths and at the store. The error names the limit and the reason, because the operator who typed it is the only person who can fix it | `person_external_id_test.go` |
+| SEC-05 | The site key plus a serial no longer authenticates as a terminal. Refused by default with the same `401` whether or not the key is valid, so the path cannot be used to enumerate serials. `LEGACY_DEVICE_AUTH` re-opens it for a fleet mid-upgrade and is announced at startup | `device_auth_hardening_test.go` |
+| S4 (unregistered until now) | `GET /access/{member_id}` answered `"Access Granted"` from `people.active` alone — no permissions, schedules, validity, credential state or terminal. It now answers from the authorization engine and REQUIRES `?terminal=`; `CheckMemberAccess` is deleted rather than deprecated | `access_check_test.go` |
+| F3 / F4 (part of GP-04) | `offline_policy` and `offline_grace_minutes` are refused in the free-form settings object instead of being silently overwritten, and every site read states the policy actually in force | `offline_policy_authority_test.go` |
+
+### Server half done, firmware half owed
+
+| Finding | Server | Firmware (AI #2) |
+|---|---|---|
+| FW-01 / SYN-01 | Capacity is recorded from the heartbeat, an oversized `FULL_SYNC` is refused rather than generated, and the overflow is visible in three places | Send `member_capacity` on the heartbeat. Contract in `docs/sync-protocol.md`. **Until then the guard never fires on a real terminal** |
+
+### FW-09 on an installation that already has bad rows
+
+The validation is on the way IN. `people.external_id` stays `VARCHAR(50)`,
+because a migration adding a CHECK constraint would **fail to apply** against a
+customer database that already holds a violating row — turning a data-quality
+problem into an upgrade that cannot run.
+
+An existing installation finds what it is already carrying with this, and the
+answer is the list of people who can never reach a terminal:
+
+```sql
+SELECT c.name AS company, p.external_id, p.full_name, length(p.external_id) AS len
+  FROM people p
+  JOIN companies c ON c.id = p.company_id
+ WHERE p.deleted_at IS NULL
+   AND (length(p.external_id) > 31 OR p.external_id !~ '^[\x21-\x7E]+$')
+ ORDER BY c.name, p.external_id;
+```
+
+Each row needs a new id and a re-enrolment; there is no server-side repair,
+because only the customer knows what the person's real member number is.
+
+### The finding that was not in this register
+
+S4 was found by reading the code rather than the audit, and it is recorded here
+because the audit's own rule says an over-claim is the failure this document
+exists to prevent. An endpoint that returns `"granted": true` for anybody who
+exists is not an incomplete feature; it is a false statement about a door, and
+the console was simultaneously reporting a permission model being enforced.
+
+### What this pass did NOT do
+
+- **No general settings schema.** GP-04 is still open. Two keys were protected
+  because "accepted and inert" was a *safety* failure for those two
+  specifically; the mechanism the finding asks for is still owed.
+- **No paging.** See FW-01 and `docs/sync-protocol.md`. The refusal plus a
+  reported capacity is the correct amount of mechanism until a customer has a
+  site that needs more.
+- **No alarm threshold.** The overflow writes an event that can be alarmed on.
+  Nothing pushes it to anybody.
+
+### Compatibility
+
+`SyncProtocolVersion` is unchanged. `member_capacity` is an additive optional
+request field. Three responses gained fields and none lost any.
+
+**Three deliberate breaks, all of them refusals that used to be silent
+acceptances:**
+
+1. Site key + serial on a device endpoint is `401` instead of `200`. A
+   deployment mid-upgrade sets `LEGACY_DEVICE_AUTH=1`.
+2. `GET /access/{member_id}` without `?terminal=` is `400` instead of a
+   meaningless `"granted"`. An integrator relying on the old answer was relying
+   on a system that admitted everybody.
+3. `PUT /sites/settings` carrying either policy key is `400` instead of a `200`
+   that changed nothing.
 
 ---
 
@@ -741,18 +867,23 @@ not served by this platform, and must not be told otherwise.
 
 Measured at the start of remediation, so any regression is visible.
 
-| Suite | At baseline | After this pass | Result |
-|---|---|---|---|
-| Go integration (real PostgreSQL) | 144 | **252** | Pass, 203s |
-| Frontend (vitest/jsdom + MSW) | 349 | not re-measured here (AI #3) | — |
-| Firmware native (22 suites) | 550 | not re-measured here (AI #2) | — |
+| Suite | At baseline | 2026-08-15 pass | 2026-08-16 pass | Result |
+|---|---|---|---|---|
+| Go integration (real PostgreSQL) | 144 | 252 | **359** | Pass |
+| Frontend (vitest/jsdom + MSW) | 349 | 561 | not re-run (AI #3) | — |
+| Firmware native | 550 | not re-run | not re-run (AI #2) | — |
 
-The Go figure is top-level test functions, counted the same way both times. The
-frontend and firmware suites are owned by AI #3 and AI #2 and were not run in
-this pass, so no claim is made about them.
+The Go figure is top-level test functions, counted the same way each time: 324
+before the 2026-08-16 pass and 359 after it, so that pass added 36. The
+frontend and firmware suites are owned by AI #3 and AI #2; neither was run from
+this repository, so no claim is made about them here.
 
-No CI existed at the baseline, so this is the first run in which all three were
-executed together.
+**The "550 firmware tests" figure is stale and is not this repository's to
+update.** AI #2 reports the current count; the CI job that runs them no longer
+quotes a number, because a number in a warning message is a claim that rots.
+
+No CI existed at the baseline, so the 2026-08-15 run was the first in which all
+three were executed together.
 
 ---
 

@@ -74,6 +74,18 @@ endpoint should copy them:
   that records why somebody was turned away but not why somebody was admitted
   answers half of what a security review asks.
 
+### Backend changes on 2026-08-16 the console has to absorb
+
+Three of these are refusals where something used to be accepted silently. None
+of them is a new screen; all of them change what an existing form must do.
+
+| Change | What the console must do |
+|---|---|
+| **`external_id` is validated** (FW-09) — at most 31 characters, printable ASCII, no spaces | Validate in the person form with the same rule, so the constraint is visible while it can still be changed. **A UUID does not fit**, and it is what an integrator reaches for first. The `400` carries `field` and a message written to be shown verbatim |
+| **`offline_policy` / `offline_grace_minutes` refused in free-form settings** | See SET-01. Reject in the raw editor rather than sending and displaying the error |
+| **`GET /access/{member_id}` requires `?terminal=`** | The console should not call it at all — `POST /console/terminals/{serial}/evaluate` is the supported route and always was. Recorded in case anything still reaches for the older one |
+| **Site projections carry `offline_policy` and `offline_grace_minutes`** | The site list can now show which locations keep opening during an outage, without a per-site fetch |
+
 ---
 
 ## AT-01 — Attendance, check-in and worked time
@@ -201,7 +213,28 @@ currently returns every terminal in the company with no bound.
 is defined — `pending_jobs`, `failed_jobs`, `last_apply_error`,
 `last_apply_error_at`, `credential_active`, `offline_policy`,
 `offline_grace_minutes` — and nothing populates or returns it. Adding it to
-`GET /console/terminals/{serial}` needs no new type.
+`GET /console/terminals/{serial}` needs no new type. **STILL OPEN.** The type is
+still unrouted; `database.GetTerminalHealth` populates it and is called only
+from a test.
+
+**Capacity landed ahead of it (2026-08-16), and the console can render it now:**
+
+| Field | Where | Meaning |
+|---|---|---|
+| `member_capacity` | terminal list and detail | People the terminal can hold, **as reported by it**. ABSENT means it has never said — render "unknown", never unlimited and never zero |
+| `roster_size` | detail only | People its permissions currently cover |
+| `over_capacity` | detail only | True only when a REPORTED capacity is exceeded |
+| `roster_overflow_at` / `roster_overflow_count` | list and detail | When the roster last did not fit, and how big it was |
+
+A `409` with `code: "ROSTER_EXCEEDS_TERMINAL_CAPACITY"` now comes back from
+resync and from relocation, carrying `roster_size` and `capacity`. The dialog
+should show both numbers: "over capacity" sends an operator to support, "holds
+256, needs 312" sends them to a purchase order.
+
+**Do not render a capacity for a terminal that has not reported one.** No
+shipped firmware reports it yet, so today that is every terminal, and inventing
+a figure would recreate the exact class of confident-but-wrong display this
+document exists to prevent.
 
 **Authorization** Unchanged: `VIEWER`, narrowed by grant.
 
@@ -239,6 +272,20 @@ that can be done without a schema. `implemented` is the honest part: FW-08
 records that two of the four exposed settings are inert, so the console is
 currently offering controls that change nothing. A flag would let it say so
 instead of the operator discovering it at a door.
+
+**STILL OPEN, with two keys carved out (2026-08-16).** `offline_policy` and
+`offline_grace_minutes` are now **refused** in the free-form object with a `400`
+carrying `code: "RESERVED_SETTINGS_KEY"`, and every site read — the list, the
+detail, and `GET /sites/settings` — states the values actually in force.
+
+They were carved out ahead of the general mechanism because for those two, "the
+console accepted it and nothing happened" was a *safety* failure: an operator
+set a grace window, got a `200`, saw the number read back, and no door was ever
+told. The other keys are merely unvalidated.
+
+**For the raw editor:** the two keys must be rejected client-side with a pointer
+to the site's policy control, not sent and refused, so the operator never sees
+an error for a field the form let them type.
 
 ---
 
@@ -294,7 +341,8 @@ Recorded so the console is updated in the same change rather than left stale.
 | FW-04 | Terminals never heartbeat, so `MarkDevicesOffline` never matches and every registered terminal reads `ONLINE` for ever | The terminal page shows last heartbeat and last seen as separate facts and treats "never" as its own state rather than as an error. It cannot detect that the status field is meaningless. **A status derived from a heartbeat that does not exist is the single most misleading value in the console**, and closing FW-04 is what makes it true. |
 | FW-02 | No OTA | The firmware section says "AccessLink does not push firmware over the air — updating is a separate, deliberate operation", and the catalogue's `is_current` is described as what a fleet is MEASURED AGAINST rather than pushed to. |
 | FW-03 | An enrolment binds to the terminal that took it | See CR-01. `REGISTRATION` is marked partly built with that as its named gap. |
-| FW-05 | Terminals cannot self-register | The terminal page states that first registration happens on the device using the site's provisioning key, and that neither console can do it on the hardware's behalf. |
+| FW-05 | ~~Terminals cannot self-register~~ **Superseded: the claim flow is shipped on both halves.** | The terminal page's wording is now WRONG and should be updated by AI #3: first provisioning is an operator issuing a claim code in the console, and the installer typing it into the unit. The site's provisioning key never reaches the hardware, and as of 2026-08-16 presenting it with a serial no longer authenticates as a terminal at all (SEC-05). |
+| FW-01 | A terminal's member table has a fixed ceiling, and the firmware does not report it | The console can show `member_capacity` and `roster_size` — see TM-01 — but **no shipped firmware sends the capacity**, so every terminal reads "unknown" today. When AI #2 lands the heartbeat field, the terminal page becomes able to say how much headroom a door has. |
 | FW-07 | Revocation has no firmware-side effect until the terminal next reaches the server | The revoke dialog says the credential stops resolving; it does **not** claim the door stops opening at that instant, because an offline terminal holds a local roster. If FW-07 lands with a defined degraded policy, that dialog should say what it is. |
 
 ---

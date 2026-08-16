@@ -48,13 +48,21 @@ The credential is stored server-side as a SHA-256 hash and is returned in
 plaintext exactly once, at registration. It cannot be recovered — a device that
 loses it re-registers and is issued a new one.
 
-### Deprecated fallback
+### Deprecated fallback — now OFF by default
 
-`X-API-Key` (site key) plus `X-Device-Serial` is still accepted so firmware built
-against the Sprint 4 protocol keeps working during a rollout. It is weaker by
-construction: the site key is shared by every terminal at the site, so it cannot
-distinguish one device from another beyond the serial the caller claims. **Move
-to `X-Device-Key` and expect this path to be removed.**
+`X-API-Key` (site key) plus `X-Device-Serial` is **refused with `401` unless
+`LEGACY_DEVICE_AUTH` is set** (SEC-05).
+
+It is weaker by construction, and the phrase understates it: the site key is the
+site's *provisioning secret* — it registers terminals and rotates their
+credentials — so with this path open, holding it was equivalent to holding every
+device key at the site. The serial is not a secret; it is printed on the unit.
+
+It was kept for firmware predating per-device keys. `POST /devices/claim` is now
+shipped on both halves, so a terminal gets its own credential from a single-use
+serial-bound code and that reason has expired. A fleet still being upgraded can
+set `LEGACY_DEVICE_AUTH=1`; the server logs a `SECURITY:` line at startup while
+it is on, and revocation still refuses a revoked terminal on both paths.
 
 ## Response framing
 
@@ -289,6 +297,76 @@ It carries IDs only, no templates, so a thousand members is roughly ten
 kilobytes. The `CREATE` jobs that follow supply anything the device is missing.
 
 An operator can force this with `POST /api/v1/devices/{serial}/resync`.
+
+### Terminal capacity — the contract the firmware still has to meet (FW-01)
+
+**This section is a request to the firmware side. The server half is built; the
+device half is not.**
+
+#### The problem, stated exactly
+
+`FULL_SYNC` carries the authoritative roster and the firmware refuses one longer
+than its member table **wholesale** — `sync_handoff.cpp`,
+`if (count > kMaxMembers) return false`. That refusal is correct: a truncated
+roster reads as a list of deletions, which is the most destructive misreading
+available in this protocol.
+
+But the server had no idea what `kMaxMembers` is, so it generated the snapshot
+anyway. The job then failed, retried, exhausted its attempts, parked `FAILED`,
+and **the terminal went on serving the roster it already had**. The door kept
+working, for the wrong set of people, indefinitely, and the only trace was a
+counter.
+
+#### What the server does now
+
+- Refuses to queue a snapshot for a terminal whose **reported** capacity is
+  smaller than its permitted roster, answering `409` with both numbers, and
+  leaves the existing queue intact.
+- Records the overflow on the device row, in `last_apply_error`, and as a
+  `ROSTER_CAPACITY_EXCEEDED` event.
+- Does **none** of that when the capacity is unknown. Guessing a ceiling would
+  break every installation whose terminals hold more than the guess.
+
+#### What the firmware needs to send
+
+One optional integer on the heartbeat body:
+
+```json
+{ "status": "ONLINE", "member_capacity": 256 }
+```
+
+| Property | Requirement |
+|---|---|
+| Value | `MemberStore::capacity()` — the real compile-time ceiling, not a constant copied into the network layer |
+| When | Every heartbeat, or at least after every boot. It is cheap and idempotent |
+| Type | Positive integer. `0` or negative is ignored by the server and the heartbeat still succeeds |
+| Omitted | Treated as *unknown*, which is the current behaviour and is safe |
+
+Nothing else changes. `SyncProtocolVersion` stays at 1 — this is an additive
+optional request field, and a server that does not know it ignores it.
+
+**Report the ceiling, not the headroom.** The server compares against the
+permitted roster it computes itself; a terminal reporting free rows would be
+reporting a number that is stale by the time it is read.
+
+#### The paging question, and why it is not being answered yet
+
+A roster larger than any single terminal can hold cannot be fixed by a bigger
+`FULL_SYNC`. It needs either fewer people per terminal (a permissions decision
+an operator makes) or a paged roster — and paging is **not** proposed here.
+
+If it is ever built, the shape has to preserve the one property that makes
+`FULL_SYNC` safe: a page must not be interpretable as a complete set, or the
+missing pages read as deletions. That means a page count, a page index, and a
+generation token, with the terminal applying the set difference only after every
+page of one generation has arrived — and with the partial state held somewhere
+that survives a reboot mid-sequence, which on this hardware is not free.
+
+Given a 256-row table and a per-site roster, the capacity report plus a refusal
+an operator can act on is the correct amount of mechanism for now. Paging should
+wait for a customer who actually has a site with more permitted people than a
+terminal can hold, because their answer to "how should this behave" is the
+requirement, and nobody has one yet.
 
 `payload.deleted` is `true` only on `DELETE`. A terminal that trusts `job_type`
 alone is correct; `deleted` is a redundant safety check.

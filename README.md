@@ -96,7 +96,9 @@ Most endpoints require an `X-API-Key` header; device endpoints authenticate with
 
 ### Access
 
-- `GET /api/v1/access/:member_id` - Check member access
+- `GET /api/v1/access/:member_id?terminal=SERIAL` - **Deprecated.** Evaluates the
+  real authorization decision at a named terminal. The terminal is required —
+  see `API_SPEC.md` §4. Use `POST /console/terminals/:serial/evaluate` instead
 - `POST /api/v1/access/log` - Log access attempt
 - `GET /api/v1/access/logs` - Get access logs
 - `GET /api/v1/access/logs/:member_id` - Get member's access logs
@@ -136,9 +138,14 @@ The following authenticate as the device itself, with `X-Device-Key`:
 - `POST /api/v1/devices/jobs/:id/complete` - Acknowledge a job as applied or failed
 
 Device credentials are stored as SHA-256 hashes and returned in plaintext only
-once, at registration. `X-API-Key` plus `X-Device-Serial` is still accepted as a
-deprecated fallback while firmware migrates. See
-[docs/sync-protocol.md](docs/sync-protocol.md) for the full contract.
+once, at registration or when a claim code is redeemed.
+
+`X-API-Key` plus `X-Device-Serial` is **no longer accepted** (SEC-05): the site
+key is the provisioning secret, so a caller holding it could authenticate as any
+terminal at the site. A fleet still running firmware that predates per-device
+credentials can re-open the path with `LEGACY_DEVICE_AUTH=1`, which the server
+announces at startup. See [docs/sync-protocol.md](docs/sync-protocol.md) for the
+full contract.
 
 Deletions are delivered **only** as `DELETE` sync jobs. `GET /members/changes`
 cannot express a deletion — a removed row simply stops appearing in it — so a
@@ -209,9 +216,9 @@ RETURNING id, site_name, api_key;
 ```
 
 Rotating a site key does **not** invalidate device keys — terminals authenticate
-with their own credential and keep working. It does invalidate any firmware
-still using the deprecated `X-API-Key` + `X-Device-Serial` path, and any
-dashboard or tooling configured with the old key.
+with their own credential and keep working. It invalidates any dashboard or
+tooling configured with the old key, and any firmware on the deprecated
+`X-API-Key` + `X-Device-Serial` path in a deployment that has re-enabled it.
 
 ## Database Schema
 
@@ -258,7 +265,7 @@ the complete schema.
 
 ### Check Access
 ```bash
-curl -X GET http://localhost:8080/api/v1/access/MEM001 \
+curl -X GET "http://localhost:8080/api/v1/access/MEM001?terminal=AT-0001" \
   -H "X-API-Key: main-site-api-key-123"
 ```
 
@@ -267,9 +274,18 @@ Response:
 {
   "granted": true,
   "message": "Access Granted",
-  "status": "ACTIVE"
+  "status": "ALLOWED",
+  "reason": "ALLOWED",
+  "terminal": "AT-0001",
+  "decided_by": "authorization_engine",
+  "deprecated": true
 }
 ```
+
+The terminal is **required**. Permissions are scoped to companies, sites and
+terminals, schedules run in the site's timezone, and the terminal's application
+mode decides which capability the question is about — so an answer without a
+door would not mean anything. Omitting it is a `400`.
 
 ### Get Member Changes (for sync)
 ```bash

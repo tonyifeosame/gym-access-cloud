@@ -194,11 +194,15 @@ jobs:
           path: firmware
           token: ${{ secrets.FIRMWARE_REPO_TOKEN }}
 
+      # No test COUNT in this message. The number was 550 when this job was
+      # written and is not any more, and a stale figure in a warning is a claim
+      # that rots quietly -- which is the failure this whole pipeline exists to
+      # prevent. What matters is that the suite did not run, not how big it is.
       - name: Report when firmware was not available
         if: steps.firmware.outcome != 'success'
         run: |
-          echo "::warning::FIRMWARE_REPO is not configured, so the 550 firmware"
-          echo "::warning::tests and the size budget did NOT run in this build."
+          echo "::warning::FIRMWARE_REPO is not configured, so the firmware test"
+          echo "::warning::suite and the size budget did NOT run in this build."
           echo "Set the FIRMWARE_REPO variable and FIRMWARE_REPO_TOKEN secret."
 
       - uses: actions/setup-python@v5
