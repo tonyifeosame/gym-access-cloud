@@ -1694,9 +1694,45 @@ plus the application assignment:
   "boot_count": 12, "last_heartbeat_at": "…", "last_seen_at": "…",
 
   "application_mode": "CHECK_IN",
-  "effective_applications": ["CHECK_IN"]
+  "effective_applications": ["CHECK_IN"],
+
+  "roster_size": 42,
+  "over_capacity": false,
+
+  "health": {
+    "pending_jobs": 3,
+    "failed_jobs": 0,
+    "last_apply_error": "member table full",
+    "last_apply_error_at": "2026-08-16T08:12:44Z",
+    "credential_active": true,
+    "offline_policy": "CACHED_GRACE",
+    "offline_grace_minutes": 60
+  }
 }
 ```
+
+**`health` is the terminal's live operational state** (SYN-04), and it is the
+answer to "is this terminal behind, is it failing, and can it still
+authenticate". It is nested rather than flattened because `pending_jobs` beside
+`firmware_version` would read as the same kind of fact, and it is not — one is
+inventory, the other changes between two refreshes.
+
+| Field | Meaning |
+|---|---|
+| `pending_jobs` | Unacknowledged work the terminal still owes. Maintained by trigger from `sync_jobs` |
+| `failed_jobs` | Work that exhausted its attempts and parked. A non-zero value means people are missing from that door |
+| `last_apply_error` | The **terminal's own words** — "member table full", not "failed". Omitted when there is none |
+| `last_apply_error_at` | When it said so. Omitted with the message. An error from four months ago and one from four minutes ago are not the same problem |
+| `credential_active` | Whether the device key still resolves. Derived from the hash being present, which is what authentication itself probes — so a console showing `true` agrees with the door |
+| `offline_policy`, `offline_grace_minutes` | The **site's** validated policy, repeated here because a terminal is where an operator thinks about an outage |
+
+`credential_active` is a **boolean and nothing more**. No response on this route
+carries the device key, its hash, its prefix, or the site provisioning key.
+
+`roster_size` is how many people this terminal's permissions currently cover.
+`over_capacity` is true **only** when the terminal has reported a
+`member_capacity` smaller than that — a terminal that has reported none is never
+marked over capacity, because the server does not know its ceiling.
 
 `application_mode` is what the terminal is **assigned**;
 `effective_applications` is what that **resolves to now**, and goes empty when
@@ -1714,9 +1750,41 @@ PUT {"application_mode": "CHECK_IN"}
 | `404` | no such terminal in this company |
 | `409` | that capability is not enabled for the company |
 
-**Registering a terminal is not a console operation.** It stays on
-`POST /api/v1/devices/register` behind the site API key, which is the only place a
-device credential is ever issued, exactly once, at registration.
+#### Revoking a credential, and recovering from it
+
+`POST /console/terminals/{serial}/revoke` (ADMIN) destroys the device key: the
+hash is cleared, the terminal is set `DISABLED` and inactive, and its queued work
+is cancelled. The response carries the terminal detail plus:
+
+```json
+{
+  "credential_cleared": true,
+  "pending_jobs_cancelled": 7,
+  "recovery": "Re-enable this terminal, then issue a single-use claim code for its serial and redeem it at the unit. Re-enabling first is required: provisioning refuses a disabled terminal. The site provisioning key is not needed and should not be used."
+}
+```
+
+**`recovery` is an instruction, not a description**, and a client is expected to
+show it verbatim. The order in it is required and neither step can be skipped:
+
+1. `PUT /console/terminals/{serial}/state` with `{"disabled": false}`.
+   Provisioning **refuses a disabled terminal** (`401` on claim, `403` on
+   registration), so a claim attempted before this is rejected and issues no
+   credential.
+2. `POST /console/sites/{site_id}/claim-codes` for that serial, redeemed at the
+   unit through `POST /devices/claim`.
+
+> **This response previously said "This terminal must re-register with the site
+> provisioning key before it can authenticate again."** That was wrong twice: it
+> omitted step 1, so following it produced a refusal with no explanation, and it
+> named the credential that enrols every terminal at a site when a single-use,
+> serial-bound code is the supported route. A client that hard-coded the old
+> sentence should drop its copy and render this field.
+
+**Issuing a claim code is a console operation; redeeming one is not.** A device
+credential is only ever produced by `POST /api/v1/devices/claim` or by
+`POST /api/v1/devices/register` behind the site API key, in each case exactly
+once, and never by a console read.
 
 ### People
 

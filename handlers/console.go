@@ -379,10 +379,19 @@ func loadTerminalDetail(companyID int64, serial string) (*models.TerminalDetail,
 		return nil, err
 	}
 
-	// Capacity (FW-01). A third read, and it earns its place: "this terminal
-	// holds 256 people and its permissions cover 312" is the sentence that
-	// stops somebody buying more licences instead of more hardware.
-	capacity, err := database.InspectTerminalCapacity(database.DB, inventory.ID)
+	// Health, which also carries the capacity figures (M-7, SYN-04, FW-01).
+	//
+	// ONE READ RATHER THAN TWO. This used to call InspectTerminalCapacity
+	// directly for roster_size and over_capacity, and GetTerminalHealth
+	// computes exactly those from the same function on its way to everything
+	// else. Calling both would run the permission predicate twice per detail
+	// read to produce two copies of one answer -- and two copies of an answer
+	// are two chances to disagree.
+	//
+	// Company-scoped by the store the same way the two reads above are, so a
+	// terminal in another tenant is ErrDeviceNotFound here exactly as it is
+	// there. The scoping is not re-implemented at this layer.
+	health, err := database.GetTerminalHealth(companyID, serial)
 	if err != nil {
 		return nil, err
 	}
@@ -391,9 +400,33 @@ func loadTerminalDetail(companyID int64, serial string) (*models.TerminalDetail,
 		DeviceInventory:       *inventory,
 		ApplicationMode:       application.Mode,
 		EffectiveApplications: application.Effective,
-		RosterSize:            capacity.RosterSize,
-		OverCapacity:          capacity.Exceeded(),
+		RosterSize:            health.RosterSize,
+		OverCapacity:          health.OverCapacity,
+		Health:                consoleTerminalHealth(*health),
 	}, nil
+}
+
+// consoleTerminalHealth projects the store's health record for the console.
+//
+// A PROJECTION, NOT A SECOND MODEL. models.ConsoleTerminalHealth already
+// described this shape and had no producer; this is the missing three lines
+// rather than a new type. It deliberately drops nothing an operator needs and
+// adds nothing the store did not say.
+//
+// WHAT IT MUST NEVER CARRY: the device key, its hash, its prefix, or the site's
+// provisioning key. CredentialActive is a BOOLEAN derived from the hash being
+// present -- which is what authentication actually checks -- and that boolean is
+// the whole of what a browser is told about a terminal's credential.
+func consoleTerminalHealth(h database.TerminalHealth) models.ConsoleTerminalHealth {
+	return models.ConsoleTerminalHealth{
+		PendingJobs:         h.PendingJobs,
+		FailedJobs:          h.FailedJobs,
+		LastApplyError:      h.LastApplyError,
+		LastApplyErrorAt:    h.LastApplyErrorAt,
+		CredentialActive:    h.CredentialActive,
+		OfflinePolicy:       h.OfflinePolicy,
+		OfflineGraceMinutes: h.OfflineGraceMins,
+	}
 }
 
 // ConsoleSetTerminalMode handles PUT /console/terminals/:serial/application-mode

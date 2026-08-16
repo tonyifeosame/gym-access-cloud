@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"access-terminal-cloud-api/models"
 )
@@ -488,9 +489,15 @@ func ClearTerminalApplyFailure(deviceID int64) error {
 
 // TerminalHealth is the operational state the console needs beyond inventory.
 type TerminalHealth struct {
-	PendingJobs      int
-	FailedJobs       int
-	LastApplyError   string
+	PendingJobs    int
+	FailedJobs     int
+	LastApplyError string
+
+	// LastApplyErrorAt dates the message above. An apply failure from four
+	// months ago and one from four minutes ago read identically without it, and
+	// they are not the same problem.
+	LastApplyErrorAt *time.Time
+
 	HasApplyError    bool
 	CredentialActive bool
 	OfflinePolicy    string
@@ -518,11 +525,12 @@ type TerminalHealth struct {
 func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) {
 	var h TerminalHealth
 	var applyError sql.NullString
+	var applyErrorAt sql.NullTime
 	var deviceID int64
 
 	err := DB.QueryRow(`
 		SELECT d.id, d.pending_job_count, d.failed_job_count, d.last_apply_error,
-		       d.api_key_hash IS NOT NULL,
+		       d.last_apply_error_at, d.api_key_hash IS NOT NULL,
 		       s.offline_policy, s.offline_grace_minutes
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
@@ -530,8 +538,8 @@ func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) 
 		   AND s.company_id = $2
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL`, serial, companyID).
-		Scan(&deviceID, &h.PendingJobs, &h.FailedJobs, &applyError, &h.CredentialActive,
-			&h.OfflinePolicy, &h.OfflineGraceMins)
+		Scan(&deviceID, &h.PendingJobs, &h.FailedJobs, &applyError, &applyErrorAt,
+			&h.CredentialActive, &h.OfflinePolicy, &h.OfflineGraceMins)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrDeviceNotFound
 	}
@@ -541,6 +549,10 @@ func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) 
 
 	h.LastApplyError = applyError.String
 	h.HasApplyError = applyError.Valid
+	if applyErrorAt.Valid {
+		when := applyErrorAt.Time
+		h.LastApplyErrorAt = &when
+	}
 
 	// Capacity is a second query rather than a join, because counting the
 	// roster means evaluating the permission predicate and that does not belong

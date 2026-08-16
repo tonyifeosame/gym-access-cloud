@@ -108,6 +108,21 @@ type TerminalDetail struct {
 	// and guessing one would condemn a working installation.
 	RosterSize   int  `json:"roster_size"`
 	OverCapacity bool `json:"over_capacity"`
+
+	// Health is what this terminal owes and whether it can still authenticate
+	// (SYN-04, M-7).
+	//
+	// The store function and this type both existed and were fully written, and
+	// NOTHING MOUNTED THEM -- so backlog depth, apply failures and credential
+	// state were unreachable from any operator surface. A terminal quietly
+	// failing to apply a roster looked identical to a healthy one, which is the
+	// exact condition the counters were added to make visible.
+	//
+	// Nested rather than flattened: `pending_jobs` beside `firmware_version` on
+	// one object reads as though they were the same kind of fact, and they are
+	// not. One is inventory and one is a live operational state that a refresh
+	// is expected to change.
+	Health ConsoleTerminalHealth `json:"health"`
 }
 
 // ConsolePeoplePage is a page of people.
