@@ -43,7 +43,8 @@ func GetCompany(companyID int64) (*models.ConsoleCompany, error) {
 const consoleSiteColumns = `s.public_id, s.site_name, COALESCE(s.address, ''),
 	          s.timezone, s.active, s.created_at,
 	          (SELECT count(*) FROM devices d
-	            WHERE d.site_id = s.id AND d.deleted_at IS NULL) AS terminal_count`
+	            WHERE d.site_id = s.id AND d.deleted_at IS NULL) AS terminal_count,
+	          s.offline_policy, s.offline_grace_minutes`
 
 func scanConsoleSites(rows *sql.Rows) ([]models.ConsoleSite, error) {
 	defer rows.Close()
@@ -52,7 +53,8 @@ func scanConsoleSites(rows *sql.Rows) ([]models.ConsoleSite, error) {
 	for rows.Next() {
 		var site models.ConsoleSite
 		if err := rows.Scan(&site.ID, &site.Name, &site.Address, &site.Timezone,
-			&site.Active, &site.CreatedAt, &site.DeviceCount); err != nil {
+			&site.Active, &site.CreatedAt, &site.DeviceCount,
+			&site.OfflinePolicy, &site.OfflineGraceMinutes); err != nil {
 			return nil, err
 		}
 		sites = append(sites, site)

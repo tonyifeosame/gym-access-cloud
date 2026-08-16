@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -43,6 +45,16 @@ func UpdateSiteSettings(c *gin.Context) {
 	}
 
 	updated, err := database.UpdateSiteSettings(c.GetInt64("site_id"), settings)
+	// F3. A caller's mistake, and one with a specific fix, so the message is
+	// passed through rather than replaced -- it names the endpoint that does
+	// what they were trying to do.
+	if errors.Is(err, models.ErrReservedSettingsKey) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+			"code":  "RESERVED_SETTINGS_KEY",
+		})
+		return
+	}
 	if err != nil {
 		logError(c, "update site settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})

@@ -113,9 +113,11 @@ func CreateSite(companyID int64, in NewSite) (*models.ConsoleSite, *SiteCredenti
 		INSERT INTO sites (company_id, site_name, address, timezone,
 		                   api_key_hash, api_key_prefix, active)
 		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, TRUE)
-		RETURNING public_id, site_name, COALESCE(address, ''), timezone, active, created_at`,
+		RETURNING public_id, site_name, COALESCE(address, ''), timezone, active, created_at,
+		          offline_policy, offline_grace_minutes`,
 		companyID, name, strings.TrimSpace(in.Address), timezone, hash, prefix).
-		Scan(&site.ID, &site.Name, &site.Address, &site.Timezone, &site.Active, &site.CreatedAt)
+		Scan(&site.ID, &site.Name, &site.Address, &site.Timezone, &site.Active, &site.CreatedAt,
+			&site.OfflinePolicy, &site.OfflineGraceMinutes)
 	if IsUniqueViolation(err) {
 		return nil, nil, models.ErrSiteNameTaken
 	}
@@ -175,10 +177,12 @@ func UpdateSite(companyID, siteID int64, in SiteUpdate) (*models.ConsoleSite, er
 		 WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL
 		 RETURNING public_id, site_name, COALESCE(address, ''), timezone, active, created_at,
 		           (SELECT count(*) FROM devices d
-		             WHERE d.site_id = sites.id AND d.deleted_at IS NULL)`,
+		             WHERE d.site_id = sites.id AND d.deleted_at IS NULL),
+		           offline_policy, offline_grace_minutes`,
 		siteID, companyID, in.Name, in.Address, in.Timezone, in.Active).
 		Scan(&site.ID, &site.Name, &site.Address, &site.Timezone,
-			&site.Active, &site.CreatedAt, &site.DeviceCount)
+			&site.Active, &site.CreatedAt, &site.DeviceCount,
+			&site.OfflinePolicy, &site.OfflineGraceMinutes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrSiteNotFound
 	}
