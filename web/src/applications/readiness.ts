@@ -55,18 +55,54 @@ interface ImplementationRecord {
 }
 
 const IMPLEMENTATION: Record<string, ImplementationRecord> = {
+  /**
+   * PARTIAL, AND THE REMAINDER IS AT THE DOOR RATHER THAN ON THE SERVER.
+   *
+   * What changed: the permission engine exists and is real. A decision is
+   * evaluated from company, site, terminal, person, credential, application,
+   * permission, schedule and validity window; it denies by default; DENY beats
+   * ALLOW at every scope; and it produces an auditable event carrying its
+   * reason. Schedules exist, with day masks, midnight-crossing windows and
+   * per-schedule timezones. The previous wording here — "the platform has no
+   * permission engine" — is simply out of date.
+   *
+   * What has NOT changed, and is the reason this is not IMPLEMENTED: the
+   * terminal does not evaluate any of it. The device protocol carries a FLAT
+   * ROSTER and no time rules, so a permission restricted to weekday mornings
+   * admits its holder at three in the morning. The server records the divergence
+   * afterwards, which makes it visible and does not stop it.
+   *
+   * The ALLOW and unconditional-DENY cases ARE enforced at the door, because
+   * somebody the rules do not permit is not on the terminal's roster at all.
+   * That is a real property and it is why this says "partly" rather than "not".
+   * It is also exactly the kind of half-truth that gets rounded up in a sales
+   * conversation, so the gap below names the case that fails rather than
+   * summarising.
+   *
+   * This becomes IMPLEMENTED when the terminal is told its rules and evaluates
+   * them — an additive field in the settings payload plus firmware to act on it.
+   * Not before.
+   */
   ACCESS_CONTROL: {
     status: 'PARTIAL',
     gap:
-      'Terminals hold a roster and open for people on it, but the platform has no ' +
-      'permission engine — there are no schedules, no per-door rules and no ' +
-      'validity windows. Every person a terminal knows about is treated the same.',
+      'The platform decides correctly, and terminals do not. Rules, schedules and ' +
+      'validity windows are evaluated on the server, and a person no rule permits is ' +
+      'kept off a terminal entirely — so allowing somebody, and excluding them ' +
+      'outright, both work at the door. But a terminal holds a flat list of people and ' +
+      'no time rules, so a permission restricted to particular hours or to one ' +
+      'capability is NOT enforced there: the terminal admits its holder at any hour, ' +
+      'and the platform records the divergence afterwards rather than preventing it. A ' +
+      'deployment whose requirement is "these people, but only at these times" is not ' +
+      'served by this yet.',
   },
   REGISTRATION: {
     status: 'PARTIAL',
     gap:
-      'People can be created and a credential can be enrolled at a terminal, but ' +
-      'an enrolment is local to the terminal that took it: the same person is not ' +
+      'People can be created and a credential can be enrolled at a terminal, and a ' +
+      'credential now has a lifecycle of its own that the platform enforces. But ' +
+      'nothing distributes enrolled biometric material between terminals, so an ' +
+      'enrolment remains local to the unit that took it: the same person is not ' +
       'recognised at any other door, and the console cannot start or manage an ' +
       'enrolment.',
   },

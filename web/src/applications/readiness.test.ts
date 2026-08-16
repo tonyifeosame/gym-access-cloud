@@ -85,6 +85,50 @@ describe('what this build will vouch for', () => {
     }
   })
 
+  it('describes ACCESS_CONTROL as decided centrally and NOT enforced at the door', () => {
+    // The gap this build previously carried said the platform "has no permission
+    // engine — there are no schedules, no per-door rules and no validity
+    // windows". All three now exist and are tested server-side, so that sentence
+    // understated the product in a way that would have been corrected in the
+    // first sales conversation — and the correction would have overshot, because
+    // the part that is still missing is at the terminal rather than the server.
+    const record = implementationOf('ACCESS_CONTROL')
+
+    expect(record.status).toBe('PARTIAL')
+    // The engine is real and the gap must not deny it.
+    expect(record.gap).not.toMatch(/no permission engine/i)
+    expect(record.gap).not.toMatch(/there are no schedules/i)
+    // What is actually missing: the terminal does not evaluate time rules.
+    expect(record.gap).toMatch(/terminals do not/i)
+    expect(record.gap).toMatch(/flat list/i)
+    expect(record.gap).toMatch(/not enforced there/i)
+  })
+
+  it('will not call ACCESS_CONTROL operational, however it is configured', () => {
+    // The door-side half is what makes it operational, and no amount of
+    // configuration supplies it. This test is expected to change — when it does,
+    // a terminal has genuinely started enforcing schedules.
+    const enabledAndConfigured = readinessOf('ACCESS_CONTROL', {
+      available: ['ACCESS_CONTROL'],
+      enabled: ['ACCESS_CONTROL'],
+      configured: [
+        {
+          id: 'app-ac',
+          code: 'ACCESS_CONTROL',
+          enabled: true,
+          settings: { anything: true },
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    })
+
+    expect(enabledAndConfigured.enabled).toBe(true)
+    expect(enabledAndConfigured.configured).toBe(true)
+    expect(enabledAndConfigured.operational).toBe(false)
+    expect(summariseReadiness(enabledAndConfigured)).toBe('Enabled — partly operational')
+  })
+
   it('refuses to vouch for a capability newer than this console', () => {
     // The safe direction to be wrong in is the modest one: a code this build has
     // never met is one it cannot make claims about.

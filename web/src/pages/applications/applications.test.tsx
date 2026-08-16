@@ -248,10 +248,13 @@ describe('what enabling actually does', () => {
     // The SPECIFIC gap, not a generic disclaimer.
     expect(within(attendance).getByText(/Nothing records attendance/i)).toBeInTheDocument()
 
-    // Access control is further along, and says so differently.
+    // Access control is further along, and says so differently. The gap names
+    // the half that is missing — enforcement at the terminal — rather than the
+    // half that now exists, which is the whole permission engine.
     const access = screen.getByText('Access Control').closest('li') as HTMLElement
     expect(within(access).getByText('Partly built')).toBeInTheDocument()
-    expect(within(access).getByText(/no permission engine/i)).toBeInTheDocument()
+    expect(within(access).getByText(/terminals do not/i)).toBeInTheDocument()
+    expect(within(access).queryByText(/no permission engine/i)).not.toBeInTheDocument()
   })
 
   it('repeats the four states on the detail page', async () => {
