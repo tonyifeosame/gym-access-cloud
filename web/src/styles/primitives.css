@@ -267,6 +267,56 @@ textarea.field__input {
   color: var(--text-muted);
 }
 
+/*
+ * A radio group where each option carries its consequence.
+ *
+ * SEPARATE FROM .fieldset__options RATHER THAN REUSING IT, because that one caps
+ * its height and scrolls — correct for a long list of site grants, wrong here.
+ * These options are alternatives somebody has to READ AND COMPARE before
+ * choosing (what a door does during an outage), and putting three paragraphs
+ * inside a 260px scroll box means only one is visible at a time, which defeats
+ * the reason the control is radios rather than a select.
+ */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+/* 24px, the WCAG 2.2 SC 2.5.8 floor. Same reasoning as .checkbox__input. */
+.choice__input {
+  margin-top: 2px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.choice__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.choice__label {
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choice__description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 .form__actions {
   display: flex;
   gap: var(--space-2);

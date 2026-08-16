@@ -53,6 +53,14 @@ export const SITE_B = { site_id: 'site-b', site_name: 'Abuja Depot' }
  * usually creeps back in first.
  */
 
+/**
+ * A site.
+ *
+ * The offline policy defaults to the platform's own column default —
+ * `CACHED_GRACE` at 720 minutes — rather than to whatever is convenient, because
+ * every screen that renders it is asserting something about what a door does and
+ * a fixture is where a wrong default would go unnoticed.
+ */
 export function makeSite(overrides: Partial<Site> = {}): Site {
   return {
     id: 'site-a',
@@ -62,6 +70,8 @@ export function makeSite(overrides: Partial<Site> = {}): Site {
     active: true,
     terminal_count: 2,
     created_at: '2026-01-01T00:00:00Z',
+    offline_policy: 'CACHED_GRACE',
+    offline_grace_minutes: 720,
     ...overrides,
   }
 }

@@ -46,14 +46,20 @@ beforeEach(() => setCsrfToken(null))
 // ---------------------------------------------------------------------------
 
 describe('settings composition', () => {
-  it('separates what this build understands from what it does not', () => {
-    const { known, unknown } = partitionSettings({
+  it('separates what this build understands, what it refuses to edit, and what it has never met', () => {
+    // THREE BUCKETS, NOT TWO. A key this build deliberately no longer offers a
+    // control for needs a different sentence from one it has never heard of:
+    // the first is inert and the console can say why, the second is something
+    // the console cannot vouch for either way.
+    const { known, superseded, unknown } = partitionSettings({
       unlock_duration_seconds: 5,
       a_future_setting: 'whatever',
       tamper_alarm: true,
+      offline_grace_minutes: 720,
     })
 
-    expect(known).toEqual({ unlock_duration_seconds: 5, tamper_alarm: true })
+    expect(known).toEqual({ unlock_duration_seconds: 5 })
+    expect(superseded).toEqual({ tamper_alarm: true, offline_grace_minutes: 720 })
     expect(unknown).toEqual({ a_future_setting: 'whatever' })
   })
 
@@ -92,13 +98,119 @@ describe('settings composition', () => {
 
 describe('guided settings', () => {
   it('loads the current values into proper controls', async () => {
-    signIn('ADMIN', { unlock_duration_seconds: 7, tamper_alarm: true })
+    signIn('ADMIN', { unlock_duration_seconds: 7, sync_interval_seconds: 90 })
     renderPanel()
 
-    await waitFor(() =>
-      expect(screen.getByLabelText(/Relay hold time/)).toHaveValue(7),
-    )
-    expect(screen.getByLabelText('Tamper alarm')).toBeChecked()
+    await waitFor(() => expect(screen.getByLabelText(/Relay hold time/)).toHaveValue(7))
+    expect(screen.getByLabelText(/Sync interval/)).toHaveValue(90)
+  })
+
+  it('OFFERS NO CONTROL FOR A SETTING THE FIRMWARE DOES NOT IMPLEMENT', async () => {
+    // `tamper_alarm` was a checkbox here. The firmware has no tamper input, no
+    // tamper event and nothing that reads the value, so it was a switch for
+    // hardware behaviour that does not exist — and a site could be relying on
+    // protection it had been shown as configured.
+    signIn('ADMIN', { tamper_alarm: true })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByLabelText(/Relay hold time/)).toBeInTheDocument())
+    expect(screen.queryByLabelText('Tamper alarm')).not.toBeInTheDocument()
+  })
+
+  it('OFFERS NO FREE-FORM GRACE PERIOD, because the platform ignores one written here', async () => {
+    // The value in this object is overwritten by the validated column on its way
+    // to a terminal, so the control was collecting a number nothing read.
+    signIn('ADMIN', { offline_grace_minutes: 720 })
+    renderPanel()
+
+    await waitFor(() => expect(screen.getByLabelText(/Relay hold time/)).toBeInTheDocument())
+    expect(screen.queryByLabelText(/Offline grace/)).not.toBeInTheDocument()
+  })
+
+  it('names the settings it no longer edits, with the reason, rather than hiding them', async () => {
+    signIn('ADMIN', { tamper_alarm: true, offline_grace_minutes: 720 })
+    renderPanel()
+
+    expect(
+      await screen.findByText('Settings this console no longer edits'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/firmware does not implement tamper detection/i)).toBeInTheDocument()
+    expect(screen.getByText(/platform refuses a write containing this key/i)).toBeInTheDocument()
+  })
+
+  it('WARNS THAT A SAVE WILL DROP THE KEYS THE PLATFORM REFUSES', async () => {
+    // These cannot be preserved: a write containing them is rejected outright,
+    // so a save that faithfully kept them would 400 on a form the operator only
+    // used to change a relay timing.
+    signIn('ADMIN', { offline_grace_minutes: 720, tamper_alarm: true })
+    renderPanel()
+
+    await screen.findByText('Settings this console no longer edits')
+    expect(screen.getByText(/Saving from this panel will remove/)).toBeInTheDocument()
+    expect(screen.getByText(/nothing your terminals do will change/i)).toBeInTheDocument()
+  })
+
+  it('does not describe a superseded key as newer than this console', async () => {
+    // The lazy alternative was to drop both keys into the unrecognised bucket,
+    // where they would have been reported as capabilities this build predates —
+    // the exact opposite of true, and reassuring in the wrong direction.
+    signIn('ADMIN', { tamper_alarm: true })
+    renderPanel()
+
+    await screen.findByText('Settings this console no longer edits')
+    expect(
+      screen.queryByText('Settings this console does not recognise'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('PRESERVES an inert key but DROPS a refused one, and the save succeeds', async () => {
+    // Two superseded keys, two different fates, and the difference is the
+    // server's rather than a preference. `tamper_alarm` is accepted and ignored,
+    // so removing it would be the console deleting configuration it had decided
+    // was pointless. `offline_grace_minutes` is REJECTED with a 400, so keeping
+    // it would fail the whole save — and the value was never being read anyway.
+    const user = userEvent.setup()
+    signIn('ADMIN', { unlock_duration_seconds: 5, tamper_alarm: true, offline_grace_minutes: 720 })
+    renderPanel()
+
+    const relay = await screen.findByLabelText(/Relay hold time/)
+    await user.clear(relay)
+    await user.type(relay, '9')
+    await user.click(screen.getByRole('button', { name: 'Save settings' }))
+
+    await waitFor(() => expect(lastSavedSettings()).toMatchObject({ unlock_duration_seconds: 9 }))
+    expect(lastSavedSettings()).toMatchObject({ tamper_alarm: true })
+    expect(lastSavedSettings()).not.toHaveProperty('offline_grace_minutes')
+    // The save went through rather than 400ing on a key the operator never typed.
+    expect(screen.queryByText(/Could not save the settings/)).not.toBeInTheDocument()
+  })
+
+  it('refuses a reserved key typed into the raw editor, before the server does', async () => {
+    // The server's message arrives as a failed save on a form the operator has
+    // to reconstruct; this arrives while the text is still in front of them and
+    // names the control that does what they were trying to do.
+    const user = userEvent.setup()
+    signIn('ADMIN', {})
+    renderPanel()
+
+    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    const editor = screen.getByLabelText('Settings JSON')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('{"offline_policy":"DENY_ALL"}')
+    await user.click(screen.getByRole('button', { name: 'Save JSON' }))
+
+    expect(await screen.findByText(/cannot be set here/)).toBeInTheDocument()
+    expect(state.requests.some((request) => request.method === 'PUT')).toBe(false)
+  })
+
+  it('points at the control that replaced the free-form grace period', async () => {
+    signIn('ADMIN', {})
+    renderPanel()
+
+    expect(
+      await screen.findByText(/Behaviour during an outage/, { selector: 'p, p *' }),
+    ).toBeInTheDocument()
   })
 
   it('says which version it is editing', async () => {

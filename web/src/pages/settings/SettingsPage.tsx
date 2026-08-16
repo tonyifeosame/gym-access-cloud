@@ -174,8 +174,9 @@ export function SettingsPage() {
           <li>
             <Link to="/sites">Site settings</Link>
             <span>
-              Device configuration for one location — relay hold time, sync interval,
-              offline grace. Open a site to edit it.
+              Device configuration for one location — relay hold time and sync
+              interval — and what its terminals do during a network outage, which is a
+              safety decision with its own control. Open a site to change either.
             </span>
           </li>
           <li>

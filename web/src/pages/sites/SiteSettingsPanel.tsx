@@ -8,9 +8,13 @@ import { ErrorState, InfoNote, LoadingState } from '../../components/states'
 import { useSiteSettings, useUpdateSiteSettings } from '../../data/console'
 import { useSession } from '../../session/useSession'
 import {
+  REFUSED_SETTINGS,
   SETTING_DEFINITIONS,
   composeSettings,
+  isRefusedSetting,
   partitionSettings,
+  preservableSettings,
+  supersededSetting,
   toFieldValue,
   validateGuided,
   type SettingIssue,
@@ -45,8 +49,22 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
   const [issues, setIssues] = useState<SettingIssue[]>([])
 
   const settings = useMemo(() => query.data?.settings ?? {}, [query.data])
-  const { known, unknown } = useMemo(() => partitionSettings(settings), [settings])
+  const { known, superseded, unknown } = useMemo(() => partitionSettings(settings), [settings])
   const unknownKeys = Object.keys(unknown)
+  const supersededKeys = Object.keys(superseded)
+
+  // Everything the guided form does not touch AND may legally be written back.
+  // `PUT` replaces wholesale, so anything omitted is deleted from the site and
+  // from every terminal at it on the next sync — but the two reserved keys
+  // CANNOT be sent at all, and a save that kept them faithfully would 400.
+  const preserved = useMemo(
+    () => preservableSettings(superseded, unknown),
+    [superseded, unknown],
+  )
+
+  // Reserved keys actually present in this site's stored object. A guided save
+  // drops them, so the panel has to say so first.
+  const staleReserved = supersededKeys.filter(isRefusedSetting)
 
   // Adopt whatever the server last returned. Keyed on settings_version so a save
   // (which increments it) reloads the form from the authoritative copy rather
@@ -92,8 +110,8 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
         definition.kind === 'boolean' ? value === 'true' : Number(value)
     }
 
-    // The merge that keeps unrecognised keys alive.
-    await persist(composeSettings(typed, unknown))
+    // The merge that keeps unrecognised AND superseded keys alive.
+    await persist(composeSettings(typed, preserved))
   }
 
   async function saveRaw() {
@@ -108,6 +126,22 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
       setRawError('Settings must be a JSON object.')
       return
     }
+
+    // THE RESERVED KEYS ARE REFUSED BY THE SERVER, so this refuses them here —
+    // not to duplicate the rule, but because the server's message arrives as a
+    // failed save on a form the operator has to reconstruct, and this one
+    // arrives while the text is still in front of them and names the control
+    // that does what they were trying to do.
+    const offending = REFUSED_SETTINGS.filter((key) => key in (parsed as Record<string, unknown>))
+    if (offending.length > 0) {
+      setRawError(
+        `${offending.join(' and ')} cannot be set here — the platform refuses it. ` +
+          'It is a validated field on the site, set under “Behaviour during an outage” ' +
+          'above. Remove it from this object and set it there.',
+      )
+      return
+    }
+
     setRawError(null)
     await persist(parsed as Record<string, unknown>)
   }
@@ -124,12 +158,61 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
           Applied to every terminal at this site. Version {query.data?.settings_version}.
           {query.isFetching ? ' Refreshing…' : ''}
         </p>
+        <p className="field__hint">
+          What terminals do during an outage is <strong>not</strong> here. It is a
+          validated field of its own, set under “Behaviour during an outage” above —
+          a value written into this object under the same name is ignored.
+        </p>
       </div>
 
       {!mayEdit ? (
         <InfoNote title="Read only">
           Your role can view these settings but not change them. A manager, administrator
           or owner in your company can.
+        </InfoNote>
+      ) : null}
+
+      {/*
+        THE KEYS THIS BUILD DELIBERATELY WILL NOT EDIT, named with the reason.
+        Both of these used to be controls in the form below, and both did
+        nothing — which is the failure this note exists to close rather than
+        quietly tidy away.
+      */}
+      {supersededKeys.length > 0 ? (
+        <InfoNote tone="warning" title="Settings this console no longer edits">
+          <p>
+            This site still carries {supersededKeys.length} setting
+            {supersededKeys.length === 1 ? '' : 's'} that the console used to offer a
+            control for. <strong>None of them has any effect.</strong>
+          </p>
+          <ul>
+            {supersededKeys.map((key) => {
+              const definition = supersededSetting(key)
+              return (
+                <li key={key}>
+                  <code>{key}</code> — {definition?.reason}
+                </li>
+              )
+            })}
+          </ul>
+          {staleReserved.length > 0 ? (
+            <p>
+              <strong>
+                Saving from this panel will remove{' '}
+                {staleReserved.map((key, index) => (
+                  <span key={key}>
+                    {index > 0 ? ' and ' : ''}
+                    <code>{key}</code>
+                  </span>
+                ))}
+                .
+              </strong>{' '}
+              The platform rejects a write that contains{' '}
+              {staleReserved.length === 1 ? 'it' : 'them'}, so the stale copy cannot be
+              kept — and it was never being read, so nothing your terminals do will
+              change.
+            </p>
+          ) : null}
         </InfoNote>
       ) : null}
 

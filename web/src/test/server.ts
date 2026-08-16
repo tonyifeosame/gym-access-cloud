@@ -121,6 +121,9 @@ export const state: ServerState = initialState()
 export function resetServerState(session: Session | null = null): void {
   Object.assign(state, initialState())
   state.session = session
+  // Held outside `state` because no response carries it, but still cleared
+  // between tests or a superseded-code count leaks from one test into the next.
+  outstandingClaims.clear()
 }
 
 /** Seeds the tenant's data. Call after resetServerState. */
@@ -587,6 +590,25 @@ export const handlers = [
 
     // A FULL REPLACEMENT, exactly as the API does it — keys omitted are gone.
     const body = (await request.json()) as Record<string, unknown>
+
+    // RESERVED KEYS ARE REFUSED, as `models.RejectReservedSettingsKeys` does.
+    // A copy of the offline policy inside this object would be ignored in
+    // favour of the validated column, so the server rejects the write rather
+    // than accepting a value that does nothing. Reproduced here because the
+    // console has to strip a stale copy before saving, and a mock that accepted
+    // it would let a console ship that 400s on every save at a site carrying an
+    // old settings object.
+    for (const reserved of ['offline_policy', 'offline_grace_minutes']) {
+      if (reserved in body) {
+        return json(
+          {
+            error: `settings must not contain a reserved key ("${reserved}" was supplied)`,
+            code: 'RESERVED_SETTINGS_KEY',
+          },
+          400,
+        )
+      }
+    }
     const previous = state.settings[siteId]?.settings_version ?? 1
     state.settings[siteId] = { settings: body, settings_version: previous + 1 }
     return json(state.settings[siteId])
@@ -651,20 +673,131 @@ export const handlers = [
       address?: string
       timezone?: string
       active?: boolean
+      offline_policy?: string
+      offline_grace_minutes?: number
     }
     if (body.name && state.sites.some((s) => s.id !== siteId && s.name === body.name)) {
       return json({ error: 'a site with that name already exists in this company' }, 409)
     }
 
-    const updated = {
+    // THE OFFLINE POLICY IS VALIDATED AND APPLIED FIRST, exactly as the server
+    // does it: a caller sending both must not get the rename without the safety
+    // control. The closed set and the 30-day bound are the platform's, and
+    // reproducing them here is what keeps the console's own bounds honest — a
+    // form that allowed 10,080 would pass against a mock that allowed anything.
+    if (body.offline_policy !== undefined) {
+      if (!['DENY_ALL', 'CACHED_GRACE', 'CACHED_INDEFINITE'].includes(body.offline_policy)) {
+        return json(
+          { error: 'offline_policy must be DENY_ALL, CACHED_GRACE or CACHED_INDEFINITE' },
+          400,
+        )
+      }
+    }
+    if (body.offline_grace_minutes !== undefined) {
+      if (
+        !Number.isInteger(body.offline_grace_minutes) ||
+        body.offline_grace_minutes < 0 ||
+        body.offline_grace_minutes > 43_200
+      ) {
+        return json({ error: 'offline_grace_minutes must be between 0 and 43200' }, 400)
+      }
+    }
+    if (body.offline_policy !== undefined || body.offline_grace_minutes !== undefined) {
+      // Delivered to terminals, so the site's settings version moves — the
+      // server bumps it and fans a SETTINGS job out to every terminal at the
+      // site, which is what makes this a different class of change from a
+      // rename.
+      const current = state.settings[siteId]
+      state.settings[siteId] = {
+        settings: current?.settings ?? {},
+        settings_version: (current?.settings_version ?? 1) + 1,
+      }
+    }
+
+    const updated: Site = {
       ...existing,
       name: body.name ?? existing.name,
       address: body.address ?? existing.address,
       timezone: body.timezone ?? existing.timezone,
       active: body.active ?? existing.active,
+      // Carried on the site itself, and returned by every projection.
+      offline_policy: (body.offline_policy as Site['offline_policy']) ?? existing.offline_policy,
+      offline_grace_minutes: body.offline_grace_minutes ?? existing.offline_grace_minutes,
     }
     state.sites = state.sites.map((site) => (site.id === siteId ? updated : site))
     return json(updated)
+  }),
+
+  /**
+   * Claim codes. ADMIN, matching site key rotation.
+   *
+   * The code comes back ONCE and no read endpoint returns it, so there is
+   * deliberately no GET here to pair with this POST — a mock that offered one
+   * would let a console ship that fetched a credential it can only ever be
+   * handed.
+   */
+  http.post('*/api/v1/console/sites/:siteId/claim-codes', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const siteId = String(params.siteId)
+    const site = state.sites.find((entry) => entry.id === siteId)
+    if (!site) return json({ error: 'Site not found' }, 404)
+
+    const scope = reachableSiteIds()
+    if (scope && !scope.includes(siteId)) return json({ error: 'Site access denied' }, 403)
+
+    const failure = takeFailure('claim-code')
+    if (failure) return json({ error: 'Failed to issue claim code' }, failure)
+
+    const body = (await request.json()) as {
+      serial_number?: string
+      expires_in_minutes?: number
+    }
+    const serial = (body.serial_number ?? '').trim()
+    if (!serial) return json({ error: 'serial_number is required' }, 400)
+    // The firmware holds a serial in char[16]; the server refuses anything
+    // longer rather than letting it fail at a door.
+    if (serial.length > 15) {
+      return json({ error: 'serial number must be 15 characters or fewer' }, 400)
+    }
+
+    // CLAMPED, NOT REFUSED, exactly as the store does it — a caller asking for a
+    // week gets a day and no error. Reproduced because the console's own bound
+    // exists precisely so the expiry it displays is the expiry in force.
+    const requested = body.expires_in_minutes && body.expires_in_minutes > 0
+      ? body.expires_in_minutes
+      : 120
+    const minutes = Math.min(requested, 1440)
+
+    // Issuing supersedes every outstanding code for the same serial, in the same
+    // transaction. Two live codes for one serial would make "single use"
+    // meaningless, and an installer holding the older printout has just been
+    // stranded — which is why the count comes back.
+    const key = `${siteId}::${serial}`
+    const superseded = outstandingClaims.get(key) ?? 0
+    outstandingClaims.set(key, 1)
+
+    // Crockford's alphabet minus the characters misread off a screen, in two
+    // groups of four, as generateClaimCode produces them.
+    const code = `H7K2-${String(superseded)}M9P`.slice(0, 9)
+
+    return json(
+      {
+        claim_code: code,
+        code_prefix: code.slice(0, 4),
+        serial_number: serial,
+        site_name: site.name,
+        expires_at: new Date(Date.UTC(2026, 7, 16, 12, 0, 0) + minutes * 60_000).toISOString(),
+        shown_once: true,
+        superseded_codes: superseded,
+      },
+      201,
+    )
   }),
 
   http.delete('*/api/v1/console/sites/:siteId', ({ request, params }) => {
@@ -1738,6 +1871,25 @@ const modes = new Map<string, string>()
 /** Serials whose device credential has been revoked. */
 const revoked = new Set<string>()
 
+/** Outstanding claim codes per site and serial, for the superseding count. */
+const outstandingClaims = new Map<string, number>()
+
+/**
+ * What the platform holds for a site's outage behaviour.
+ *
+ * Read back off the site itself, because that is where the API keeps it: the
+ * columns are on every site projection, so a test asserting on the WRITE and a
+ * screen reading it back are looking at the same value. A separate store here
+ * would let the two drift and hide exactly the bug it was meant to catch.
+ */
+export function offlinePolicyFor(
+  siteId: string,
+): { policy: string; grace: number } | undefined {
+  const site = state.sites.find((entry) => entry.id === siteId)
+  if (!site) return undefined
+  return { policy: site.offline_policy, grace: site.offline_grace_minutes }
+}
+
 function terminalDetail(terminal: Terminal): TerminalDetail {
   const mode = modes.get(terminal.serial_number) ?? 'MULTI_PURPOSE'
   const enabled = state.session?.applications.map((application) => application.code) ?? []
@@ -1751,6 +1903,7 @@ function terminalDetail(terminal: Terminal): TerminalDetail {
 export function resetTerminalModes(): void {
   modes.clear()
   revoked.clear()
+  outstandingClaims.clear()
 }
 
 export const server = setupServer(...handlers)

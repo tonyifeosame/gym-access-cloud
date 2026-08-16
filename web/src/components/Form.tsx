@@ -340,6 +340,108 @@ export function CheckboxGroup({
 }
 
 /**
+ * A group of radios as one labelled control, for a closed set of alternatives.
+ *
+ * A FIELDSET WITH A LEGEND, for the same reason CheckboxGroup is one: a `<label>`
+ * may only name one control, so this is what makes the set announce as a set
+ * rather than as unrelated radios with a heading near them.
+ *
+ * A RADIO GROUP RATHER THAN A SELECT, deliberately, and the difference is not
+ * cosmetic. A select shows one option at a time and hides the rest behind an
+ * interaction; radios show every alternative at once WITH ITS CONSEQUENCE
+ * beside it. Where the choice is a safety decision — what a door does during an
+ * outage — being able to read all three consequences side by side before
+ * choosing is the entire point of the control.
+ *
+ * `value` may be empty, which means NOTHING IS SELECTED. That is a legitimate
+ * and sometimes necessary state: where the console cannot read back what is
+ * currently in force, pre-selecting a plausible option would present a guess as
+ * a fact.
+ */
+export interface RadioGroupProps {
+  legend: string
+  hint?: ReactNode
+  name: string
+  value: string
+  onChange: (value: string) => void
+  options: { value: string; label: string; description?: ReactNode }[]
+  disabled?: boolean
+  error?: string
+}
+
+export function RadioGroup({
+  legend,
+  hint,
+  name,
+  value,
+  onChange,
+  options,
+  disabled,
+  error,
+}: RadioGroupProps) {
+  const id = useId()
+  const hintId = `${id}-hint`
+  const errorId = `${id}-error`
+
+  const describedBy =
+    [hint ? hintId : null, error ? errorId : null].filter(Boolean).join(' ') || undefined
+
+  return (
+    <fieldset className={`fieldset${error ? ' field--invalid' : ''}`} aria-describedby={describedBy}>
+      <legend className="fieldset__legend">{legend}</legend>
+      {hint ? (
+        <p className="field__hint" id={hintId}>
+          {hint}
+        </p>
+      ) : null}
+
+      <div className="choice-list">
+        {options.map((option) => {
+          const optionId = `${id}-${option.value}`
+          const descriptionId = `${optionId}-description`
+          return (
+            <div className="choice" key={option.value}>
+              <input
+                id={optionId}
+                type="radio"
+                className="choice__input"
+                name={name}
+                value={option.value}
+                checked={value === option.value}
+                onChange={() => onChange(option.value)}
+                disabled={disabled}
+                aria-describedby={option.description ? descriptionId : undefined}
+              />
+              <div className="choice__text">
+                <label className="choice__label" htmlFor={optionId}>
+                  {option.label}
+                </label>
+                {/*
+                  OUTSIDE the label rather than inside it. A label is read out
+                  whole every time the control is focused, so a paragraph of
+                  consequence inside one turns every arrow-key press into a
+                  recital. As a description it is announced once and available
+                  on demand.
+                */}
+                {option.description ? (
+                  <p className="choice__description" id={descriptionId}>
+                    {option.description}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <p className="field__error" id={errorId} aria-live="polite">
+        {error ?? ''}
+      </p>
+    </fieldset>
+  )
+}
+
+/**
  * A form-level failure, distinct from any field's.
  *
  * This is where a server rejection lands. Rendered as an alert so it is

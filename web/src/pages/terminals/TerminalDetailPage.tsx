@@ -8,7 +8,12 @@ import { can } from '../../auth/permissions'
 import { Badge, TerminalStatusBadge, humaniseCode } from '../../components/Badge'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
-import { useTerminal } from '../../data/console'
+import { useSite, useTerminal } from '../../data/console'
+import {
+  describeGrace,
+  offlinePolicyDefinition,
+  usesGracePeriod,
+} from '../sites/offlinePolicy'
 import { useSession } from '../../session/useSession'
 import { ApplicationModeDialog } from './ApplicationModeDialog'
 import { EvaluateAccessDialog } from './EvaluateAccessDialog'
@@ -40,6 +45,10 @@ export function TerminalDetailPage() {
   const navigate = useNavigate()
   const { session } = useSession()
   const query = useTerminal(serial)
+  // The site this terminal stands at, for its offline policy. Enabled only once
+  // the terminal read has produced a site id, so a 404 on the terminal does not
+  // also fire a second doomed request.
+  const site = useSite(query.data?.site_public_id)
   const [configuring, setConfiguring] = useState(false)
   const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
 
@@ -167,6 +176,50 @@ export function TerminalDetailPage() {
             </Badge>
           </p>
         </article>
+
+        {/*
+          WHAT THIS TERMINAL DOES WHEN IT CANNOT REACH THE PLATFORM, which is the
+          question an operator looking at a terminal's health is one step away
+          from asking — especially one looking at an OFFLINE terminal, where it
+          is the only question that matters.
+
+          READ FROM THE SITE, which is where the platform keeps it and what it
+          actually sends to this terminal. Not derived, not defaulted: if the
+          site read has not arrived the card says so rather than filling in a
+          plausible policy, because a guess here describes what a door does.
+
+          The terminal projection does not carry these fields and does not need
+          to — `models.ConsoleTerminalHealth` models them per terminal but is not
+          served by any route, and the site is the authority either way.
+        */}
+        <article className="card">
+          <h2 className="card__title">During an outage</h2>
+          <p className="card__value">
+            {site.data ? (
+              <Badge tone={site.data.offline_policy === 'DENY_ALL' ? 'info' : 'warning'}>
+                {offlinePolicyDefinition(site.data.offline_policy).label}
+              </Badge>
+            ) : (
+              <span className="muted">…</span>
+            )}
+          </p>
+          <p className="card__detail">
+            {site.data ? (
+              <>
+                {usesGracePeriod(site.data.offline_policy)
+                  ? `For ${describeGrace(site.data.offline_grace_minutes)}, then it refuses everybody. `
+                  : ''}
+                Set for <Link to={`/sites/${terminal.site_public_id}`}>{terminal.site_name}</Link>{' '}
+                and applied to every terminal there.
+              </>
+            ) : (
+              <>
+                Decided for{' '}
+                <Link to={`/sites/${terminal.site_public_id}`}>{terminal.site_name}</Link>.
+              </>
+            )}
+          </p>
+        </article>
       </section>
 
       {/* --- what it is for ------------------------------------------------ */}
@@ -278,9 +331,19 @@ export function TerminalDetailPage() {
 
         {terminal.firmware_outdated ? (
           <InfoNote title="Behind the current build">
+            {/*
+              CORRECTED. This said AccessLink does not push firmware over the
+              air, which stopped being true when the heartbeat began carrying
+              update offers — so a terminal reported as behind is now usually one
+              that is ABOUT TO UPDATE ITSELF, and an operator reading the old
+              sentence would have gone to schedule a site visit.
+            */}
             This terminal is not running the build marked current for its release
-            channel. AccessLink does not push firmware over the air — updating is a
-            separate, deliberate operation.
+            channel, so the platform will offer that build on its next heartbeat. A
+            terminal that takes the offer downloads it, writes it to flash and
+            reboots on its own. If it stays behind, the catalogue entry is probably
+            missing something the terminal requires — <Link to="/settings/firmware">Firmware</Link>{' '}
+            says which.
           </InfoNote>
         ) : null}
       </section>
@@ -334,8 +397,10 @@ export function TerminalDetailPage() {
               <p className="lifecycle__detail">
                 Destroys the device key, so the credential itself stops working.
                 For hardware that is <strong>missing, stolen or out of your
-                control</strong>. The unit must re-register at the door to come
-                back.
+                control</strong>. To bring the unit back, issue a claim code for
+                its serial from{' '}
+                <Link to={`/sites/${terminal.site_public_id}`}>{terminal.site_name}</Link>{' '}
+                and redeem it at the terminal.
               </p>
             </div>
             <button
@@ -430,10 +495,19 @@ export function TerminalDetailPage() {
           </li>
         </ul>
 
+        {/*
+          THE REGISTRATION SENTENCE, CORRECTED. It used to say registration
+          happens "using its site's provisioning key", which was true and is now
+          the path to avoid: that key registers every terminal at the site, for
+          ever, and putting it on an installer's laptop is what claim codes were
+          built to stop. The console CAN take part now — it issues the code.
+        */}
         <p className="field__hint">
-          Registering a terminal for the first time happens on the device itself,
-          using its site’s provisioning key — it is not something the console can
-          do on the hardware’s behalf.
+          Registration itself happens on the device. What the console does is issue a{' '}
+          <strong>claim code</strong> for one serial, from{' '}
+          <Link to={`/sites/${terminal.site_public_id}`}>{terminal.site_name}</Link>;
+          whoever is at the terminal redeems it there and the unit is handed its own
+          credential. The site’s provisioning key does not need to leave the platform.
         </p>
       </section>
 

@@ -3,12 +3,13 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import type { Site } from '../../api/types'
 import { can } from '../../auth/permissions'
-import { ActiveBadge } from '../../components/Badge'
+import { ActiveBadge, Badge } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
 import { PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useSites } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { offlinePolicyDefinition } from './offlinePolicy'
 import { SiteFormDialog } from './SiteFormDialog'
 
 /**
@@ -65,6 +66,25 @@ export function SitesListPage() {
       header: 'Terminals',
       align: 'end',
       render: (site) => site.terminal_count,
+    },
+    {
+      id: 'offline',
+      header: 'During an outage',
+      // The one column here that is about what a DOOR does rather than about a
+      // record, and the reason it is worth a column at all: "which of our
+      // locations keeps opening when the network goes" is a question somebody
+      // asks about a whole estate, and answering it by visiting each site in
+      // turn is how it stops being asked.
+      //
+      // DENY_ALL reads as the neutral, cautious state; both cached policies are
+      // marked, because both mean a door can admit somebody who has been
+      // withdrawn. That is not an error — it is frequently the right choice —
+      // so it is a warning tone and never a danger one.
+      render: (site) => (
+        <Badge tone={site.offline_policy === 'DENY_ALL' ? 'info' : 'warning'}>
+          {offlinePolicyDefinition(site.offline_policy).label}
+        </Badge>
+      ),
     },
     {
       id: 'key',

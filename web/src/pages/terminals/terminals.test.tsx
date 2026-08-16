@@ -313,11 +313,42 @@ describe('terminal detail', () => {
     expect(screen.getByText('1.1.0')).toBeInTheDocument()
     expect(screen.getByText('1.2.0')).toBeInTheDocument()
     expect(screen.getByText('Behind the current build')).toBeInTheDocument()
-    // Linked to the site by public id.
-    expect(screen.getByRole('link', { name: SITE_B.site_name })).toHaveAttribute(
-      'href',
-      `/sites/${SITE_B.site_id}`,
+    // Linked to the site by public id. The page now links to the site from more
+    // than one place — the lead, the outage card and the revoke description all
+    // point at it — so this asserts every link agrees rather than picking one.
+    const siteLinks = screen.getAllByRole('link', { name: SITE_B.site_name })
+    expect(siteLinks.length).toBeGreaterThan(0)
+    for (const link of siteLinks) {
+      expect(link).toHaveAttribute('href', `/sites/${SITE_B.site_id}`)
+    }
+  })
+
+  it('says a terminal behind the current build is about to UPDATE ITSELF', async () => {
+    // This note used to say AccessLink does not push firmware over the air, so
+    // an operator reading it would have gone and scheduled a site visit for a
+    // terminal that was going to flash itself on its next heartbeat.
+    signIn()
+    renderTerminals('/terminals/AT-0002')
+
+    await screen.findByText('Behind the current build')
+    expect(screen.getByText(/offer that build on its next heartbeat/i)).toBeInTheDocument()
+    expect(screen.queryByText(/does not push firmware over the air/i)).not.toBeInTheDocument()
+  })
+
+  it('shows what this terminal does during an outage, read from its site', async () => {
+    // The question an operator looking at an OFFLINE terminal is one step from
+    // asking, and the one where a plausible default would describe a door rather
+    // than a record. Read from the site, which is where the platform keeps it and
+    // what it actually sends to the terminal.
+    signIn()
+    renderTerminals('/terminals/AT-0002')
+
+    await screen.findByRole('heading', { name: 'Loading Bay', level: 1 })
+    expect(screen.getByText('During an outage')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByText('Keep working for a limited time')).toBeInTheDocument(),
     )
+    expect(screen.getByText(/For 12 hours, then it refuses everybody/)).toBeInTheDocument()
   })
 
   it('surfaces the health note for a terminal that never reported', async () => {
@@ -330,16 +361,20 @@ describe('terminal detail', () => {
   it('still names the one thing the console cannot do: first registration', async () => {
     // This page used to say that removal, reassignment and forced resync were
     // all unavailable, which was true until the lifecycle routes landed
-    // (SEC-01) and is now offered in the Lifecycle section. What remains
-    // genuinely impossible from a browser is enrolling the hardware in the first
-    // place — that needs the site provisioning key, which a browser must never
-    // hold. Saying so beats an operator hunting for a button that cannot exist.
+    // (SEC-01) and is now offered in the Lifecycle section.
+    //
+    // WHAT THE CONSOLE CAN DO CHANGED AGAIN when claim codes landed. Registration
+    // still happens on the device, but the console is no longer a bystander: it
+    // issues the one-time code for that serial, so the site provisioning key —
+    // which a browser must never hold — does not have to be handed to an
+    // installer either. The old sentence sent operators to fetch the key.
     signIn()
     renderTerminals('/terminals/AT-0001')
 
     expect(await screen.findByRole('heading', { name: 'Lifecycle' })).toBeInTheDocument()
+    expect(screen.getByText(/Registration itself happens on the device/)).toBeInTheDocument()
     expect(
-      screen.getByText(/Registering a terminal for the first time happens on the device/),
+      screen.getByText(/provisioning key does not need to leave the platform/i),
     ).toBeInTheDocument()
   })
 
