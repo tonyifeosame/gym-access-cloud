@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 
 	"access-terminal-cloud-api/models"
 )
@@ -383,9 +384,24 @@ func MoveTerminal(companyID int64, serial, targetSitePublicID string) (*Terminal
 	// once converged, because it describes a set rather than a change. That is
 	// the property the compaction comment calls out and the reason a "wipe then
 	// re-add" design was rejected there.
+	//
+	// THE MOVE IS REFUSED IF THE DESTINATION DOES NOT FIT (FW-01). A terminal
+	// that cannot hold the new site's roster would arrive there unable to be
+	// told who is allowed, and the honest moment to say so is while the operator
+	// is still looking at the screen -- not at a door in another building. The
+	// whole transaction rolls back, so the terminal has not moved either.
 	superseded, err := compactDeviceBacklogTx(tx, deviceID,
 		"superseded by relocation to another site")
 	if err != nil {
+		var overflow *RosterCapacityError
+		if errors.As(err, &overflow) {
+			tx.Rollback()
+			if recordErr := RecordRosterOverflow(deviceID, overflow.RosterSize,
+				overflow.Capacity); recordErr != nil {
+				log.Printf("recording roster overflow for device %d: %v", deviceID, recordErr)
+			}
+			return nil, err
+		}
 		return nil, fmt.Errorf("queueing relocation snapshot: %w", err)
 	}
 
@@ -479,6 +495,17 @@ type TerminalHealth struct {
 	CredentialActive bool
 	OfflinePolicy    string
 	OfflineGraceMins int
+
+	// Capacity (FW-01). MemberCapacity is nil when the terminal has never
+	// reported one, which is not the same as unlimited and must not be rendered
+	// as a number -- see database/capacity.go.
+	//
+	// RosterSize is how many people this terminal's permissions cover right now.
+	// It is the number an operator needs beside the capacity, because "over
+	// capacity" without "by how many" does not tell anybody what to buy.
+	MemberCapacity *int
+	RosterSize     int
+	OverCapacity   bool
 }
 
 // GetTerminalHealth reports what a terminal owes and whether it can still
@@ -491,9 +518,10 @@ type TerminalHealth struct {
 func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) {
 	var h TerminalHealth
 	var applyError sql.NullString
+	var deviceID int64
 
 	err := DB.QueryRow(`
-		SELECT d.pending_job_count, d.failed_job_count, d.last_apply_error,
+		SELECT d.id, d.pending_job_count, d.failed_job_count, d.last_apply_error,
 		       d.api_key_hash IS NOT NULL,
 		       s.offline_policy, s.offline_grace_minutes
 		  FROM devices d
@@ -502,7 +530,7 @@ func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) 
 		   AND s.company_id = $2
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL`, serial, companyID).
-		Scan(&h.PendingJobs, &h.FailedJobs, &applyError, &h.CredentialActive,
+		Scan(&deviceID, &h.PendingJobs, &h.FailedJobs, &applyError, &h.CredentialActive,
 			&h.OfflinePolicy, &h.OfflineGraceMins)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrDeviceNotFound
@@ -513,6 +541,22 @@ func GetTerminalHealth(companyID int64, serial string) (*TerminalHealth, error) 
 
 	h.LastApplyError = applyError.String
 	h.HasApplyError = applyError.Valid
+
+	// Capacity is a second query rather than a join, because counting the
+	// roster means evaluating the permission predicate and that does not belong
+	// inline in a health lookup. This is a single-terminal read; the fleet list
+	// deliberately does not carry it.
+	capacity, err := InspectTerminalCapacity(DB, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	h.RosterSize = capacity.RosterSize
+	h.OverCapacity = capacity.Exceeded()
+	if capacity.Known {
+		known := capacity.Capacity
+		h.MemberCapacity = &known
+	}
+
 	return &h, nil
 }
 

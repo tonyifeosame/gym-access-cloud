@@ -127,11 +127,25 @@ func DeviceHeartbeat(c *gin.Context) {
 		req.IPAddress = c.ClientIP()
 	}
 
-	pending, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
+	pending, capacityChanged, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
 	if err != nil {
 		logError(c, "record heartbeat", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record heartbeat"})
 		return
+	}
+
+	// FW-01. A terminal that has just told us its ceiling for the first time --
+	// or a different one after a firmware change -- is measured against its
+	// roster now, rather than at whatever future moment somebody happens to
+	// request a snapshot.
+	//
+	// BEST EFFORT, like the firmware offer below. A heartbeat records liveness;
+	// failing it because a capacity review could not be completed would take a
+	// door's liveness reporting down over a diagnostic.
+	if capacityChanged {
+		if err := database.ReviewTerminalCapacity(c.GetInt64("device_id")); err != nil {
+			logError(c, "review terminal capacity", err)
+		}
 	}
 
 	// What the platform would like this terminal to be running (OTA, §5).
@@ -218,6 +232,9 @@ func ResyncDevice(c *gin.Context) {
 	}
 
 	superseded, err := database.CompactDeviceBacklog(device.ID)
+	if respondIfOverCapacity(c, err) {
+		return
+	}
 	if err != nil {
 		logError(c, "compact device backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue full sync"})

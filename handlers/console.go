@@ -379,10 +379,20 @@ func loadTerminalDetail(companyID int64, serial string) (*models.TerminalDetail,
 		return nil, err
 	}
 
+	// Capacity (FW-01). A third read, and it earns its place: "this terminal
+	// holds 256 people and its permissions cover 312" is the sentence that
+	// stops somebody buying more licences instead of more hardware.
+	capacity, err := database.InspectTerminalCapacity(database.DB, inventory.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	return &models.TerminalDetail{
 		DeviceInventory:       *inventory,
 		ApplicationMode:       application.Mode,
 		EffectiveApplications: application.Effective,
+		RosterSize:            capacity.RosterSize,
+		OverCapacity:          capacity.Exceeded(),
 	}, nil
 }
 
@@ -557,8 +567,12 @@ func ConsoleCreatePerson(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.ExternalID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "external_id is required"})
+	// FW-09. The console is where an operator TYPES this value, so it is the
+	// one place the constraint can be explained while it can still be changed.
+	// The message names the limit and the reason; "invalid external_id" would
+	// leave somebody guessing at a field they cannot see the shape of.
+	if err := models.ValidateExternalID(req.ExternalID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "field": "external_id"})
 		return
 	}
 

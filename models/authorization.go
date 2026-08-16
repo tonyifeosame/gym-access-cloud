@@ -1,7 +1,9 @@
 package models
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -368,4 +370,49 @@ var (
 		"offline_policy must be DENY_ALL, CACHED_GRACE or CACHED_INDEFINITE")
 	ErrInvalidOfflineGrace = errors.New(
 		"offline_grace_minutes must be between 0 and 43200")
+
+	// ErrReservedSettingsKey refuses a policy key written into the free-form
+	// settings object. The message names the field that DOES work, because
+	// somebody sending this has a specific outcome in mind and should be told
+	// how to get it rather than only that they cannot have it this way.
+	ErrReservedSettingsKey = errors.New(
+		"offline_policy and offline_grace_minutes cannot be set through the " +
+			"free-form settings object: they are validated columns, and a value " +
+			"written here is overwritten before a terminal sees it. Use " +
+			"PUT /console/sites/{site_id} with offline_policy / offline_grace_minutes")
 )
+
+// RejectReservedSettingsKeys refuses a free-form settings object that tries to
+// carry the offline policy (F3).
+//
+// WHY REFUSE RATHER THAN IGNORE. The keys are already ignored -- the validated
+// columns are layered over this object on the way to a device, so whatever is
+// written here loses. That silence is the whole problem: the write returns 200,
+// a read hands the value back, and the console displays a grace window that no
+// terminal has ever been told about. A safety setting that appears to have been
+// applied and has not is worse than one that was refused out loud.
+//
+// TOP LEVEL ONLY. The merge only ever looks at top-level keys, so a nested
+// `offline_policy` inside some application's own object is not a claim about
+// this site's outage behaviour and is none of this function's business.
+//
+// A body that is not a JSON object is passed through untouched: the caller
+// above already rejects those with a clearer message, and duplicating that
+// judgement here would give two different errors for one mistake.
+func RejectReservedSettingsKeys(settings json.RawMessage) error {
+	if len(settings) == 0 {
+		return nil
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(settings, &probe); err != nil {
+		return nil
+	}
+
+	for _, reserved := range []string{SettingsKeyOfflinePolicy, SettingsKeyOfflineGraceMinutes} {
+		if _, present := probe[reserved]; present {
+			return fmt.Errorf("%w (%q was supplied)", ErrReservedSettingsKey, reserved)
+		}
+	}
+	return nil
+}

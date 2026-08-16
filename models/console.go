@@ -47,6 +47,15 @@ type ConsoleSite struct {
 	Active      bool      `json:"active"`
 	DeviceCount int       `json:"terminal_count"`
 	CreatedAt   time.Time `json:"created_at"`
+
+	// What the terminals at this site do when they cannot reach the platform
+	// (F4). On EVERY site projection, not only the settings read, because it is
+	// a safety decision and an operator scanning a list of locations should be
+	// able to see which ones keep opening during an outage without visiting
+	// each one. The values are the validated columns, which are what a terminal
+	// is actually sent.
+	OfflinePolicy       string `json:"offline_policy"`
+	OfflineGraceMinutes int    `json:"offline_grace_minutes"`
 }
 
 // ConsolePerson is someone the platform knows about.
@@ -88,6 +97,17 @@ type TerminalDetail struct {
 	DeviceInventory
 	ApplicationMode       string   `json:"application_mode"`
 	EffectiveApplications []string `json:"effective_applications"`
+
+	// RosterSize is how many people this terminal's permissions cover RIGHT
+	// NOW, computed rather than stored. It is on the detail read and not on the
+	// list because it means evaluating the permission predicate per terminal.
+	//
+	// OverCapacity is true only when the terminal has REPORTED a capacity and
+	// the roster is larger than it. A terminal that has reported nothing is
+	// never marked over capacity, because the server does not know its ceiling
+	// and guessing one would condemn a working installation.
+	RosterSize   int  `json:"roster_size"`
+	OverCapacity bool `json:"over_capacity"`
 }
 
 // ConsolePeoplePage is a page of people.

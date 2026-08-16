@@ -3,7 +3,9 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -137,13 +139,20 @@ func enqueueSettingsFanoutTx(tx *sql.Tx, siteID int64, payload []byte) error {
 	return nil
 }
 
-// GetSiteSettings returns a site's current settings and their version
+// GetSiteSettings returns a site's current settings, their version, and the
+// offline policy actually in force.
+//
+// The policy columns are read here rather than left to the caller so that every
+// surface showing a site's settings shows the same thing the terminals at that
+// site are running. Reading the blob alone is what made an inert
+// `offline_grace_minutes` in the free-form object look real.
 func GetSiteSettings(siteID int64) (*models.SiteSettings, error) {
 	var s models.SiteSettings
 	var payload []byte
 	err := DB.QueryRow(
-		`SELECT settings, settings_version FROM sites WHERE id = $1 AND deleted_at IS NULL`,
-		siteID).Scan(&payload, &s.Version)
+		`SELECT settings, settings_version, offline_policy, offline_grace_minutes
+		   FROM sites WHERE id = $1 AND deleted_at IS NULL`,
+		siteID).Scan(&payload, &s.Version, &s.OfflinePolicy, &s.OfflineGraceMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +163,19 @@ func GetSiteSettings(siteID int64) (*models.SiteSettings, error) {
 // UpdateSiteSettings replaces a site's settings, bumps the version, and fans a
 // SETTINGS job out to every device at the site -- all in one transaction.
 func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSettings, error) {
+	// F3. The two policy keys are REFUSED in the free-form object rather than
+	// silently dropped, and the reason is that dropping them is what produced
+	// the trap: the write succeeded, the read showed the value back, and the
+	// merge overwrote it before it ever reached a terminal. An operator who set
+	// a grace window this way was told it had taken effect and it had not.
+	//
+	// The check is here, at the store, so both mountings of the handler and any
+	// future caller get it -- the console route and the site-key route are the
+	// same code, but that is a fact about today's routing table.
+	if err := models.RejectReservedSettingsKeys(settings); err != nil {
+		return nil, err
+	}
+
 	tx, err := DB.Begin()
 	if err != nil {
 		return nil, err
@@ -168,8 +190,9 @@ func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSet
 		        settings_version = settings_version + 1,
 		        settings_updated_at = CURRENT_TIMESTAMP
 		  WHERE id = $2 AND deleted_at IS NULL
-		  RETURNING settings, settings_version`,
-		[]byte(settings), siteID).Scan(&stored, &result.Version)
+		  RETURNING settings, settings_version, offline_policy, offline_grace_minutes`,
+		[]byte(settings), siteID).
+		Scan(&stored, &result.Version, &result.OfflinePolicy, &result.OfflineGraceMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -464,11 +487,28 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 
 	superseded, err := compactDeviceBacklogTx(tx, deviceID, "superseded by full sync")
 	if err != nil {
+		// The refusal is recorded after the rollback, not inside it. See
+		// RecordRosterOverflow: a trace written on the transaction that was
+		// abandoned would be abandoned with it, and the trace is the point.
+		var overflow *RosterCapacityError
+		if errors.As(err, &overflow) {
+			tx.Rollback()
+			if recordErr := RecordRosterOverflow(deviceID, overflow.RosterSize,
+				overflow.Capacity); recordErr != nil {
+				log.Printf("recording roster overflow for device %d: %v", deviceID, recordErr)
+			}
+		}
 		return 0, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+
+	// It fit. A terminal that was over capacity and no longer is must stop being
+	// reported as over capacity.
+	if err := ClearRosterOverflow(deviceID); err != nil {
+		log.Printf("clearing roster overflow for device %d: %v", deviceID, err)
 	}
 	return superseded, nil
 }
@@ -486,6 +526,17 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 // supersede work, but an operator reading a cancelled queue should be able to
 // tell "your backlog was collapsed" from "this terminal was moved".
 func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, error) {
+	// FW-01, and it is checked BEFORE anything is cancelled.
+	//
+	// Order is the whole point. Cancelling the queue and then discovering the
+	// replacement snapshot cannot be applied would leave the terminal with no
+	// queued work AND a roster it can never be brought in line with -- strictly
+	// worse than the backlog it started with. Refusing first leaves the existing
+	// queue exactly as it was.
+	if err := guardRosterCapacityTx(tx, deviceID); err != nil {
+		return 0, err
+	}
+
 	// Retire whatever was queued. These are superseded, not applied, so they
 	// are CANCELLED rather than COMPLETED -- acknowledged_at stays null and the
 	// "only acked jobs are complete" invariant holds.
@@ -609,10 +660,23 @@ func FetchDeviceWork(deviceID int64, limit int) ([]models.SyncJob, bool, error) 
 
 	compacted := false
 	if backlog > compactionThreshold() {
-		if _, err := CompactDeviceBacklog(deviceID); err != nil {
+		switch _, err := CompactDeviceBacklog(deviceID); {
+		case err == nil:
+			compacted = true
+
+		case errors.Is(err, ErrRosterExceedsCapacity):
+			// THE POLL STILL SUCCEEDS. This terminal cannot be given an
+			// authoritative roster, which CompactDeviceBacklog has already
+			// recorded where an operator will see it -- but it can still be
+			// given the individual jobs already queued for it, and failing its
+			// poll would take away the work it CAN do on top of the work it
+			// cannot. A door that is behind is better than a door that is also
+			// no longer talking to the platform.
+			log.Printf("device %d: backlog compaction withheld: %v", deviceID, err)
+
+		default:
 			return nil, false, err
 		}
-		compacted = true
 	}
 
 	jobs, err := GetPendingJobsForDevice(deviceID, limit)

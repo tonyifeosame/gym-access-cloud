@@ -31,7 +31,14 @@ const deviceInventoryColumns = `
 	    WHEN fv.version IS NULL THEN FALSE
 	    WHEN d.firmware_version IS NULL THEN TRUE
 	    ELSE d.firmware_version <> fv.version
-	END AS firmware_outdated`
+	END AS firmware_outdated,
+
+	-- Capacity (FW-01). STORED COLUMNS ONLY. The live roster size needs the
+	-- permission predicate evaluated per device, which is a fleet-wide cost on
+	-- a list read -- so the list reports what was recorded the last time a
+	-- snapshot was withheld, and the single-terminal read computes the current
+	-- number. Both are useful; conflating them would make the list slow.
+	d.member_capacity, d.roster_overflow_at, d.roster_overflow_count`
 
 // The firmware join carries company_id as well as type and channel: "current"
 // is a per-tenant target, so a device must only ever be measured against its own
@@ -90,6 +97,7 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			&d.FirmwareVersion, &d.HardwareRevision, &d.BuildNumber, &d.BootCount,
 			&d.LastSeenAt, &d.LastSyncAt, &d.LastHeartbeatAt,
 			&d.CurrentFirmwareVersion, &d.FirmwareOutdated,
+			&d.MemberCapacity, &d.RosterOverflowAt, &d.RosterOverflowCount,
 		)
 		if err != nil {
 			return nil, err

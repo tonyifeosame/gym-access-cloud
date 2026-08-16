@@ -237,10 +237,28 @@ func AuthenticateDevice(key string) (*models.DeviceIdentity, error) {
 // OFFLINE (inferred by the server from missed heartbeats) or DISABLED (an
 // administrative decision) -- a heartbeat from a DISABLED device records
 // liveness without silently putting it back into service.
-func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, error) {
+//
+// It also returns whether the terminal reported a member capacity DIFFERENT
+// from the one on file, which is the caller's signal to re-measure it against
+// its roster (FW-01). In practice that is once per boot, which is the right
+// frequency: counting a roster costs a permission-predicate evaluation, and the
+// answer cannot change because a heartbeat arrived.
+func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bool, error) {
 	reported := req.Status
 	if !models.DeviceReportableStates[reported] {
 		reported = models.DeviceOnline
+	}
+
+	// Read before write, so "is this new" is answerable. A NULL prior value with
+	// a reported one is a change, which is the case that matters most: it is a
+	// terminal telling the platform its ceiling for the first time.
+	capacityChanged := false
+	if capacity := positiveCapacity(req.MemberCapacity); capacity != nil {
+		var stored sql.NullInt64
+		if err := DB.QueryRow(
+			`SELECT member_capacity FROM devices WHERE id = $1`, deviceID).Scan(&stored); err == nil {
+			capacityChanged = !stored.Valid || int(stored.Int64) != *capacity
+		}
 	}
 
 	_, err := DB.Exec(`
@@ -254,15 +272,41 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, er
 		       boot_count = COALESCE($5, boot_count),
 		       ip_address = COALESCE(NULLIF($6,''), ip_address),
 		       last_error = CASE WHEN $1 = 'ERROR' THEN NULLIF($7,'') ELSE NULL END,
-		       last_error_at = CASE WHEN $1 = 'ERROR' THEN CURRENT_TIMESTAMP ELSE NULL END
+		       last_error_at = CASE WHEN $1 = 'ERROR' THEN CURRENT_TIMESTAMP ELSE NULL END,
+
+		       -- FW-01. COALESCE, so a terminal that reports its capacity once
+		       -- and then stops -- a downgrade, or a build that drops the field
+		       -- -- keeps the value rather than reverting to unknown. The
+		       -- hardware did not change, and forgetting would silently switch
+		       -- the capacity guard off for that door.
+		       member_capacity = COALESCE($9, member_capacity),
+		       member_capacity_reported_at = CASE
+		           WHEN $9 IS NOT NULL THEN CURRENT_TIMESTAMP
+		           ELSE member_capacity_reported_at END
 		 WHERE id = $8 AND deleted_at IS NULL`,
 		reported, req.FirmwareVersion, req.HardwareRevision, req.BuildNumber,
-		req.BootCount, req.IPAddress, req.Error, deviceID)
+		req.BootCount, req.IPAddress, req.Error, deviceID,
+		// Zero and negative are dropped rather than stored. A terminal that can
+		// hold nobody is not a state the firmware can be in, and the CHECK
+		// constraint would refuse it anyway -- as a 500 on the heartbeat, which
+		// is not how a garbage field should take a door offline.
+		positiveCapacity(req.MemberCapacity))
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
-	return GetDeviceSyncBacklog(deviceID)
+	pending, err := GetDeviceSyncBacklog(deviceID)
+	return pending, capacityChanged, err
+}
+
+// positiveCapacity normalises a reported member capacity for the heartbeat's
+// COALESCE: nil for anything that is not a usable number, so the stored value is
+// left alone rather than overwritten with nonsense.
+func positiveCapacity(reported *int) *int {
+	if reported == nil || *reported <= 0 {
+		return nil
+	}
+	return reported
 }
 
 // MarkDevicesOffline flags devices that have missed heartbeats for longer than

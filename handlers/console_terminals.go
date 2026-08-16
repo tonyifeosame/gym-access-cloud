@@ -216,6 +216,13 @@ func ConsoleMoveTerminal(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Site not found"})
 		return
 	case err != nil:
+		// The destination's roster does not fit this terminal, so the move was
+		// rolled back rather than completed into a state where the unit could
+		// never be told who is allowed. Said now, while the operator is still
+		// looking at it, rather than discovered at a door in another building.
+		if respondIfOverCapacity(c, err) {
+			return
+		}
 		logError(c, "console move terminal", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to move the terminal"})
 		return
@@ -252,6 +259,9 @@ func ConsoleResyncTerminal(c *gin.Context) {
 	superseded, pending, err := database.ResyncTerminal(companyID, serial)
 	if errors.Is(err, models.ErrDeviceNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
+		return
+	}
+	if respondIfOverCapacity(c, err) {
 		return
 	}
 	if err != nil {

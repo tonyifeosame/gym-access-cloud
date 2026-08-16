@@ -61,6 +61,16 @@ const (
 	EventTamper          = "TAMPER"
 	EventTerminalOnline  = "TERMINAL_ONLINE"
 	EventTerminalOffline = "TERMINAL_OFFLINE"
+
+	// EventRosterOverflow says a terminal's permissions cover more people than
+	// it can store, so the authoritative roster was withheld rather than queued
+	// for a terminal that would refuse it wholesale (FW-01).
+	//
+	// It is a FLEET condition rather than a door decision, which is why it
+	// carries DecisionError and names no subject: nobody was refused. What
+	// happened is that the platform stopped being able to promise the terminal
+	// knows who is allowed.
+	EventRosterOverflow = "ROSTER_CAPACITY_EXCEEDED"
 )
 
 // Event decisions. A CLOSED set, unlike the type, because the authorization path
