@@ -73,6 +73,13 @@ func CreateMember(c *gin.Context) {
 		return
 	}
 
+	// FW-09. An id no terminal can store is refused here, naming the limit,
+	// rather than accepted and discovered at a door. See models/external_id.go.
+	if err := models.ValidateExternalID(member.MemberID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "field": "member_id"})
+		return
+	}
+
 	// Re-using an existing member_id is the caller's mistake, not a server
 	// fault. Reporting it as 500 made a client retry a request that could never
 	// succeed.
