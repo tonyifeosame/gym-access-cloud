@@ -22,12 +22,14 @@ func TestDeviceCannotAcknowledgeAnotherDevicesJob(t *testing.T) {
 	keyB := env.registerDevice(env.siteAKey, "ESP32-BBB")
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
-	// Both terminals get their own copy of the change.
-	jobsA := env.jobs(keyA)
-	if len(jobsA) != 1 {
-		t.Fatalf("device A got %d jobs, want 1", len(jobsA))
+	// Both terminals get their own copy of the change. Each also holds the
+	// settings push its registration seeded, so the person job is selected by
+	// type rather than by position.
+	createsA := jobsOfType(env.jobs(keyA), "CREATE")
+	if len(createsA) != 1 {
+		t.Fatalf("device A got %d CREATE jobs, want 1", len(createsA))
 	}
-	idA := jobID(t, jobsA[0])
+	idA := jobID(t, createsA[0])
 
 	res := env.do(http.MethodPost, jobPath(idA), map[string]any{"status": "COMPLETED"}, deviceAuth(keyB))
 	if res.Code != http.StatusNotFound {
@@ -488,14 +490,36 @@ func TestRegistrationSeedsTheRosterAtomically(t *testing.T) {
 	}
 
 	// Reported and actually queued are the same number.
+	//
+	// `bootstrap_jobs` counts PEOPLE, which is what it has always meant and what
+	// a client reading it expects. Registration also seeds one SETTINGS push --
+	// the site's offline policy has no other route to a terminal -- and that is
+	// asserted separately rather than folded into a number with an established
+	// meaning.
 	var queued int
 	if err := database.DB.QueryRow(`
 		SELECT count(*) FROM sync_jobs j
 		  JOIN devices d ON d.id = j.device_id
-		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'`).Scan(&queued); err != nil {
+		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'
+		   AND j.job_type = 'CREATE'`).Scan(&queued); err != nil {
 		t.Fatalf("counting queued jobs: %v", err)
 	}
 	if queued != int(bootstrapped) {
 		t.Errorf("registration reported %v bootstrap jobs but %d are queued", bootstrapped, queued)
+	}
+
+	// And the settings push committed in the same transaction. A terminal
+	// seeded with people and no policy runs the firmware default, which is
+	// CACHED_INDEFINITE, at a site that may have chosen otherwise.
+	var settings int
+	if err := database.DB.QueryRow(`
+		SELECT count(*) FROM sync_jobs j
+		  JOIN devices d ON d.id = j.device_id
+		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'
+		   AND j.job_type = 'SETTINGS'`).Scan(&settings); err != nil {
+		t.Fatalf("counting settings jobs: %v", err)
+	}
+	if settings != 1 {
+		t.Errorf("registration queued %d SETTINGS jobs, want exactly 1", settings)
 	}
 }

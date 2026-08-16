@@ -89,9 +89,10 @@ func TestFetchTakesADeliveryLease(t *testing.T) {
 	key := env.registerDevice(env.siteAKey, "ESP32-0001")
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
+	// The CREATE, plus the settings push registration seeded.
 	first := env.jobs(key)
-	if len(first) != 1 {
-		t.Fatalf("first poll returned %d jobs, want 1", len(first))
+	if len(first) != 2 {
+		t.Fatalf("first poll returned %d jobs, want 2 (%v)", len(first), jobTypes(first))
 	}
 
 	second := env.jobs(key)
@@ -100,7 +101,13 @@ func TestFetchTakesADeliveryLease(t *testing.T) {
 	}
 
 	// Unacknowledged work is still owed, so it returns once the lease lapses.
-	makeJobDue(t, jobID(t, first[0]))
+	// One job is released rather than both, which is what makes this about the
+	// lease and not about the batch.
+	creates := jobsOfType(first, "CREATE")
+	if len(creates) != 1 {
+		t.Fatalf("expected one CREATE in the first poll, got %v", jobTypes(first))
+	}
+	makeJobDue(t, jobID(t, creates[0]))
 	if third := env.jobs(key); len(third) != 1 {
 		t.Errorf("after the lease expired the poll returned %d jobs, want 1", len(third))
 	}
@@ -141,8 +148,9 @@ func TestConcurrentPollsDoNotDoubleDeliver(t *testing.T) {
 			t.Errorf("job %d was delivered to %d concurrent polls", id, count)
 		}
 	}
-	if len(seen) != members {
-		t.Errorf("%d distinct jobs delivered, want %d", len(seen), members)
+	// The people, plus the settings push registration seeded.
+	if len(seen) != members+1 {
+		t.Errorf("%d distinct jobs delivered, want %d", len(seen), members+1)
 	}
 }
 
@@ -155,13 +163,16 @@ func TestChangesFanOutPerDevice(t *testing.T) {
 
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
-	jobsA := env.jobs(keyA)
-	jobsB := env.jobs(keyB)
-	if len(jobsA) != 1 || len(jobsB) != 1 {
-		t.Fatalf("device A got %d jobs and device B got %d, want 1 each", len(jobsA), len(jobsB))
+	// Each terminal also holds the settings push its own registration seeded,
+	// so the person job is selected by type rather than by position.
+	createsA := jobsOfType(env.jobs(keyA), "CREATE")
+	createsB := jobsOfType(env.jobs(keyB), "CREATE")
+	if len(createsA) != 1 || len(createsB) != 1 {
+		t.Fatalf("device A got %d CREATE jobs and device B got %d, want 1 each",
+			len(createsA), len(createsB))
 	}
 
-	idA, idB := jobID(t, jobsA[0]), jobID(t, jobsB[0])
+	idA, idB := jobID(t, createsA[0]), jobID(t, createsB[0])
 	if idA == idB {
 		t.Fatal("both devices were handed the same job row")
 	}
@@ -189,8 +200,17 @@ func TestSettingsFanOutToTheSiteOnly(t *testing.T) {
 	if types := jobTypes(env.jobs(keyA)); !contains(types, "SETTINGS") {
 		t.Errorf("site A's device got %v, want a SETTINGS job", types)
 	}
-	if types := jobTypes(env.jobs(keyB)); contains(types, "SETTINGS") {
-		t.Errorf("site B's device received site A's settings: %v", types)
+
+	// SITE B'S DEVICE HOLDS A SETTINGS JOB TOO -- the one its own registration
+	// seeded -- so counting types no longer answers the question this test
+	// asks. What it must show is that SITE A'S CHANGE did not reach it, and the
+	// only way to show that is to read the payload.
+	for _, job := range jobsOfType(env.jobs(keyB), "SETTINGS") {
+		payload, _ := job["payload"].(map[string]any)
+		inner, _ := payload["settings"].(map[string]any)
+		if got := inner["unlock_duration_seconds"]; got == float64(4) {
+			t.Errorf("site B's device received site A's settings: %v", inner)
+		}
 	}
 }
 
@@ -210,8 +230,12 @@ func TestPeopleFanOutAcrossTheTenant(t *testing.T) {
 	if types := jobTypes(env.jobs(keyB)); !contains(types, "CREATE") {
 		t.Errorf("site B device got %v, want a CREATE -- people are tenant-wide", types)
 	}
-	if jobs := env.jobs(keyC); len(jobs) != 0 {
-		t.Errorf("another tenant's device received %v", jobTypes(jobs))
+	// The other tenant's terminal holds only the settings push its own
+	// registration seeded. What must never reach it is the PERSON.
+	jobsC := env.jobs(keyC)
+	if creates := jobsOfType(jobsC, "CREATE"); len(creates) != 0 {
+		t.Errorf("another tenant's device received %d CREATE job(s): %v",
+			len(creates), jobTypes(jobsC))
 	}
 }
 
@@ -222,13 +246,22 @@ func TestDisabledDeviceDoesNotAccumulateWork(t *testing.T) {
 	env.registerDevice(env.siteAKey, "ESP32-AAA")
 	mustExec(t, `UPDATE devices SET status = 'DISABLED' WHERE serial_number = 'ESP32-AAA'`)
 
-	env.createMember(env.siteAKey, "M-1", "Ada")
-
-	queued := queryInt(t, `SELECT count(*) FROM sync_jobs sj
+	// Measured FROM THE MOMENT IT WENT OUT OF SERVICE, which is what the
+	// property is about. Registration legitimately queued a settings push while
+	// the terminal was still in service; what must not happen is work piling up
+	// AFTER an operator took it out.
+	before := queryInt(t, `SELECT count(*) FROM sync_jobs sj
 	                        JOIN devices d ON d.id = sj.device_id
 	                       WHERE d.serial_number = 'ESP32-AAA'`)
-	if queued != 0 {
-		t.Errorf("disabled device accumulated %d jobs, want 0", queued)
+
+	env.createMember(env.siteAKey, "M-1", "Ada")
+
+	after := queryInt(t, `SELECT count(*) FROM sync_jobs sj
+	                       JOIN devices d ON d.id = sj.device_id
+	                      WHERE d.serial_number = 'ESP32-AAA'`)
+	if after != before {
+		t.Errorf("disabled device accumulated %d job(s) while out of service, want 0",
+			after-before)
 	}
 }
 

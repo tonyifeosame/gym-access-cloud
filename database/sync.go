@@ -120,6 +120,78 @@ func EnqueueSettingsJob(deviceID int64, settings any) error {
 	return err
 }
 
+// enqueueCurrentSettingsTx queues ONE settings push carrying what a device's
+// site is running right now, replacing any settings job already waiting for it.
+//
+// ---------------------------------------------------------------------------
+// WHY A DEVICE HAS TO BE SEEDED WITH THIS, AND NOT ONLY FANNED OUT TO
+// ---------------------------------------------------------------------------
+//
+// The offline policy is a safety control -- see device_settings.go for what it
+// costs to get it wrong -- and it reaches a terminal by exactly one route: a
+// SETTINGS job. THE FIRMWARE DOES NOT PULL SETTINGS. `GET /devices/settings`
+// exists and is documented and no shipped build calls it; the terminal's eight
+// routes are heartbeat, jobs, jobs/complete, access/log, enrollment/result,
+// credentials/pending, credentials/placement and claim.
+//
+// So a terminal registered at a site that had already chosen DENY_ALL received
+// its roster, received no policy, and ran the firmware default --
+// CACHED_INDEFINITE, chosen so that upgrading a deployed unit could not change
+// what its door did -- while the console showed the site as DENY_ALL. It
+// corrected itself only when something else happened to push settings to that
+// device: the next edit to the site, a compaction, a relocation or a resync. At
+// a small site none of those need ever happen.
+//
+// The snapshot path already did this, with the note "since the queued SETTINGS
+// job was just cancelled". Registration was the one seeding path that did not,
+// so both now call this and cannot drift apart.
+//
+// ---------------------------------------------------------------------------
+// THE MERGE IS THE SAME MERGE, IN SQL
+// ---------------------------------------------------------------------------
+//
+// mergeDeviceSettings layers the validated policy COLUMNS over the free-form
+// blob, so an operator cannot defeat a safety control by writing raw JSON.
+// Concatenation takes the right-hand side on a key collision, which is that
+// precedence; a blob that is not an object is treated as empty rather than
+// failing the seed, because a malformed free-form edit must not be able to stop
+// the policy being delivered.
+//
+// The DELETE first is what makes this exactly one job. Re-registration is the
+// documented recovery for a lost credential, and three recoveries must not
+// leave three identical pushes in a backlog the capacity guard reads. Replacing
+// a pending push with the current settings is never a downgrade: what is being
+// discarded is older than what replaces it.
+func enqueueCurrentSettingsTx(tx *sql.Tx, deviceID int64) error {
+	if _, err := tx.Exec(`
+		DELETE FROM sync_jobs
+		 WHERE device_id = $1 AND job_type = 'SETTINGS' AND status = 'PENDING'`,
+		deviceID); err != nil {
+		return fmt.Errorf("clearing the pending settings push: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
+		                       payload, protocol_version, status)
+		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
+		       jsonb_build_object(
+		           'settings_version', s.settings_version,
+		           'settings',
+		           (CASE WHEN jsonb_typeof(s.settings) = 'object'
+		                 THEN s.settings ELSE '{}'::jsonb END)
+		           || jsonb_build_object(
+		                  'offline_policy', s.offline_policy,
+		                  'offline_grace_minutes', s.offline_grace_minutes)
+		       ),
+		       $2, 'PENDING'
+		  FROM devices d JOIN sites s ON s.id = d.site_id
+		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
+		deviceID, models.SyncProtocolVersion); err != nil {
+		return fmt.Errorf("enqueueing the settings push: %w", err)
+	}
+	return nil
+}
+
 // enqueueSettingsFanoutTx pushes a site's settings to every device at that site.
 // Runs on the caller's transaction so the settings write and its delivery
 // records commit together, exactly as person changes do.
@@ -611,32 +683,10 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 		return 0, fmt.Errorf("enqueueing snapshot records: %w", err)
 	}
 
-	// Current settings, since the queued SETTINGS job was just cancelled
-	_, err = tx.Exec(`
-		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
-		                       payload, protocol_version, status)
-		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
-		       jsonb_build_object(
-		           'settings_version', s.settings_version,
-		           -- The SAME merge mergeDeviceSettings performs in Go: the
-		           -- validated policy columns layered OVER the free-form blob,
-		           -- with a non-object blob treated as empty rather than
-		           -- failing the whole snapshot. Concatenation takes the
-		           -- right-hand side on a key collision, which is the column
-		           -- precedence the policy needs -- an operator must not be able
-		           -- to override a safety control by writing raw JSON.
-		           'settings',
-		           (CASE WHEN jsonb_typeof(s.settings) = 'object'
-		                 THEN s.settings ELSE '{}'::jsonb END)
-		           || jsonb_build_object(
-		                  'offline_policy', s.offline_policy,
-		                  'offline_grace_minutes', s.offline_grace_minutes)
-		       ),
-		       $2, 'PENDING'
-		  FROM devices d JOIN sites s ON s.id = d.site_id
-		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
-		deviceID, models.SyncProtocolVersion)
-	if err != nil {
+	// Current settings, since the queued SETTINGS job was just cancelled.
+	// Shared with the registration seed so the two cannot describe different
+	// configurations -- see enqueueCurrentSettingsTx.
+	if err = enqueueCurrentSettingsTx(tx, deviceID); err != nil {
 		return 0, fmt.Errorf("enqueueing snapshot settings: %w", err)
 	}
 

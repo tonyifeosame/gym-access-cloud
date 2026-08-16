@@ -223,6 +223,23 @@ func registerDeviceTx(tx *sql.Tx, siteID int64,
 		return nil, "", 0, err
 	}
 
+	// AND ITS SITE'S SETTINGS, in the same transaction and for the same reason.
+	//
+	// The roster is not the whole of what a terminal needs to behave correctly.
+	// The offline policy is a safety control, it reaches a terminal only by
+	// being PUSHED -- no shipped firmware pulls settings -- and seeding people
+	// without it left a unit at a DENY_ALL site running the firmware's
+	// CACHED_INDEFINITE default while the console reported the site's choice as
+	// in force. See enqueueCurrentSettingsTx.
+	//
+	// Not counted in `bootstrapped`, which is the number of PEOPLE the caller
+	// reports and which the registration response has always carried as
+	// `bootstrap_jobs`. Adding a settings job to that figure would change a
+	// number an existing client may be reading.
+	if err := enqueueCurrentSettingsTx(tx, device.ID); err != nil {
+		return nil, "", 0, err
+	}
+
 	return &device, key, bootstrapped, nil
 }
 

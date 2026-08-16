@@ -247,21 +247,28 @@ func TestJobDeliveryAndAcknowledgement(t *testing.T) {
 	key := env.registerDevice(env.siteAKey, "ESP32-0001")
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
+	// Registration also seeds the site's settings, so the batch is the CREATE
+	// plus that push. The person job is selected rather than assumed to be
+	// first: what this test is about is the acknowledgement, not the ordering.
 	jobs := env.jobs(key)
-	if len(jobs) != 1 {
-		t.Fatalf("got %d jobs, want 1: %v", len(jobs), jobTypes(jobs))
+	creates := jobsOfType(jobs, "CREATE")
+	if len(creates) != 1 {
+		t.Fatalf("got %d CREATE jobs, want 1: %v", len(creates), jobTypes(jobs))
 	}
-	if got := jobs[0]["job_type"]; got != "CREATE" {
-		t.Errorf("job_type = %v, want CREATE", got)
+	if len(jobsOfType(jobs, "SETTINGS")) != 1 {
+		t.Errorf("got %v, want the seeded SETTINGS push beside the CREATE", jobTypes(jobs))
 	}
 
-	id := jobID(t, jobs[0])
+	id := jobID(t, creates[0])
 	res := env.do(http.MethodPost, jobPath(id), map[string]any{"status": "COMPLETED"}, deviceAuth(key))
 	if res.Code != http.StatusOK {
 		t.Fatalf("ack got %d, want 200 (body %s)", res.Code, res.Raw)
 	}
-	if got := res.Body["pending_jobs"]; got != float64(0) {
-		t.Errorf("pending_jobs = %v, want 0 after the only job was acked", got)
+	// One remains: the settings push, which this test did not acknowledge.
+	// The number is what the device uses to decide whether to poll, so it has
+	// to count everything still owed rather than only what was just answered.
+	if got := res.Body["pending_jobs"]; got != float64(1) {
+		t.Errorf("pending_jobs = %v, want 1 -- the seeded SETTINGS push is still owed", got)
 	}
 	if s := jobStatus(t, id); s != "COMPLETED" {
 		t.Errorf("job status = %s, want COMPLETED", s)
@@ -390,8 +397,11 @@ func TestFullSyncSnapshotReplacesBacklog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("resync got %d, want 200 (body %s)", res.Code, res.Raw)
 	}
-	if got := res.Body["superseded_jobs"]; got != float64(2) {
-		t.Errorf("superseded_jobs = %v, want the 2 queued CREATEs", got)
+	// The 2 queued CREATEs AND the settings push registration seeded. A
+	// snapshot replaces the whole queue and re-queues current settings with it,
+	// so the pending push is superseded like everything else.
+	if got := res.Body["superseded_jobs"]; got != float64(3) {
+		t.Errorf("superseded_jobs = %v, want the 2 queued CREATEs and the seeded SETTINGS", got)
 	}
 
 	jobs := env.jobs(key)

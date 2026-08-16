@@ -441,6 +441,23 @@ func jobTypes(jobs []map[string]any) []string {
 	return types
 }
 
+// jobsOfType selects one kind of job out of a batch.
+//
+// A device's first poll carries more than one kind of work: registration seeds
+// the roster AND the site's settings, because the offline policy has no other
+// route to a terminal. Tests that are about a person job therefore have to name
+// which job they mean rather than taking jobs[0] -- an assertion on position is
+// an assertion about queue ordering that those tests are not making.
+func jobsOfType(jobs []map[string]any, jobType string) []map[string]any {
+	matched := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		if t, _ := job["job_type"].(string); t == jobType {
+			matched = append(matched, job)
+		}
+	}
+	return matched
+}
+
 func jobID(t *testing.T, job map[string]any) int64 {
 	t.Helper()
 	id, ok := job["id"].(float64)
