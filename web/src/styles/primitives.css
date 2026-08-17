@@ -63,7 +63,7 @@ textarea:focus-visible,
 
 .page__breadcrumb {
   margin-bottom: var(--space-2);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -103,7 +103,7 @@ textarea:focus-visible,
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 /* Names the table for assistive technology. The page heading already says it
@@ -118,16 +118,21 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
+/* 8px of vertical padding rather than 12px. A row is 36px instead of 44px, so
+ * roughly a fifth more of a roster or a fleet fits on one screen -- which is the
+ * whole of what "show more without scrolling" means for a list. The horizontal
+ * padding is left alone: that one separates COLUMNS, and cramming those is how
+ * a serial number starts reading as part of the site name. */
 .table th,
 .table td {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   text-align: start;
   vertical-align: middle;
   border-bottom: 1px solid var(--border);
 }
 
 .table thead th {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -167,9 +172,14 @@ textarea:focus-visible,
   max-width: 640px;
 }
 
+/* The console's workhorse for explanation -- what a field means, what a list is
+ * and is not narrowed by, what happens on the device rather than here. There are
+ * a lot of these, so the leading is snug: at body leading each one was costing a
+ * line, and they add up down a page faster than anything else on it. */
 .field__hint {
   margin: 0 0 var(--space-1);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -184,7 +194,7 @@ textarea:focus-visible,
 .field__error {
   margin: var(--space-1) 0 0;
   min-height: 1.25em;
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--danger);
 }
 
@@ -198,7 +208,7 @@ textarea:focus-visible,
 
 .field__input--mono {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
 }
 
 .field__select {
@@ -219,7 +229,7 @@ textarea.field__input {
 
 .fieldset__legend {
   padding-inline: var(--space-2);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
 }
 
@@ -258,12 +268,12 @@ textarea.field__input {
 .checkbox__label {
   display: flex;
   flex-direction: column;
-  font-size: 14px;
+  font-size: var(--font-size-sm);
   cursor: pointer;
 }
 
 .checkbox__description {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -305,15 +315,15 @@ textarea.field__input {
 }
 
 .choice__label {
-  font-size: 14px;
+  font-size: var(--font-size-sm);
   font-weight: 600;
   cursor: pointer;
 }
 
 .choice__description {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -329,7 +339,7 @@ textarea.field__input {
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .form__error p {
@@ -375,7 +385,7 @@ textarea.field__input {
 
 .dialog__title {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--font-size-lg);
 }
 
 .dialog--danger .dialog__title {
@@ -386,7 +396,7 @@ textarea.field__input {
   border: 0;
   background: none;
   color: var(--text-muted);
-  font-size: 22px;
+  font-size: var(--font-size-2xl);
   line-height: 1;
   cursor: pointer;
   padding: var(--space-1) var(--space-2);
@@ -396,7 +406,8 @@ textarea.field__input {
   margin: var(--space-2) 0 0;
   padding-inline: var(--space-5);
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .dialog__body {
@@ -414,7 +425,7 @@ textarea.field__input {
 
 .confirm__detail {
   margin: 0 0 var(--space-3);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .confirm__error {
@@ -423,7 +434,7 @@ textarea.field__input {
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 /* --- notifications ------------------------------------------------------- */
@@ -456,7 +467,7 @@ textarea.field__input {
   border: 1px solid var(--border);
   background: var(--surface);
   box-shadow: var(--shadow);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 /* A coloured edge AND the text; colour never carries the meaning alone. */
@@ -487,7 +498,7 @@ textarea.field__input {
   border: 0;
   background: none;
   color: inherit;
-  font-size: 18px;
+  font-size: var(--font-size-xl);
   line-height: 1;
   cursor: pointer;
   opacity: 0.7;
@@ -501,7 +512,7 @@ textarea.field__input {
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface-raised);
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -536,7 +547,7 @@ textarea.field__input {
 }
 
 .badge__note {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--warning);
 }
 
@@ -588,7 +599,7 @@ textarea.field__input {
   gap: var(--space-3);
   flex-wrap: wrap;
   padding-top: var(--space-3);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .pagination__status {
@@ -617,7 +628,8 @@ textarea.field__input {
 
 .restricted-note {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -722,7 +734,7 @@ textarea.field__input {
   .table tbody th::before {
     content: attr(data-label);
     flex: 0 0 auto;
-    font-size: 12px;
+    font-size: var(--font-size-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -773,7 +785,7 @@ textarea.field__input {
 
 .mono {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
 }
 
 .muted {
@@ -800,7 +812,7 @@ textarea.field__input {
   background: none;
   color: var(--text-muted);
   font: inherit;
-  font-size: 14px;
+  font-size: var(--font-size-sm);
   cursor: pointer;
 }
 
@@ -829,7 +841,7 @@ textarea.field__input {
 
 .credential__heading {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 /* The warning sits ABOVE the value, so it is read on the way to the thing
@@ -840,7 +852,7 @@ textarea.field__input {
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .credential__impact {
@@ -848,7 +860,7 @@ textarea.field__input {
   padding: var(--space-3);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .credential__value {
@@ -881,7 +893,7 @@ textarea.field__input {
 
 .credential__nudge {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--warning);
 }
 
@@ -892,7 +904,7 @@ textarea.field__input {
 }
 
 .copy__status {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--success);
 }
 
@@ -934,7 +946,7 @@ textarea.field__input {
 
 .tile__label {
   margin: 0 0 var(--space-1);
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -943,7 +955,7 @@ textarea.field__input {
 
 .tile__value {
   margin: 0;
-  font-size: 26px;
+  font-size: var(--font-size-2xl);
   font-weight: 650;
   line-height: 1.1;
 }
@@ -967,7 +979,7 @@ textarea.field__input {
 
 .filter-status {
   margin: 0 0 var(--space-3);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -996,12 +1008,12 @@ textarea.field__input {
 
 .detail-list dt {
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .detail-list dd {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 @media (max-width: 680px) {
@@ -1018,7 +1030,7 @@ textarea.field__input {
   }
 
   .detail-list dt {
-    font-size: 12px;
+    font-size: var(--font-size-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -1058,7 +1070,7 @@ textarea.field__input {
   border-radius: 999px;
   background: var(--surface-raised);
   color: inherit;
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   text-decoration: none;
 }
 
@@ -1107,7 +1119,7 @@ textarea.field__input {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin: 0 0 var(--space-1);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 .capability__title a {
@@ -1122,22 +1134,25 @@ textarea.field__input {
 
 .capability__description {
   margin: 0 0 var(--space-2);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
 .capability__meta {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
 /* What a capability does NOT do yet, stated specifically. Full text colour
- * rather than muted: this is the sentence a buyer is entitled to read, and
- * greying it out would be a way of not quite saying it. */
+ * rather than muted, and BODY SIZE rather than the help size its neighbours
+ * take: this is the sentence a buyer is entitled to read, and either greying it
+ * out or shrinking it would be a way of not quite saying it. */
 .capability__gap {
   margin: 0 0 var(--space-2);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-snug);
   color: var(--text);
   max-width: 68ch;
   padding-inline-start: var(--space-3);
@@ -1147,7 +1162,8 @@ textarea.field__input {
 .capability__legend {
   margin: var(--space-2) 0;
   padding-inline-start: var(--space-5);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -1164,7 +1180,7 @@ textarea.field__input {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   overflow-x: auto;
 }
 
@@ -1207,12 +1223,13 @@ textarea.field__input {
 
 .lifecycle__title {
   margin: 0 0 var(--space-1);
-  font-size: 15px;
+  font-size: var(--font-size-md);
 }
 
 .lifecycle__detail {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
   max-width: 62ch;
 }
@@ -1271,12 +1288,13 @@ textarea.field__input {
 
 .checklist__title {
   margin: 0 0 var(--space-1);
-  font-size: 15px;
+  font-size: var(--font-size-md);
 }
 
 .checklist__detail {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
   max-width: 62ch;
 }
@@ -1307,7 +1325,7 @@ textarea.field__input {
   border: 1px solid var(--warning);
   border-radius: var(--radius-sm);
   color: var(--warning);
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -1380,12 +1398,13 @@ textarea.field__input {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin: 0 0 var(--space-1);
-  font-size: 15px;
+  font-size: var(--font-size-md);
 }
 
 .rule__detail {
   margin: 0 0 var(--space-1);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
   max-width: 68ch;
 }
@@ -1420,7 +1439,7 @@ textarea.field__input {
   padding: 2px var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1458,7 +1477,7 @@ textarea.field__input {
 /* When a terminal reported an event long after it happened, said quietly beside
  * the door time rather than replacing it. */
 .event__delay {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
@@ -1476,7 +1495,7 @@ textarea.field__input {
   gap: var(--space-2);
   flex-wrap: wrap;
   margin: 0 0 var(--space-3);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 /* ===========================================================================
@@ -1505,7 +1524,7 @@ textarea.field__input {
 /* A role or target type beside a name. Small and quiet: it qualifies the value
  * next to it rather than competing with it. */
 .audit__role {
-  font-size: 11px;
+  font-size: var(--font-size-3xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
@@ -1514,13 +1533,13 @@ textarea.field__input {
 .button--small {
   padding-block: var(--space-1);
   padding-inline: var(--space-2);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
 }
 
 /* The alternate channel inside a one-time credential panel. */
 .credential__alternate {
   margin-block: var(--space-3);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .credential__alternate summary {
@@ -1556,7 +1575,8 @@ textarea.field__input {
 
 .tile__description {
   margin: var(--space-1) 0 0;
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -1601,12 +1621,13 @@ textarea.field__input {
 .attention__title {
   margin: 0;
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 .attention__detail {
   margin: var(--space-1) 0 0;
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -1639,7 +1660,8 @@ textarea.field__input {
 }
 
 .settings-links span {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 

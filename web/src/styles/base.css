@@ -10,11 +10,17 @@ body,
   height: 100%;
 }
 
+/*
+ * THE ONE SIZE EVERYTHING ELSE IS MEASURED AGAINST. Buttons, inputs and selects
+ * all say `font: inherit`, so this is their size too, and the whole console
+ * moves with it -- which is why the density pass is a token change here rather
+ * than a sweep through the pages.
+ */
 body {
   margin: 0;
   font-family: var(--font);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
   color: var(--text);
   background: var(--surface-sunken);
   -webkit-font-smoothing: antialiased;
@@ -24,7 +30,7 @@ h1,
 h2,
 h3 {
   margin: 0;
-  line-height: 1.25;
+  line-height: var(--leading-tight);
 }
 
 a {
@@ -88,11 +94,11 @@ code {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  line-height: 1.2;
+  line-height: var(--leading-tight);
 }
 
 .topbar__role {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
@@ -102,12 +108,14 @@ code {
   align-items: flex-start;
 }
 
+/* 200px rather than 220px: the longest label in the navigation is "Applications",
+ * and the column was sized with room to spare that the content never used. */
 .sidenav {
-  flex: 0 0 220px;
-  padding: var(--space-5) var(--space-3);
+  flex: 0 0 200px;
+  padding: var(--space-4) var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-4);
 }
 
 .sidenav__section {
@@ -117,7 +125,7 @@ code {
 }
 
 .sidenav__title {
-  font-size: 11px;
+  font-size: var(--font-size-3xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
@@ -127,7 +135,8 @@ code {
 .sidenav__note {
   margin: 0;
   padding-inline: var(--space-3);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -176,18 +185,20 @@ code {
 }
 
 .page__header h1 {
-  font-size: 22px;
+  font-size: var(--font-size-2xl);
 }
 
 .page__lead {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
 }
 
 .card,
@@ -200,7 +211,7 @@ code {
 }
 
 .card__title {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-muted);
@@ -208,19 +219,20 @@ code {
 
 .card__value {
   margin: var(--space-2) 0 0;
-  font-size: 26px;
+  font-size: var(--font-size-2xl);
   font-weight: 600;
 }
 
 .card__detail {
   margin: var(--space-1) 0 0;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .panel__title {
-  font-size: 16px;
-  margin-bottom: var(--space-4);
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-3);
 }
 
 .tiles {
@@ -253,12 +265,13 @@ code {
 }
 
 .tile__description {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
 .notice__title {
-  font-size: 15px;
+  font-size: var(--font-size-md);
   margin-bottom: var(--space-2);
 }
 
@@ -269,6 +282,7 @@ code {
 .notice p {
   margin: 0 0 var(--space-2);
   color: var(--text-muted);
+  line-height: var(--leading-snug);
 }
 
 .notice p:last-child {
@@ -294,7 +308,7 @@ code {
 }
 
 .state__meta {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -367,7 +381,8 @@ code {
 }
 
 .field__label {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -387,7 +402,7 @@ code {
 }
 
 .site-switcher__label {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
@@ -402,7 +417,7 @@ code {
 
 .site-switcher--static {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
 }
 
 /* --------------------------------------------------------------------- */
@@ -429,13 +444,14 @@ code {
 }
 
 .login__title {
-  font-size: 20px;
+  font-size: var(--font-size-xl);
 }
 
 .login__subtitle {
   margin: calc(var(--space-3) * -1) 0 0;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .login__error {
@@ -444,7 +460,7 @@ code {
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
 }
 
 /* Supporting prose on the unauthenticated screens: why a link is needed, what
@@ -454,8 +470,8 @@ code {
 .login__note {
   margin: 0;
   color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 /* The login card centres its controls; a wider card on the credential screens
