@@ -92,15 +92,25 @@ export function LoginPage() {
         </button>
 
         {/*
-          Both destinations are unauthenticated by necessity. The second is the
-          one people arrive at from a link and would not otherwise find, and it
-          matters that they can: an invitation whose URL was mangled in a chat
-          client still has a code that can be pasted.
+          Every destination here is unauthenticated by necessity. The redemption
+          link is the one people arrive at from a message and would not otherwise
+          find, and it matters that they can: an invitation whose URL was mangled
+          in a chat client still has a code that can be pasted.
         */}
         <p className="login__note">
           <Link to="/forgot-password">Forgotten your password?</Link>
           {' · '}
           <Link to="/redeem">Have an invitation code?</Link>
+        </p>
+
+        {/*
+          NEW CUSTOMERS, SEPARATED FROM THE RECOVERY LINKS ABOVE. Somebody with
+          no account at all is not looking for a reset, and folding signup into
+          that line would hide the one route a first-time visitor needs behind
+          two they do not.
+        */}
+        <p className="login__note">
+          New to AccessLink? <Link to="/register">Create an account</Link>
         </p>
       </form>
     </div>

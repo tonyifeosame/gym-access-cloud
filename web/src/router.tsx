@@ -3,6 +3,7 @@ import { Navigate, createBrowserRouter } from 'react-router-dom'
 import { ForgotPasswordPage } from './auth/ForgotPasswordPage'
 import { LoginPage } from './auth/LoginPage'
 import { RedeemPage } from './auth/RedeemPage'
+import { RegisterPage } from './auth/RegisterPage'
 import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
@@ -41,6 +42,12 @@ import { SitesListPage } from './pages/sites/SitesListPage'
  */
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
+
+  // Self-service signup, OUTSIDE the authenticated tree by necessity: somebody
+  // creating their first account has nothing to authenticate with. It sits
+  // beside /login rather than inside the console tree because it ends in a
+  // session — the guard below is what they land behind once it succeeds.
+  { path: '/register', element: <RegisterPage /> },
 
   // Credential handover, OUTSIDE the authenticated tree by necessity. Somebody
   // redeeming an invitation has never had a password and somebody who has

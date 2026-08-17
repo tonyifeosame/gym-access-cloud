@@ -1278,6 +1278,7 @@ one. CSRF is required on every unsafe method.
 | Method | Path | Auth | Min role |
 |---|---|---|---|
 | `POST` | `/api/v1/auth/login` | none | — |
+| `POST` | `/api/v1/auth/register` | none | — |
 | `GET` | `/api/v1/auth/me` | session | any |
 | `POST` | `/api/v1/auth/logout` | session + CSRF | any |
 | `POST` | `/api/v1/auth/password` | session + CSRF | any |
@@ -1436,6 +1437,54 @@ send JSON, so a cross-site form post cannot reach this endpoint.
 | `415` | body was not `application/json` |
 | `429` | too many attempts (per address) **or** the account is temporarily locked (5 failures → 1 min, doubling to a 15 min cap). Carries `Retry-After` |
 | `500` | database unavailable — never reported as a credential failure |
+
+### `POST /api/v1/auth/register`
+
+Unauthenticated, and the way a customer nobody has onboarded gets an account.
+Requires `Content-Type: application/json`, same as login and for the same reason.
+
+**Four fields, and no others exist.** No company id, no slug, no role, no site,
+no claim code — the role is forced to `OWNER`, the slug is derived from the
+company name, and the company's first site is created automatically.
+
+```json
+{
+  "full_name": "Amaka Obi",
+  "company_name": "Harbour Freight Ltd",
+  "email": "amaka@harbourfreight.com",
+  "password": "..."
+}
+```
+
+`201` **sets the session cookie and returns the same session body login does**
+([below](#the-session-body)) — the new owner is signed in and the console can go
+straight to its authenticated tree.
+
+What happens server-side, in ONE transaction:
+
+1. a company, with a slug derived from the name (`Harbour Freight Ltd` →
+   `harbour-freight-ltd`; a taken slug is resolved by trying the next candidate,
+   never by refusing the signup), `contact_email` set to the address supplied,
+   and `default_person_access = NONE`
+2. a site named **Main Site**, with a provisioning credential minted and stored
+   as a hash
+3. the registering user as that company's `OWNER`, *not* flagged
+   `must_change_password` — they chose the password themselves
+
+**The response never carries the site's provisioning key.** The plaintext is
+discarded inside the transaction; the owner rotates a fresh one from the console
+(`POST /console/sites/{site_id}/api-key`, ADMIN) when there is hardware to
+install. Nothing on this route can reach `/api/v1/platform/*` — that is a
+different table, a different cookie and a different identity.
+
+| Code | When |
+|---|---|
+| `400` | a missing or blank field, a malformed address, a password outside the 12–72 policy, or a name past its column |
+| `403` | self-service signup is disabled (`PUBLIC_SIGNUP_ENABLED=false`) |
+| `409` | that email address already has an account. Unavoidably an existence disclosure: `users.email` is unique globally because the login form has no tenant selector, so an address accepted twice would create an account nobody could sign in with |
+| `415` | body was not `application/json` |
+| `429` | too many attempts. **One allowance shared with `/auth/login`, `/auth/password` and the handover routes**, so alternating between them does not buy a second budget |
+| `500` | the account could not be created. If it was created but the session could not be opened, the message says so and says to sign in — it never reports a failure that would send somebody to sign up again with an address that is now taken |
 
 ### `GET /api/v1/auth/me`
 
@@ -2549,8 +2598,9 @@ its return exists and passes.
 2. **`GET /members` is unpaginated.** `GET /console/people` is paginated and
    searchable; use it.
 3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`,
-   `POST /auth/password`, `POST /auth/forgot-password`, `POST /auth/redeem` and
-   the platform login share per-address allowances and per-account lockout. The
+   `POST /auth/password`, `POST /auth/register`, `POST /auth/forgot-password`,
+   `POST /auth/redeem` and the platform login share per-address allowances and
+   per-account lockout. The
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
@@ -2607,7 +2657,14 @@ its return exists and passes.
 15. **Claim codes remove the credential exposure, not the serial cable.** The
     code still has to be typed into the unit over a serial console, because the
     fitted keypad cannot reach the admin menu on this hardware revision.
-16. **The 64-person on-device ceiling is a firmware constant.** The server no
+16. **Signup does not verify the address it registers.** `POST /auth/register`
+    creates the tenant immediately and signs the owner in, because the platform
+    has no transactional email — the same gap that makes `/auth/forgot-password`
+    unable to deliver a reset. A typo therefore produces a working company whose
+    owner cannot recover a lost password without help, and nothing stops
+    somebody registering an address they do not control. Verification, and the
+    delivery it depends on, is the next thing this flow needs.
+17. **The 64-person on-device ceiling is a firmware constant.** The server no
     longer fans a whole company at every terminal (SEC-04), which removes most
     of the pressure, but a single site with more than 64 permitted people will
     still exhaust a terminal's table. The server-side capacity model and the

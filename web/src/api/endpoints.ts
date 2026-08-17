@@ -46,6 +46,7 @@ import type {
   SiteSettings,
   SiteSettingsRequest,
   SitesResponse,
+  SignupRequest,
   TerminalDetail,
   TerminalLifecycleResponse,
   TerminalModeRequest,
@@ -76,6 +77,24 @@ function adoptSession(session: Session): Session {
 
 export async function login(email: string, password: string): Promise<Session> {
   const session = await api.post<Session>('/api/v1/auth/login', { email, password })
+  return adoptSession(session)
+}
+
+/**
+ * Creates a company and its first OWNER, and signs them in. UNAUTHENTICATED.
+ *
+ * RETURNS THE SAME BODY LOGIN DOES, and for the same reason /me does: the
+ * account exists and the session cookie is already set by the time this
+ * resolves, so a console that had to send the new customer back to a login form
+ * would be asking them to prove something the server has just established.
+ *
+ * WHAT IT DOES NOT RETURN, and must never: the site provisioning key. The server
+ * creates the company's first site in the same transaction and keeps only the
+ * hash of its credential — there is no plaintext to leak here, which is what
+ * makes this endpoint safe to expose to an anonymous browser at all.
+ */
+export async function register(body: SignupRequest): Promise<Session> {
+  const session = await api.post<Session>('/api/v1/auth/register', body)
   return adoptSession(session)
 }
 

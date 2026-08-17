@@ -33,20 +33,28 @@ build:
 docker-render:
 	docker build -f deploy/Dockerfile -t accesslink-api:render .
 
+# Longer than go test's 10-minute default, which this suite had grown to within
+# a minute of. Every test here builds a database from migrations/ and talks to a
+# real PostgreSQL, and several hundred bcrypt comparisons are part of the point
+# -- so the run is minutes long by design and a machine slower than the one that
+# last measured it would blow the default and report a PANIC rather than a
+# result. A timeout that fires is meant to catch a deadlock, not a laptop.
+TEST_TIMEOUT ?= 30m
+
 # The normal way to run the tests. Never served from cache.
 test:
-	go test -count=1 ./...
+	go test -count=1 -timeout $(TEST_TIMEOUT) ./...
 
 # Same, but also discards any result already banked -- use after a run that may
 # have recorded a pass against a database that is no longer there.
 test-fresh:
 	go clean -testcache
-	go test -count=1 ./...
+	go test -count=1 -timeout $(TEST_TIMEOUT) ./...
 
 # Deliberately skip the integration tests. Leaves the tenancy and sync SQL
 # uncovered; the suite says so loudly when you do this.
 test-skip-db:
-	TEST_DB_SKIP=1 go test -count=1 ./...
+	TEST_DB_SKIP=1 go test -count=1 -timeout $(TEST_TIMEOUT) ./...
 
 vet:
 	go vet ./...

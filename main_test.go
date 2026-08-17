@@ -89,7 +89,7 @@ func TestMain(m *testing.M) {
 			"no mock to fall back to, so this is a failure and not a skip.\n\n"+
 			"Point DB_HOST/DB_PORT/DB_USER/DB_PASSWORD at a server (a .env in the repo\n"+
 			"root is picked up automatically) and re-run:\n\n"+
-			"    go test -count=1 ./...\n\n"+
+			"    go test -count=1 -timeout 30m ./...\n\n"+
 			"The account needs CREATEDB: the suite builds its own database from\n"+
 			"migrations/ on every run and drops it afterwards.\n\n"+
 			"TEST_DB_SKIP=1 skips these deliberately, leaving the tenancy and sync SQL\n"+

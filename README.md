@@ -316,8 +316,14 @@ GIN_MODE=debug go run main.go
 
 ### Run tests:
 ```bash
-go test -count=1 ./...
+go test -count=1 -timeout 30m ./...
 ```
+
+`-timeout` is not decoration. Every test builds a database from `migrations/`
+and talks to a real PostgreSQL, and hundreds of deliberately slow bcrypt
+comparisons are part of what is being tested — the run had grown to within a
+minute of `go test`'s 10-minute default, so a slower machine reports a **panic**
+rather than a result. A timeout is meant to catch a deadlock, not a busy laptop.
 
 The suite is mostly **integration tests against a real PostgreSQL instance**.
 The behaviour worth protecting — tenant filters, the partial unique indexes, the
@@ -359,10 +365,10 @@ away. That is not hypothetical; it is how this suite once reported green against
 a server refusing every connection. Always run:
 
 ```bash
-go test -count=1 ./...
+go test -count=1 -timeout 30m ./...
 
 # and if a pass may already be banked against a database that has since gone:
-go clean -testcache && go test -count=1 ./...
+go clean -testcache && go test -count=1 -timeout 30m ./...
 ```
 
 The `Makefile` wraps these as `make test` and `make test-fresh` where `make` is

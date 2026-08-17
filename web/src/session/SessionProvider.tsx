@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { setUnauthenticatedHandler } from '../api/client'
 import { clearCsrfToken } from '../api/csrf'
 import * as endpoints from '../api/endpoints'
-import type { Session } from '../api/types'
+import type { Session, SignupRequest } from '../api/types'
 
 export type SessionStatus = 'loading' | 'authenticated' | 'anonymous' | 'error'
 
@@ -13,6 +13,16 @@ export interface SessionContextValue {
   session: Session | null
   error: Error | null
   login: (email: string, password: string) => Promise<Session>
+  /**
+   * Creates a company and signs its owner in, in one call.
+   *
+   * DELIBERATELY THE SAME SHAPE AS `login`, because the server makes it so:
+   * registration answers with the session body and sets the same cookie, so
+   * adopting it here is the whole of "the new customer is signed in". A second
+   * authentication path — a signup that then logged in again — would be a
+   * parallel session mechanism to keep in step with this one.
+   */
+  register: (body: SignupRequest) => Promise<Session>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -72,6 +82,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [setSession],
   )
 
+  const register = useCallback(
+    async (body: SignupRequest) => {
+      const session = await endpoints.register(body)
+      setSession(session)
+      return session
+    },
+    [setSession],
+  )
+
   const logout = useCallback(async () => {
     try {
       await endpoints.logout()
@@ -99,10 +118,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       session: query.data ?? null,
       error: query.error ?? null,
       login,
+      register,
       logout,
       refresh,
     }
-  }, [query.data, query.error, query.isError, query.isPending, login, logout, refresh])
+  }, [query.data, query.error, query.isError, query.isPending, login, register, logout, refresh])
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }

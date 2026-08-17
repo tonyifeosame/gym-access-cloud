@@ -96,6 +96,26 @@ export interface Session {
   session_expires_in_seconds: number
 }
 
+/**
+ * Self-service signup, POST /auth/register.
+ *
+ * FOUR FIELDS AND NOTHING ELSE. A new customer has no company id, no slug, no
+ * platform administrator, no claim code and no provisioning key — they have a
+ * name, a company, an address and a password, and the server derives everything
+ * else. Any field added here would be one more thing somebody has to be told
+ * before they can start.
+ *
+ * There is deliberately NO role, NO site and NO company id: the server forces
+ * OWNER, creates the company's first site itself, and would ignore anything
+ * sent in their place.
+ */
+export interface SignupRequest {
+  full_name: string
+  company_name: string
+  email: string
+  password: string
+}
+
 export interface CompanyDetail extends Company {
   contact_email?: string
   active: boolean

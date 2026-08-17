@@ -67,6 +67,12 @@ interface ServerState {
   permissions: Permission[]
   schedules: Schedule[]
   events: FieldEvent[]
+  /**
+   * Addresses that already belong to an account, for the signup conflict. Email
+   * is unique GLOBALLY in the schema rather than per company, so a second
+   * company cannot be registered against an address already in use.
+   */
+  registeredEmails: string[]
   /** The platform administrator's session — a DIFFERENT identity from `session`. */
   platformSession: PlatformSession | null
   platformLoginStatus: number
@@ -107,6 +113,7 @@ function initialState(): ServerState {
     permissions: [],
     schedules: [],
     events: [],
+    registeredEmails: [],
     platformSession: null,
     platformLoginStatus: 200,
     companies: [],
@@ -288,6 +295,65 @@ export const handlers = [
 
     state.session = state.session ?? makeSession()
     return json(state.session)
+  }),
+
+  /**
+   * Self-service signup. UNAUTHENTICATED, and it ENDS IN A SESSION.
+   *
+   * Modelled on what the server actually does rather than on what the form
+   * sends: the four fields are validated, the slug is DERIVED from the company
+   * name, an address already in use is a 409, and the success body is the same
+   * session shape login returns. A mock that answered with anything else would
+   * let a console ship that sent the new customer back to a login form after
+   * they had already been signed in.
+   *
+   * NOTHING HERE CARRIES A SITE KEY, deliberately. The server creates the
+   * company's first site in the same transaction and keeps only the hash of its
+   * provisioning credential — so there is no plaintext for this response to
+   * contain, and a mock that invented one would let a console ship that
+   * displayed it.
+   */
+  http.post('*/api/v1/auth/register', async ({ request }) => {
+    record(request)
+
+    const failure = takeFailure('register')
+    if (failure) return json({ error: 'Failed to create the account' }, failure)
+
+    const body = (await request.json()) as {
+      full_name?: string
+      company_name?: string
+      email?: string
+      password?: string
+    }
+
+    const fullName = (body.full_name ?? '').trim()
+    const companyName = (body.company_name ?? '').trim()
+    const email = (body.email ?? '').trim().toLowerCase()
+
+    if (!fullName) return json({ error: 'your name is required' }, 400)
+    if (!companyName) return json({ error: 'a company name is required' }, 400)
+    if (!email.includes('@')) return json({ error: 'email address is not valid' }, 400)
+    if ((body.password ?? '').length < 12) {
+      return json({ error: 'password must be at least 12 characters' }, 400)
+    }
+    if (state.registeredEmails.includes(email)) {
+      return json({ error: 'That email address is already in use' }, 409)
+    }
+
+    state.registeredEmails = [...state.registeredEmails, email]
+
+    const session = makeSession({
+      operator: { id: 'operator-new', email, full_name: fullName, role: 'OWNER' },
+      company: { id: 'company-new', name: companyName, slug: normalizeSlug(companyName) },
+      role: 'OWNER',
+      // Unscoped, as an OWNER always is, and with NO capability enabled — which
+      // is the state every new company genuinely starts in.
+      sites: [],
+      all_sites: true,
+      applications: [],
+    })
+    state.session = session
+    return json(session, 201)
   }),
 
   http.post('*/api/v1/auth/logout', ({ request }) => {

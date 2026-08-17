@@ -138,6 +138,23 @@ func NewRouter() *gin.Engine {
 
 		auth.POST("/login", credentialLimit, handlers.OperatorLogin)
 
+		// Self-service signup, UNAUTHENTICATED BY NECESSITY.
+		//
+		// A customer nobody has onboarded has no credential, because obtaining
+		// one is what this is for. It creates a company, its first site and its
+		// OWNER in one transaction and answers with an ordinary session -- the
+		// same cookie, the same body, built by the same function login uses.
+		//
+		// ON THE SAME LIMITER as the credential routes above, deliberately.
+		// Sharing one allowance means an attacker cannot get a second budget by
+		// alternating between signing in and signing up, and mass tenant
+		// creation from one address is bounded by the same bucket.
+		//
+		// IT REACHES NOTHING IN THE PLATFORM TREE BELOW. It creates one tenant
+		// and one owner inside it; there is no function on that path that can
+		// see another company or mint a platform administrator.
+		auth.POST("/register", credentialLimit, handlers.OperatorRegister)
+
 		// Credential handover, UNAUTHENTICATED BY NECESSITY (PPL-02, SEC-10).
 		//
 		// Somebody who has forgotten their password cannot authenticate to ask
