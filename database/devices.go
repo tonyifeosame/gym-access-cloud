@@ -68,6 +68,38 @@ func hashDeviceKey(key string) string {
 // Returns the device, its plaintext key, and how many bootstrap jobs were
 // queued.
 func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
+	tx, err := DB.Begin()
+	if err != nil {
+		return nil, "", 0, err
+	}
+	defer tx.Rollback()
+
+	device, key, bootstrapped, err := registerDeviceTx(tx, siteID, req)
+	if err != nil {
+		return nil, "", 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, "", 0, err
+	}
+	return device, key, bootstrapped, nil
+}
+
+// registerDeviceTx is the whole of registration, on the caller's transaction.
+//
+// Factored out for the CLAIM path (database/claim.go), which has to mark a code
+// redeemed in the same transaction that issues the credential -- a code marked
+// used with no key issued strands the installer, and a key issued with the code
+// still live leaves a reusable code behind.
+//
+// A claimed terminal therefore goes through EXACTLY this lifecycle: the same
+// upsert, the same refusal to resurrect a DISABLED unit, the same site-mismatch
+// check, the same bootstrap seeding. A second registration path that drifted
+// from this one is how a claimed device would quietly become a device with
+// different rules.
+func registerDeviceTx(tx *sql.Tx, siteID int64,
+	req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
+
 	key, hash, prefix, err := generateDeviceKey()
 	if err != nil {
 		return nil, "", 0, err
@@ -81,12 +113,6 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 	if deviceName == "" {
 		deviceName = req.SerialNumber
 	}
-
-	tx, err := DB.Begin()
-	if err != nil {
-		return nil, "", 0, err
-	}
-	defer tx.Rollback()
 
 	// Re-registration must not resurrect a device that was deliberately
 	// retired, so the conflict target excludes soft-deleted rows via the
@@ -108,6 +134,40 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 		ON CONFLICT (serial_number) WHERE deleted_at IS NULL
 		DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash,
 		              api_key_prefix = EXCLUDED.api_key_prefix,
+
+		              -- THE REVOCATION MARKER IS CLEARED WITH THE CREDENTIAL IT
+		              -- DESCRIBES, and without this line a revoked terminal
+		              -- could never be recovered by any route at all.
+		              --
+		              -- 016 states the invariant as a CHECK:
+		              --   credential_revoked_at IS NULL OR api_key_hash IS NULL
+		              -- "if a revocation is recorded, there is no hash left to
+		              -- authenticate with". Correct, and permanent as written:
+		              -- credential_revoked_at was set by revocation and cleared
+		              -- by nothing, so writing ANY new hash into that row broke
+		              -- the constraint for ever. Re-provisioning a stolen unit
+		              -- that had been recovered failed with a 500 naming a
+		              -- constraint, whichever credential was used.
+		              --
+		              -- Clearing it here is what makes the invariant mean what
+		              -- it says. The row's revocation refers to the credential
+		              -- that was destroyed; a NEW credential is not the revoked
+		              -- one, and recording otherwise would be the database
+		              -- asserting something untrue about the key it now holds.
+		              --
+		              -- THIS DOES NOT WEAKEN REVOCATION, and the reason is the
+		              -- DISABLED gate below rather than anything here.
+		              -- RevokeTerminalCredential sets status = 'DISABLED' and
+		              -- active = FALSE as well as clearing the hash, and this
+		              -- statement preserves DISABLED (see the status CASE below).
+		              -- Registration then REFUSES a disabled device and the
+		              -- whole transaction rolls back -- taking this clearing
+		              -- with it. So a revoked terminal is still refused, and
+		              -- still refused by the same check as before; what changed
+		              -- is that a terminal an operator has deliberately and
+		              -- audibly re-enabled can now be given a credential.
+		              credential_revoked_at = NULL,
+		              credential_revoked_reason = NULL,
 		              device_name = EXCLUDED.device_name,
 		              device_type = EXCLUDED.device_type,
 		              firmware_version = COALESCE(EXCLUDED.firmware_version, devices.firmware_version),
@@ -163,7 +223,20 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 		return nil, "", 0, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	// AND ITS SITE'S SETTINGS, in the same transaction and for the same reason.
+	//
+	// The roster is not the whole of what a terminal needs to behave correctly.
+	// The offline policy is a safety control, it reaches a terminal only by
+	// being PUSHED -- no shipped firmware pulls settings -- and seeding people
+	// without it left a unit at a DENY_ALL site running the firmware's
+	// CACHED_INDEFINITE default while the console reported the site's choice as
+	// in force. See enqueueCurrentSettingsTx.
+	//
+	// Not counted in `bootstrapped`, which is the number of PEOPLE the caller
+	// reports and which the registration response has always carried as
+	// `bootstrap_jobs`. Adding a settings job to that figure would change a
+	// number an existing client may be reading.
+	if err := enqueueCurrentSettingsTx(tx, device.ID); err != nil {
 		return nil, "", 0, err
 	}
 
@@ -215,10 +288,28 @@ func AuthenticateDevice(key string) (*models.DeviceIdentity, error) {
 // OFFLINE (inferred by the server from missed heartbeats) or DISABLED (an
 // administrative decision) -- a heartbeat from a DISABLED device records
 // liveness without silently putting it back into service.
-func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, error) {
+//
+// It also returns whether the terminal reported a member capacity DIFFERENT
+// from the one on file, which is the caller's signal to re-measure it against
+// its roster (FW-01). In practice that is once per boot, which is the right
+// frequency: counting a roster costs a permission-predicate evaluation, and the
+// answer cannot change because a heartbeat arrived.
+func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bool, error) {
 	reported := req.Status
 	if !models.DeviceReportableStates[reported] {
 		reported = models.DeviceOnline
+	}
+
+	// Read before write, so "is this new" is answerable. A NULL prior value with
+	// a reported one is a change, which is the case that matters most: it is a
+	// terminal telling the platform its ceiling for the first time.
+	capacityChanged := false
+	if capacity := positiveCapacity(req.MemberCapacity); capacity != nil {
+		var stored sql.NullInt64
+		if err := DB.QueryRow(
+			`SELECT member_capacity FROM devices WHERE id = $1`, deviceID).Scan(&stored); err == nil {
+			capacityChanged = !stored.Valid || int(stored.Int64) != *capacity
+		}
 	}
 
 	_, err := DB.Exec(`
@@ -232,15 +323,41 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, er
 		       boot_count = COALESCE($5, boot_count),
 		       ip_address = COALESCE(NULLIF($6,''), ip_address),
 		       last_error = CASE WHEN $1 = 'ERROR' THEN NULLIF($7,'') ELSE NULL END,
-		       last_error_at = CASE WHEN $1 = 'ERROR' THEN CURRENT_TIMESTAMP ELSE NULL END
+		       last_error_at = CASE WHEN $1 = 'ERROR' THEN CURRENT_TIMESTAMP ELSE NULL END,
+
+		       -- FW-01. COALESCE, so a terminal that reports its capacity once
+		       -- and then stops -- a downgrade, or a build that drops the field
+		       -- -- keeps the value rather than reverting to unknown. The
+		       -- hardware did not change, and forgetting would silently switch
+		       -- the capacity guard off for that door.
+		       member_capacity = COALESCE($9, member_capacity),
+		       member_capacity_reported_at = CASE
+		           WHEN $9 IS NOT NULL THEN CURRENT_TIMESTAMP
+		           ELSE member_capacity_reported_at END
 		 WHERE id = $8 AND deleted_at IS NULL`,
 		reported, req.FirmwareVersion, req.HardwareRevision, req.BuildNumber,
-		req.BootCount, req.IPAddress, req.Error, deviceID)
+		req.BootCount, req.IPAddress, req.Error, deviceID,
+		// Zero and negative are dropped rather than stored. A terminal that can
+		// hold nobody is not a state the firmware can be in, and the CHECK
+		// constraint would refuse it anyway -- as a 500 on the heartbeat, which
+		// is not how a garbage field should take a door offline.
+		positiveCapacity(req.MemberCapacity))
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
-	return GetDeviceSyncBacklog(deviceID)
+	pending, err := GetDeviceSyncBacklog(deviceID)
+	return pending, capacityChanged, err
+}
+
+// positiveCapacity normalises a reported member capacity for the heartbeat's
+// COALESCE: nil for anything that is not a usable number, so the stored value is
+// left alone rather than overwritten with nonsense.
+func positiveCapacity(reported *int) *int {
+	if reported == nil || *reported <= 0 {
+		return nil
+	}
+	return reported
 }
 
 // MarkDevicesOffline flags devices that have missed heartbeats for longer than

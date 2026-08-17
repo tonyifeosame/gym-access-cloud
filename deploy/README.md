@@ -206,6 +206,51 @@ sh deploy/migrate.sh --baseline
 sh deploy/migrate.sh --status      # expect: 0 pending
 ```
 
+#### Migration 011 on an installation with live sites
+
+`011_site_credentials.sql` replaces the plaintext `sites.api_key` with a SHA-256
+hash and **drops the plaintext column**.
+
+**No terminal or tool has to change anything.** The wire contract is identical —
+the same `X-API-Key: <same string>` — and the migration computes each existing
+key's hash from the plaintext it is about to remove, so every already-provisioned
+site keeps authenticating with the key it already holds. It refuses to run if any
+live site would be left without a hash, rather than silently locking out a fleet.
+
+What is lost, deliberately: **the key can no longer be read back out of the
+database.** `SELECT api_key FROM sites` was a working recovery path and is now
+gone. Anyone relying on it should rotate instead. Take a backup before applying,
+as with any migration that drops a column.
+
+#### Migration 010 on a database that already holds data
+
+`010_timestamptz.sql` converts every timestamp column from a wall-clock reading
+to a true instant. To do that it has to know **which clock took the existing
+readings**, and it defaults to the time zone of the connection applying it.
+
+Run through `migrate.sh` as documented above, that default is correct: psql pins
+no time zone, so it reports the database server's own — which is the clock
+`CURRENT_TIMESTAMP` was reading. Nothing extra is needed, and on an empty
+database the choice cannot affect any value at all.
+
+It is wrong in one case: **the database has moved or been reconfigured since the
+data was written.** Name the zone the old rows were written in:
+
+```bash
+psql "$DATABASE_URL" -c "SET accesslink.legacy_timezone = 'Africa/Lagos';" \
+                     -f migrations/010_timestamptz.sql
+```
+
+The migration raises a `WARNING` naming the zone it used whenever it converts a
+populated database without an explicit override — check the deploy output for it
+rather than discovering the assumption later in an access log that reads an hour
+out. Getting this wrong shifts historical timestamps and is not automatically
+reversible, so verify before the ledger records it as applied.
+
+Note also that each `ALTER ... TYPE` rewrites its table under an `ACCESS
+EXCLUSIVE` lock and rebuilds the indexes over it. On a large `access_logs` this
+is not instant — apply it in a maintenance window.
+
 **Do not load `seeds/dev_seed.sql`.** It creates sites with known keys.
 
 A database built from migrations alone has no sites, and therefore no usable
@@ -246,22 +291,58 @@ systemctl list-timers | grep certbot
 
 ### 6. Create the real site
 
-```bash
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
-  exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" <<'SQL'
-INSERT INTO companies (name, slug, active)
-VALUES ('Your Company', 'your-company', TRUE)
-ON CONFLICT DO NOTHING;
+**Through the console API, not with psql.** Since migration 011 there is no
+plaintext `api_key` column to insert into — the database stores a SHA-256 hash —
+so the `INSERT` this step used to describe no longer works. The API generates the
+key, stores its hash, and returns the key once.
 
-INSERT INTO sites (company_id, site_name, api_key, active, timezone)
-VALUES ((SELECT id FROM companies WHERE slug = 'your-company'),
-        'Main Site', encode(gen_random_bytes(32), 'hex'), TRUE, 'Africa/Lagos')
-RETURNING id, site_name, api_key;
-SQL
+Sign in as the operator the bootstrap created (see step 4), then:
+
+```bash
+# 1. Sign in. Keep the cookie jar and the CSRF token from the response body.
+curl -sc jar.txt -X POST https://api.example.com/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"owner@your-company.com","password":"…"}'
+
+# 2. Create the site. Requires ADMIN or OWNER.
+curl -sb jar.txt -X POST https://api.example.com/api/v1/console/sites \
+  -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
+  -d '{"name":"Main Site","timezone":"Africa/Lagos"}'
 ```
 
-Store that key in a password manager. It is the provisioning secret: whoever
-holds it can enrol terminals, read the roster, and pull access logs.
+```json
+{
+  "site": {"id":"…","name":"Main Site","timezone":"Africa/Lagos","…":"…"},
+  "credential": {"api_key":"ats_…","api_key_prefix":"ats_…","shown_once":true}
+}
+```
+
+**Store `api_key` in a password manager now.** It is the provisioning secret:
+whoever holds it can enrol terminals, read the roster and pull access logs. It is
+stored only as a hash, so this response is the last time it exists anywhere the
+server can produce. There is no endpoint that returns it again.
+
+Lost it, or need to revoke it? Rotate:
+
+```bash
+curl -sb jar.txt -X POST \
+  https://api.example.com/api/v1/console/sites/<site_id>/api-key \
+  -H "X-CSRF-Token: $CSRF"
+```
+
+The old key stops working immediately — there is no overlap window. The response
+reports `legacy_terminals`: how many terminals at that site have never been
+issued a device credential of their own and therefore still depend on the site
+key. **Those need re-provisioning; terminals holding their own `X-Device-Key` are
+unaffected.**
+
+#### Retiring a site
+
+`DELETE /api/v1/console/sites/{site_id}` retires a site **and soft-deletes every
+terminal at it**, reporting the count. Every one of those terminals stops opening
+a door immediately. If you only mean to suspend a location, use
+`PUT /api/v1/console/sites/{site_id}` with `{"active": false}` instead — that is
+reversible and destroys nothing.
 
 ### 7. Supply the root CA to the firmware
 

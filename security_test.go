@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
 )
 
 // Authorization boundaries.
@@ -20,12 +22,14 @@ func TestDeviceCannotAcknowledgeAnotherDevicesJob(t *testing.T) {
 	keyB := env.registerDevice(env.siteAKey, "ESP32-BBB")
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
-	// Both terminals get their own copy of the change.
-	jobsA := env.jobs(keyA)
-	if len(jobsA) != 1 {
-		t.Fatalf("device A got %d jobs, want 1", len(jobsA))
+	// Both terminals get their own copy of the change. Each also holds the
+	// settings push its registration seeded, so the person job is selected by
+	// type rather than by position.
+	createsA := jobsOfType(env.jobs(keyA), "CREATE")
+	if len(createsA) != 1 {
+		t.Fatalf("device A got %d CREATE jobs, want 1", len(createsA))
 	}
-	idA := jobID(t, jobsA[0])
+	idA := jobID(t, createsA[0])
 
 	res := env.do(http.MethodPost, jobPath(idA), map[string]any{"status": "COMPLETED"}, deviceAuth(keyB))
 	if res.Code != http.StatusNotFound {
@@ -91,14 +95,30 @@ func TestLegacyAuthCannotClaimAnotherSitesSerial(t *testing.T) {
 	env := newTestEnv(t)
 	env.registerDevice(env.siteAKey, "ESP32-AAA")
 
-	// The deprecated path trusts a claimed serial, so it must still be checked
-	// against the site the key belongs to.
-	res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, map[string]string{
+	crossSite := map[string]string{
 		"X-API-Key": env.siteBKey, "X-Device-Serial": "ESP32-AAA",
-	})
-	if res.Code != http.StatusNotFound {
-		t.Errorf("legacy cross-site auth got %d, want 404 (body %s)", res.Code, res.Raw)
 	}
+
+	// SEC-05: by default the pair is refused before the serial is even looked
+	// up, so this cannot be used to discover what is registered where.
+	t.Run("refused outright by default", func(t *testing.T) {
+		defaultDeviceAuth(t)
+		res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, crossSite)
+		if res.Code != http.StatusUnauthorized {
+			t.Errorf("legacy cross-site auth got %d, want 401 (body %s)", res.Code, res.Raw)
+		}
+	})
+
+	// And when a deployment mid-upgrade re-opens the path, the ORIGINAL property
+	// still holds: the path trusts a claimed serial, so the serial must be
+	// checked against the site the key belongs to.
+	t.Run("still scoped to the key's own site when enabled", func(t *testing.T) {
+		t.Setenv(middleware.LegacyDeviceAuthEnv, "1")
+		res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, crossSite)
+		if res.Code != http.StatusNotFound {
+			t.Errorf("legacy cross-site auth got %d, want 404 (body %s)", res.Code, res.Raw)
+		}
+	})
 }
 
 func TestCredentialRotationInvalidatesTheOldKey(t *testing.T) {
@@ -159,50 +179,108 @@ func TestMemberDataIsScopedToTheTenant(t *testing.T) {
 	}
 }
 
+// The firmware catalogue tenancy tests exercise /console/firmware rather than
+// the site-key routes they were written against.
+//
+// The WRITES moved there deliberately (SEC-02): any site provisioning key could
+// publish a build and move the `is_current` target, which is what every "is this
+// terminal outdated" report is measured against and, once OTA exists, the row a
+// terminal would be pointed at. A secret installed on hardware at one location
+// must not control that.
+//
+// The PROPERTY under test is unchanged and is the one that matters: one tenant
+// must not be able to read, publish into, or retarget another's catalogue. Only
+// the door has moved.
+
 func TestFirmwareCatalogIsScopedToTheTenant(t *testing.T) {
 	env := newTestEnv(t)
 
+	two := companyIDBySlug(t, "two")
+	_, twoToken, twoCSRF := consoleOperatorSession(t, env.router, two,
+		"two-fw@example.com", models.RoleAdmin)
+
 	// Company two publishes a build.
-	created := env.do(http.MethodPost, "/api/v1/firmware", map[string]any{
-		"version": "9.9.9", "device_type": "TERMINAL", "release_channel": "STABLE",
-		"download_url": "http://example.invalid/firmware.bin",
-	}, siteAuth(env.siteCKey))
-	if created.Code != http.StatusCreated {
-		t.Fatalf("creating firmware got %d, want 201 (body %s)", created.Code, created.Raw)
+	code, created := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"9.9.9","device_type":"TERMINAL","release_channel":"STABLE",
+		  "download_url":"http://example.invalid/firmware.bin"}`, twoToken, twoCSRF)
+	if code != http.StatusCreated {
+		t.Fatalf("creating firmware got %d, want 201 (body %v)", code, created)
 	}
 
-	// Company one must not see it. The catalog carries download URLs and
+	// Company one must not see it. The catalogue carries download URLs and
 	// checksums, and once OTA exists it is what a terminal would be pointed at.
+	one := companyIDBySlug(t, "one")
+	_, oneToken, oneCSRF := consoleOperatorSession(t, env.router, one,
+		"one-fw@example.com", models.RoleAdmin)
+
+	code, listing := consoleCall(t, env.router, "GET", "/api/v1/console/firmware",
+		``, oneToken, oneCSRF)
+	if code != http.StatusOK {
+		t.Fatalf("listing firmware got %d, want 200", code)
+	}
+	if got := listing["count"]; got != float64(0) {
+		t.Errorf("company one sees %v firmware versions belonging to company two (body %v)", got, listing)
+	}
+
+	// The site-key read is likewise scoped, and is the one path a terminal uses.
 	res := env.do(http.MethodGet, "/api/v1/firmware", nil, siteAuth(env.siteAKey))
 	if res.Code != http.StatusOK {
-		t.Fatalf("listing firmware got %d, want 200", res.Code)
+		t.Fatalf("site-key firmware read got %d, want 200", res.Code)
 	}
 	if got := res.Body["count"]; got != float64(0) {
-		t.Errorf("company one sees %v firmware versions belonging to company two (body %s)", got, res.Raw)
+		t.Errorf("company one's site key sees %v of company two's builds (body %s)", got, res.Raw)
 	}
 }
 
 func TestTenantCannotRetargetAnotherTenantsFleet(t *testing.T) {
 	env := newTestEnv(t)
 
-	created := env.do(http.MethodPost, "/api/v1/firmware", map[string]any{
-		"version": "9.9.9", "device_type": "TERMINAL", "release_channel": "STABLE",
-	}, siteAuth(env.siteCKey))
-	id, _ := created.Body["id"].(float64)
+	two := companyIDBySlug(t, "two")
+	_, twoToken, twoCSRF := consoleOperatorSession(t, env.router, two,
+		"two-target@example.com", models.RoleAdmin)
+
+	code, created := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"9.9.9","device_type":"TERMINAL","release_channel":"STABLE"}`,
+		twoToken, twoCSRF)
+	if code != http.StatusCreated {
+		t.Fatalf("creating firmware got %d, want 201 (body %v)", code, created)
+	}
+	id, _ := created["id"].(float64)
 	if id == 0 {
-		t.Fatalf("firmware id missing from %s", created.Raw)
+		t.Fatalf("firmware id missing from %v", created)
 	}
 
 	// `is_current` defines what "outdated" means for a fleet. If one tenant can
 	// set another's, it can misreport every terminal they own -- and once OTA
 	// exists, choose what they install.
-	res := env.do(http.MethodPut, "/api/v1/firmware/"+itoa(int64(id))+"/current", nil, siteAuth(env.siteAKey))
-	if res.Code != http.StatusNotFound {
-		t.Errorf("cross-tenant retarget got %d, want 404 (body %s)", res.Code, res.Raw)
+	one := companyIDBySlug(t, "one")
+	_, oneToken, oneCSRF := consoleOperatorSession(t, env.router, one,
+		"one-target@example.com", models.RoleAdmin)
+
+	code, body := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/firmware/"+itoa(int64(id))+"/current", ``, oneToken, oneCSRF)
+	if code != http.StatusNotFound {
+		t.Errorf("cross-tenant retarget got %d, want 404 (body %v)", code, body)
 	}
 
 	if queryBool(t, `SELECT is_current FROM firmware_versions WHERE version = '9.9.9'`) {
 		t.Error("another tenant's build was marked current")
+	}
+}
+
+// TestFirmwareWritesRequireAnOperator proves the capability MOVED rather than
+// being deleted, and that a lower role cannot reach it.
+func TestFirmwareWritesRequireAnOperator(t *testing.T) {
+	env := newTestEnv(t)
+	one := companyIDBySlug(t, "one")
+
+	_, mgrToken, mgrCSRF := consoleOperatorSession(t, env.router, one,
+		"fw-manager@example.com", models.RoleManager)
+
+	code, _ := consoleCall(t, env.router, "POST", "/api/v1/console/firmware",
+		`{"version":"1.2.3","device_type":"TERMINAL"}`, mgrToken, mgrCSRF)
+	if code != http.StatusForbidden {
+		t.Errorf("MANAGER publishing firmware got %d, want 403", code)
 	}
 }
 
@@ -254,7 +332,8 @@ func TestAuthenticationIsRequired(t *testing.T) {
 
 func TestDeactivatedSiteCannotUseItsKey(t *testing.T) {
 	env := newTestEnv(t)
-	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key = $1`, env.siteAKey)
+	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteAKey))
 
 	res := env.do(http.MethodGet, "/api/v1/members", nil, siteAuth(env.siteAKey))
 	if res.Code != http.StatusUnauthorized {
@@ -411,14 +490,36 @@ func TestRegistrationSeedsTheRosterAtomically(t *testing.T) {
 	}
 
 	// Reported and actually queued are the same number.
+	//
+	// `bootstrap_jobs` counts PEOPLE, which is what it has always meant and what
+	// a client reading it expects. Registration also seeds one SETTINGS push --
+	// the site's offline policy has no other route to a terminal -- and that is
+	// asserted separately rather than folded into a number with an established
+	// meaning.
 	var queued int
 	if err := database.DB.QueryRow(`
 		SELECT count(*) FROM sync_jobs j
 		  JOIN devices d ON d.id = j.device_id
-		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'`).Scan(&queued); err != nil {
+		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'
+		   AND j.job_type = 'CREATE'`).Scan(&queued); err != nil {
 		t.Fatalf("counting queued jobs: %v", err)
 	}
 	if queued != int(bootstrapped) {
 		t.Errorf("registration reported %v bootstrap jobs but %d are queued", bootstrapped, queued)
+	}
+
+	// And the settings push committed in the same transaction. A terminal
+	// seeded with people and no policy runs the firmware default, which is
+	// CACHED_INDEFINITE, at a site that may have chosen otherwise.
+	var settings int
+	if err := database.DB.QueryRow(`
+		SELECT count(*) FROM sync_jobs j
+		  JOIN devices d ON d.id = j.device_id
+		 WHERE d.serial_number = 'ESP32-AAA' AND j.status = 'PENDING'
+		   AND j.job_type = 'SETTINGS'`).Scan(&settings); err != nil {
+		t.Fatalf("counting settings jobs: %v", err)
+	}
+	if settings != 1 {
+		t.Errorf("registration queued %d SETTINGS jobs, want exactly 1", settings)
 	}
 }

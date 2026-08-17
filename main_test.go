@@ -234,9 +234,23 @@ func truncate(s string, n int) string {
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
+	// CASCADE reaches everything that references companies, people or devices,
+	// which is every entity table added since -- credentials, placements,
+	// permissions, schedules, events, audit_events, person_categories and
+	// company_applications all hang off one of those three.
+	//
+	// TWO TABLES ARE NAMED EXPLICITLY because nothing references them:
+	// platform_admins and platform_sessions are outside the tenancy model
+	// deliberately, so no foreign key drags them in.
+	//
+	// `applications` is DELIBERATELY ABSENT. It is the platform's own catalogue,
+	// seeded by migration 015, and truncating it between tests would empty the
+	// capability list every company_applications row and every terminal's
+	// application_mode resolves against.
 	_, err := database.DB.Exec(`
 		TRUNCATE sync_jobs, access_logs, enrollment_requests, people,
-		         devices, doors, firmware_versions, sites, companies
+		         devices, doors, firmware_versions, sites, companies,
+		         platform_admins
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("resetting tables: %v", err)
@@ -254,14 +268,44 @@ func newTestEnv(t *testing.T) *testEnv {
 	mustScan(t, `INSERT INTO companies (name, slug) VALUES ('Company One', 'one') RETURNING id`, &companyOne)
 	mustScan(t, `INSERT INTO companies (name, slug) VALUES ('Company Two', 'two') RETURNING id`, &companyTwo)
 
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site A', $2, TRUE)`,
-		companyOne, env.siteAKey)
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site B', $2, TRUE)`,
-		companyOne, env.siteBKey)
-	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key, active) VALUES ($1, 'Site C', $2, TRUE)`,
-		companyTwo, env.siteCKey)
+	// Site keys are stored HASHED, exactly as a real one is since
+	// 011_site_credentials.sql. The fixture keeps the plaintext in env.site*Key
+	// because the tests present it in X-API-Key -- which is the point: the wire
+	// contract did not change when the storage did, and a fixture that wrote
+	// plaintext would be testing a database shape the server no longer has.
+	seedSite(t, companyOne, "Site A", env.siteAKey)
+	seedSite(t, companyOne, "Site B", env.siteBKey)
+	seedSite(t, companyTwo, "Site C", env.siteCKey)
 
 	return env
+}
+
+// seedSite inserts a site whose provisioning key is `key`, stored the way the
+// server stores one.
+func seedSite(t *testing.T, companyID int64, name, key string) {
+	t.Helper()
+	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key_hash, api_key_prefix, active)
+	             VALUES ($1, $2, $3, $4, TRUE)`,
+		companyID, name, database.HashSiteKey(key), truncateKeyPrefix(key))
+}
+
+func truncateKeyPrefix(key string) string {
+	if len(key) < 12 {
+		return key
+	}
+	return key[:12]
+}
+
+// siteIDByKey resolves a site from the plaintext key a test holds, hashing it
+// the same way authentication does.
+func siteIDByKey(t *testing.T, key string) int64 {
+	t.Helper()
+	var id int64
+	if err := database.DB.QueryRow(
+		`SELECT id FROM sites WHERE api_key_hash = $1`, database.HashSiteKey(key)).Scan(&id); err != nil {
+		t.Fatalf("resolving site for key: %v", err)
+	}
+	return id
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +439,23 @@ func jobTypes(jobs []map[string]any) []string {
 		types = append(types, t)
 	}
 	return types
+}
+
+// jobsOfType selects one kind of job out of a batch.
+//
+// A device's first poll carries more than one kind of work: registration seeds
+// the roster AND the site's settings, because the offline policy has no other
+// route to a terminal. Tests that are about a person job therefore have to name
+// which job they mean rather than taking jobs[0] -- an assertion on position is
+// an assertion about queue ordering that those tests are not making.
+func jobsOfType(jobs []map[string]any, jobType string) []map[string]any {
+	matched := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		if t, _ := job["job_type"].(string); t == jobType {
+			matched = append(matched, job)
+		}
+	}
+	return matched
 }
 
 func jobID(t *testing.T, job map[string]any) int64 {

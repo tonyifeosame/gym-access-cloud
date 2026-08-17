@@ -75,8 +75,31 @@ const corsHeaders = "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token
 //
 // None of this affects the terminals: CORS is enforced by browsers, and an ESP32
 // sends no Origin header.
+// THE DASHBOARD NEEDS THIS SET. The operator console authenticates with a
+// cookie, and a browser only sends one cross-origin when the response carries
+// Access-Control-Allow-Credentials: true with an EXACT origin -- which happens
+// only in the allowlist branch below. With CORS_ALLOWED_ORIGINS unset the API
+// stays readable from anywhere but never with credentials, so login silently
+// cannot work. That is why an empty allowlist is warned about at startup rather
+// than left to be discovered from a browser console.
+//
+// In production that means:
+//
+//	CORS_ALLOWED_ORIGINS=https://app.accesslink.store
+//
+// with the API on api.accesslink.store. The two share the registrable domain
+// accesslink.store, so they are SAME-SITE and the SameSite=Lax session cookie is
+// sent; CORS is what allows the cross-ORIGIN read on top of that. Both halves
+// are required and neither substitutes for the other.
 func CORSMiddleware() gin.HandlerFunc {
 	allowed := parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"))
+
+	if len(allowed) == 0 {
+		log.Println("CORS: no allowlist configured (CORS_ALLOWED_ORIGINS is empty). " +
+			"Responses are readable from any origin but NEVER with credentials, " +
+			"so an operator dashboard on another origin cannot sign in. Set it to " +
+			"the dashboard's exact origin, e.g. https://app.accesslink.store")
+	}
 
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
@@ -90,11 +113,23 @@ func CORSMiddleware() gin.HandlerFunc {
 			// Caches must not serve one origin's response to another.
 			c.Writer.Header().Add("Vary", "Origin")
 		default:
+			// An origin that is not on the list gets no Allow-Origin header at
+			// all, which is what makes the browser refuse the response. It is
+			// never echoed back, so the allowlist cannot be widened by asking.
 			c.Writer.Header().Add("Vary", "Origin")
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Headers", corsHeaders)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+
+		// X-Request-ID is on every response and correlates with the server log.
+		// Without exposing it, a cross-origin dashboard cannot read it, so an
+		// operator reporting a failure has no id to quote.
+		c.Writer.Header().Set("Access-Control-Expose-Headers", RequestIDHeader)
+
+		// Cache the preflight so an active dashboard is not sending an OPTIONS
+		// before every mutation. Ten minutes is Chrome's cap for this header.
+		c.Writer.Header().Set("Access-Control-Max-Age", "600")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)

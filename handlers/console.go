@@ -1,0 +1,1157 @@
+package handlers
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+// The operator console, /api/v1/console/*.
+//
+// Everything here authenticates with an operator SESSION. The site API key --
+// the provisioning secret that registers terminals and rotates their
+// credentials -- authenticates nothing in this file and is never returned by
+// anything in it. That is the whole point of the split: a dashboard running on a
+// machine the company does not control must not be able to obtain it.
+//
+// DOMAIN-NEUTRAL. A company, its sites, its terminals, its people and the
+// capabilities it has enabled. Nothing here assumes the platform is being used
+// for doors, or attendance, or anything else; what a deployment is FOR is
+// configuration, exposed through the applications endpoints and rendered by the
+// dashboard.
+//
+// REUSE OVER RESTATEMENT. Where a rule already exists in the data layer -- the
+// sync jobs a person change enqueues, the tenancy filter on every query, the
+// grant check in RequireSiteGrant -- these handlers call it rather than
+// reimplementing it. Where reuse would be unsafe, the reason is written at the
+// call site.
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+// operatorSiteScope resolves which sites the caller may see in a LIST.
+//
+// Returns nil to mean "every site in the company", matching the rule
+// RequireSiteGrant enforces for single-site routes: OWNER and ADMIN are never
+// scoped, and an operator holding no grants is not scoped either. If the two
+// ever disagreed, a list would show sites that the detail route then refused.
+func operatorSiteScope(c *gin.Context) ([]int64, error) {
+	identity := middleware.Operator(c)
+	if middleware.RoleAtLeast(identity.Role, models.RoleAdmin) {
+		return nil, nil
+	}
+
+	grants, err := database.ListSiteGrants(identity.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if len(grants) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]int64, 0, len(grants))
+	for _, grant := range grants {
+		ids = append(ids, grant.SiteID)
+	}
+	return ids, nil
+}
+
+// consolePerson projects a person for the dashboard.
+//
+// The fingerprint template never crosses this boundary. It holds a credential
+// locator rather than biometric data, but the frontend must treat biometrics as
+// an abstraction either way -- so the only thing that travels is whether a
+// credential exists.
+func consolePerson(member models.Member) models.ConsolePerson {
+	return models.ConsolePerson{
+		ID:                member.PublicID,
+		ExternalID:        member.MemberID,
+		FullName:          member.FullName,
+		Category:          member.MembershipType,
+		Active:            member.Active,
+		BiometricEnrolled: member.FingerprintTemplate != "",
+		CreatedAt:         member.CreatedAt,
+		UpdatedAt:         member.UpdatedAt,
+	}
+}
+
+// consoleOperator projects an operator account.
+func consoleOperator(user models.User, grants []models.SiteGrant) models.ConsoleOperator {
+	if grants == nil {
+		grants = []models.SiteGrant{}
+	}
+	return models.ConsoleOperator{
+		ID:          user.PublicID,
+		Email:       user.Email,
+		FullName:    user.FullName,
+		Role:        user.Role,
+		Active:      user.Active,
+		LastLoginAt: user.LastLoginAt,
+		Sites:       grants,
+		AllSites:    middleware.RoleAtLeast(user.Role, models.RoleAdmin) || len(grants) == 0,
+		CreatedAt:   user.CreatedAt,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Company and sites
+// ---------------------------------------------------------------------------
+
+// ConsoleGetCompany handles GET /console/company
+func ConsoleGetCompany(c *gin.Context) {
+	company, err := database.GetCompany(c.GetInt64("company_id"))
+	if err != nil {
+		logError(c, "console get company", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve company"})
+		return
+	}
+	c.JSON(http.StatusOK, company)
+}
+
+// ConsoleListSites handles GET /console/sites
+//
+// Narrowed to the caller's grants. The response carries no API keys: the
+// projection does not select the column at all.
+func ConsoleListSites(c *gin.Context) {
+	scope, err := operatorSiteScope(c)
+	if err != nil {
+		logError(c, "console resolve site scope", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sites"})
+		return
+	}
+
+	sites, err := database.ListConsoleSites(c.GetInt64("company_id"), scope)
+	if err != nil {
+		logError(c, "console list sites", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sites"})
+		return
+	}
+	if sites == nil {
+		sites = []models.ConsoleSite{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"count": len(sites), "sites": sites})
+}
+
+// ConsoleGetSite handles GET /console/sites/:site_id
+//
+// RequireSiteGrant has already resolved and authorized the site, and put its
+// internal id in the context.
+func ConsoleGetSite(c *gin.Context) {
+	site, err := database.GetConsoleSite(c.GetInt64("company_id"), c.GetInt64("site_id"))
+	if errors.Is(err, models.ErrSiteNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Site not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "console get site", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve site"})
+		return
+	}
+	c.JSON(http.StatusOK, site)
+}
+
+// Site settings reuse GetSiteSettings and UpdateSiteSettings unchanged. Both
+// read site_id from the context, which RequireSiteGrant sets to a site the
+// operator is authorized for -- exactly as the site-key middleware sets it to
+// the site whose credential was presented. The settings write also enqueues a
+// SETTINGS sync job for every terminal at that site, which is business logic
+// worth reusing rather than restating.
+
+// ---------------------------------------------------------------------------
+// Applications
+// ---------------------------------------------------------------------------
+
+// ConsoleListApplications handles GET /console/applications
+//
+// Returns what the company has configured, which of those are enabled, and the
+// catalog the platform offers. The catalog is included so a dashboard does not
+// hard-code the capability list: adding one to the platform makes it appear.
+//
+// A company with nothing enabled gets empty arrays, which is a legitimate state
+// and not a reason for the console to assume a default set.
+func ConsoleListApplications(c *gin.Context) {
+	companyID := c.GetInt64("company_id")
+
+	configured, err := database.ListCompanyApplications(companyID)
+	if err != nil {
+		logError(c, "console list applications", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve applications"})
+		return
+	}
+	if configured == nil {
+		configured = []models.CompanyApplication{}
+	}
+
+	enabled, err := database.EnabledApplications(companyID)
+	if err != nil {
+		logError(c, "console list enabled applications", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve applications"})
+		return
+	}
+
+	codes := make([]string, 0, len(enabled))
+	for _, app := range enabled {
+		codes = append(codes, app.Code)
+	}
+
+	c.JSON(http.StatusOK, models.ConsoleApplications{
+		Configured: configured,
+		Enabled:    codes,
+		Available:  models.ApplicationOrder,
+	})
+}
+
+// ConsoleSetApplication handles PUT /console/applications/:code
+//
+// Enables, disables or configures one capability. Settings are left alone when
+// the body omits them, so toggling `enabled` does not silently discard a
+// configuration the caller did not mention.
+//
+// MULTI_PURPOSE is rejected here, and that rejection is the model: it is a
+// TERMINAL mode, describing a device that serves whatever its company has
+// enabled. It is not itself a capability a company can turn on.
+func ConsoleSetApplication(c *gin.Context) {
+	code := c.Param("code")
+
+	var req models.ConsoleApplicationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Absent means enable: a PUT to a capability's URL without saying otherwise
+	// is a request to have it.
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	if req.Settings != nil {
+		var probe map[string]any
+		if err := json.Unmarshal(req.Settings, &probe); err != nil {
+			c.JSON(http.StatusBadRequest,
+				gin.H{"error": "Application settings must be a JSON object"})
+			return
+		}
+	}
+
+	app, err := database.SetCompanyApplication(c.GetInt64("company_id"), code, enabled, req.Settings)
+	if errors.Is(err, models.ErrInvalidApplication) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":     "Unknown application",
+			"available": models.ApplicationOrder,
+		})
+		return
+	}
+	if err != nil {
+		logError(c, "console set application", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update application"})
+		return
+	}
+
+	// OWNER-only and company-wide: this decides what the whole deployment is for.
+	// The settings blob is NOT recorded -- it is an open JSON object whose
+	// contents this layer does not know the shape of, and database/audit.go is
+	// explicit that redaction is the caller's job. Recording that settings
+	// changed, without their contents, is the honest thing a caller can say.
+	recordAudit(c, auditApplicationSet, auditTargetApplication, "", code, gin.H{
+		"enabled":          enabled,
+		"settings_changed": req.Settings != nil,
+	})
+
+	c.JSON(http.StatusOK, app)
+}
+
+// ---------------------------------------------------------------------------
+// Terminals
+// ---------------------------------------------------------------------------
+
+// ConsoleListTerminals handles GET /console/terminals
+//
+// Reuses the fleet inventory query, narrowed to the caller's granted sites in
+// SQL. DeviceInventory carries no credential material -- not the device key, not
+// its hash, not the site key -- so there is nothing to strip.
+func ConsoleListTerminals(c *gin.Context) {
+	scope, err := operatorSiteScope(c)
+	if err != nil {
+		logError(c, "console resolve site scope", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminals"})
+		return
+	}
+
+	terminals, err := database.ListDevices(c.GetInt64("company_id"),
+		c.Query("outdated") == "true", scope)
+	if err != nil {
+		logError(c, "console list terminals", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminals"})
+		return
+	}
+	if terminals == nil {
+		terminals = []models.DeviceInventory{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"count": len(terminals), "terminals": terminals})
+}
+
+// ConsoleTerminalSummary handles GET /console/terminals/summary
+//
+// NARROWED BY GRANTS, to the same scope the list uses. This previously reported
+// company-wide counts on the reasoning that a rollup should describe the whole
+// fleet. That was wrong in two ways once the console actually renders it: the
+// figures sit directly above a terminal list that IS narrowed, so a scoped
+// operator would read "12 online" over a list of one and conclude the console
+// was broken; and the counts disclose how much hardware stands at sites they
+// were deliberately not granted. A summary an operator cannot drill into is not
+// a summary of anything they can act on.
+func ConsoleTerminalSummary(c *gin.Context) {
+	scope, err := operatorSiteScope(c)
+	if err != nil {
+		logError(c, "console resolve site scope", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve summary"})
+		return
+	}
+
+	summary, err := database.GetFleetSummary(c.GetInt64("company_id"), scope)
+	if err != nil {
+		logError(c, "console terminal summary", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve summary"})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+// ConsoleGetTerminal handles GET /console/terminals/:serial
+//
+// The full inventory row -- the same projection the list uses -- plus what the
+// terminal is assigned to do and what that currently resolves to.
+//
+// It used to return only the application fields, which meant a detail view held
+// LESS than the list row it was opened from. The three original fields are still
+// present at the same paths; everything else is additive.
+//
+// AUTHORIZATION IS UPSTREAM. RequireTerminalGrant has already resolved this
+// serial inside the caller's company and checked the grant on the site it sits
+// at, so a terminal in another tenant never reaches here (404) and neither does
+// one at an ungranted site (403). The company filter below is retained anyway --
+// defence in depth costs one join condition, and a handler that would read
+// across tenants if it were ever mounted without its gate is a handler waiting
+// to be mounted wrongly.
+func ConsoleGetTerminal(c *gin.Context) {
+	detail, err := loadTerminalDetail(c.GetInt64("company_id"), c.Param("serial"))
+	if errors.Is(err, models.ErrDeviceNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "console get terminal", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminal"})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+// loadTerminalDetail composes the inventory row with the application assignment.
+//
+// Two reads rather than one join: the inventory projection already carries a
+// firmware join whose correctness matters, and the application resolution needs
+// the company's enabled capabilities. Keeping them apart means neither has to
+// know about the other, and both stay the single definition used everywhere
+// else.
+func loadTerminalDetail(companyID int64, serial string) (*models.TerminalDetail, error) {
+	inventory, err := database.GetDeviceInventoryBySerial(companyID, serial)
+	if err != nil {
+		return nil, err
+	}
+
+	application, err := database.GetDeviceApplication(companyID, serial)
+	if err != nil {
+		return nil, err
+	}
+
+	// Health, which also carries the capacity figures (M-7, SYN-04, FW-01).
+	//
+	// ONE READ RATHER THAN TWO. This used to call InspectTerminalCapacity
+	// directly for roster_size and over_capacity, and GetTerminalHealth
+	// computes exactly those from the same function on its way to everything
+	// else. Calling both would run the permission predicate twice per detail
+	// read to produce two copies of one answer -- and two copies of an answer
+	// are two chances to disagree.
+	//
+	// Company-scoped by the store the same way the two reads above are, so a
+	// terminal in another tenant is ErrDeviceNotFound here exactly as it is
+	// there. The scoping is not re-implemented at this layer.
+	health, err := database.GetTerminalHealth(companyID, serial)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.TerminalDetail{
+		DeviceInventory:       *inventory,
+		ApplicationMode:       application.Mode,
+		EffectiveApplications: application.Effective,
+		RosterSize:            health.RosterSize,
+		OverCapacity:          health.OverCapacity,
+		Health:                consoleTerminalHealth(*health),
+	}, nil
+}
+
+// consoleTerminalHealth projects the store's health record for the console.
+//
+// A PROJECTION, NOT A SECOND MODEL. models.ConsoleTerminalHealth already
+// described this shape and had no producer; this is the missing three lines
+// rather than a new type. It deliberately drops nothing an operator needs and
+// adds nothing the store did not say.
+//
+// WHAT IT MUST NEVER CARRY: the device key, its hash, its prefix, or the site's
+// provisioning key. CredentialActive is a BOOLEAN derived from the hash being
+// present -- which is what authentication actually checks -- and that boolean is
+// the whole of what a browser is told about a terminal's credential.
+func consoleTerminalHealth(h database.TerminalHealth) models.ConsoleTerminalHealth {
+	return models.ConsoleTerminalHealth{
+		PendingJobs:         h.PendingJobs,
+		FailedJobs:          h.FailedJobs,
+		LastApplyError:      h.LastApplyError,
+		LastApplyErrorAt:    h.LastApplyErrorAt,
+		CredentialActive:    h.CredentialActive,
+		OfflinePolicy:       h.OfflinePolicy,
+		OfflineGraceMinutes: h.OfflineGraceMins,
+	}
+}
+
+// ConsoleSetTerminalMode handles PUT /console/terminals/:serial/application-mode
+//
+// A terminal may only be pointed at a capability its company has enabled, or at
+// MULTI_PURPOSE. Refused at assignment rather than discovered at the door.
+func ConsoleSetTerminalMode(c *gin.Context) {
+	var req models.ConsoleTerminalModeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	companyID := c.GetInt64("company_id")
+	err := database.SetDeviceApplicationMode(companyID, c.Param("serial"), req.ApplicationMode)
+
+	switch {
+	case errors.Is(err, models.ErrInvalidApplication):
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":     "Unknown application mode",
+			"available": append([]string{models.AppMultiPurpose}, models.ApplicationOrder...),
+		})
+		return
+	case errors.Is(err, models.ErrApplicationNotEnabled):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "That application is not enabled for this company",
+		})
+		return
+	case errors.Is(err, models.ErrDeviceNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
+		return
+	case err != nil:
+		logError(c, "console set terminal mode", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update terminal"})
+		return
+	}
+
+	// Returns the same shape as the detail read, so a client can replace what it
+	// is holding with the response rather than refetching.
+	detail, err := loadTerminalDetail(companyID, c.Param("serial"))
+	if err != nil {
+		logError(c, "console reload terminal", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update terminal"})
+		return
+	}
+	c.JSON(http.StatusOK, detail)
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+// Paging bounds.
+//
+// A default is applied rather than returning everything: a console list is
+// rendered into a browser, and a company with tens of thousands of people would
+// otherwise serialise the lot on every page load. The ceiling exists so a
+// caller cannot ask for that anyway by passing a large limit.
+const (
+	defaultPeopleLimit = 50
+	maxPeopleLimit     = 200
+	maxSearchLength    = 100
+)
+
+// ConsoleListPeople handles GET /console/people?limit=&offset=&q=
+//
+// People are company-wide in this schema, not site-scoped, so site grants do
+// not narrow this list. That is a documented limitation of the data model
+// rather than an oversight here, and the console reports what the API can
+// actually enforce instead of pretending to a scope it cannot apply.
+//
+// `q` matches the external id or the full name, anywhere and case-insensitively.
+// The search runs in SQL rather than in the browser precisely because the list
+// is bounded: filtering one page of fifty would search the page, not the roster.
+//
+// The site-key API's GET /api/v1/members is deliberately NOT changed to match.
+// Terminals and existing tooling speak that contract, and quietly bounding it
+// would silently truncate a roster somebody depends on being complete.
+func ConsoleListPeople(c *gin.Context) {
+	query := database.PeopleQuery{
+		Search: truncateSearch(strings.TrimSpace(c.Query("q"))),
+		Limit:  boundedQueryInt(c, "limit", defaultPeopleLimit, 1, maxPeopleLimit),
+		Offset: boundedQueryInt(c, "offset", 0, 0, 0),
+	}
+
+	page, err := database.ListConsolePeople(c.GetInt64("company_id"), query)
+	if err != nil {
+		logError(c, "console list people", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve people"})
+		return
+	}
+
+	people := make([]models.ConsolePerson, 0, len(page.People))
+	for _, member := range page.People {
+		people = append(people, consolePerson(member))
+	}
+
+	c.JSON(http.StatusOK, models.ConsolePeoplePage{
+		Count:   len(people),
+		Total:   page.Total,
+		Limit:   query.Limit,
+		Offset:  query.Offset,
+		HasMore: query.Offset+len(people) < page.Total,
+		People:  people,
+	})
+}
+
+// boundedQueryInt reads a query parameter and clamps it.
+//
+// Clamps rather than rejects: a limit of 5000 is a caller asking for as much as
+// it can have, not a malformed request, and failing it would be less useful than
+// answering with the maximum. Anything unparseable falls back to the default for
+// the same reason. A max of 0 means unbounded above, for offset.
+func boundedQueryInt(c *gin.Context, name string, fallback, min, max int) int {
+	raw := c.Query(name)
+	if raw == "" {
+		return fallback
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if max > 0 && value > max {
+		return max
+	}
+	return value
+}
+
+// truncateSearch bounds the search term. A term longer than any stored value
+// cannot match anything, so there is nothing to gain by passing it to the
+// database.
+func truncateSearch(term string) string {
+	if len(term) > maxSearchLength {
+		return term[:maxSearchLength]
+	}
+	return term
+}
+
+// ConsoleGetPerson handles GET /console/people/:external_id
+func ConsoleGetPerson(c *gin.Context) {
+	member, err := database.GetMemberByID(c.GetInt64("company_id"), c.Param("external_id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Person not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "console get person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve person"})
+		return
+	}
+	c.JSON(http.StatusOK, consolePerson(*member))
+}
+
+// ConsoleCreatePerson handles POST /console/people
+//
+// Calls the existing CreateMember, which enqueues the CREATE sync job to every
+// terminal in the company inside the same transaction as the insert. Writing a
+// second insert here would be writing a second, subtly different version of the
+// rule that keeps the fleet in step.
+//
+// Category is optional. people.membership_type is NOT NULL, so something has to
+// be written, but requiring an operator to supply one would be the product
+// assuming a workflow -- a company doing visitor management has no membership.
+func ConsoleCreatePerson(c *gin.Context) {
+	var req models.ConsolePersonRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// FW-09. The console is where an operator TYPES this value, so it is the
+	// one place the constraint can be explained while it can still be changed.
+	// The message names the limit and the reason; "invalid external_id" would
+	// leave somebody guessing at a field they cannot see the shape of.
+	if err := models.ValidateExternalID(req.ExternalID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "field": "external_id"})
+		return
+	}
+
+	category := req.Category
+	if category == "" {
+		category = defaultPersonCategory
+	}
+	active := true
+	if req.Active != nil {
+		active = *req.Active
+	}
+
+	member := models.Member{
+		MemberID:       req.ExternalID,
+		FullName:       req.FullName,
+		MembershipType: category,
+		Active:         active,
+		// No credential. Biometric enrolment happens at a terminal, through the
+		// enrolment flow; the console does not write credentials.
+	}
+
+	err := database.CreateMember(c.GetInt64("company_id"), &member)
+	if database.IsUniqueViolation(err) {
+		c.JSON(http.StatusConflict, gin.H{"error": "A person with that external_id already exists"})
+		return
+	}
+	if err != nil {
+		logError(c, "console create person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create person"})
+		return
+	}
+
+	// A PERSON IS NAMED BY THEIR EXTERNAL ID, not by a UUID: that is the
+	// identifier an operator recognises and the one the wire carries. The
+	// natural-key case recordAudit documents.
+	recordAudit(c, auditPersonCreated, auditTargetPerson, "", member.MemberID, gin.H{
+		"full_name": member.FullName,
+		"category":  member.MembershipType,
+		"active":    member.Active,
+	})
+
+	c.JSON(http.StatusCreated, consolePerson(member))
+}
+
+// defaultPersonCategory fills people.membership_type when a caller supplies
+// nothing. Deliberately generic: the column is a legacy name from when this was
+// a single-purpose product, and the platform has no opinion about what class of
+// person a company records.
+const defaultPersonCategory = "STANDARD"
+
+// ConsoleUpdatePerson handles PUT /console/people/:external_id
+//
+// READS THE PERSON FIRST, AND CARRIES THEIR CREDENTIAL THROUGH UNCHANGED.
+// UpdateMember writes `fingerprint_template = NULLIF($4,”)`, so calling it with
+// an empty template DELETES the person's biometric enrolment. An operator
+// correcting a spelling in a name must not silently unenrol them -- and the
+// console has no business writing credentials at all, in either direction.
+func ConsoleUpdatePerson(c *gin.Context) {
+	companyID := c.GetInt64("company_id")
+	externalID := c.Param("external_id")
+
+	existing, err := database.GetMemberByID(companyID, externalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Person not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "console load person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update person"})
+		return
+	}
+
+	var req models.ConsolePersonRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	member := models.Member{
+		MemberID:       externalID,
+		FullName:       req.FullName,
+		MembershipType: existing.MembershipType,
+		Active:         existing.Active,
+		// Preserved, not cleared. See the note on this handler.
+		FingerprintTemplate: existing.FingerprintTemplate,
+	}
+	if req.Category != "" {
+		member.MembershipType = req.Category
+	}
+	if req.Active != nil {
+		member.Active = *req.Active
+	}
+
+	if err := database.UpdateMember(companyID, &member); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Person not found"})
+			return
+		}
+		logError(c, "console update person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update person"})
+		return
+	}
+
+	// BEFORE AND AFTER for the fields that changed, not just the new value. "Who
+	// deactivated this person" is answerable from the new value alone; "was this
+	// person active last Tuesday" is not, and that is the question a disputed
+	// access refusal turns into.
+	changes := gin.H{}
+	if member.FullName != existing.FullName {
+		changes["full_name"] = gin.H{"from": existing.FullName, "to": member.FullName}
+	}
+	if member.MembershipType != existing.MembershipType {
+		changes["category"] = gin.H{"from": existing.MembershipType, "to": member.MembershipType}
+	}
+	if member.Active != existing.Active {
+		changes["active"] = gin.H{"from": existing.Active, "to": member.Active}
+	}
+	recordAudit(c, auditPersonUpdated, auditTargetPerson, "", externalID, changes)
+
+	c.JSON(http.StatusOK, consolePerson(member))
+}
+
+// ConsoleDeletePerson handles DELETE /console/people/:external_id
+//
+// Soft delete, and the existing call enqueues the DELETE sync job that is the
+// only way an offline terminal ever learns to forget a credential.
+func ConsoleDeletePerson(c *gin.Context) {
+	if err := database.DeleteMember(c.GetInt64("company_id"), c.Param("external_id")); err != nil {
+		logError(c, "console delete person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete person"})
+		return
+	}
+
+	// The record OUTLIVES the row, which is the point. A soft-deleted person is
+	// invisible to every console query, so without this the only trace that they
+	// ever existed would be the sync job that told the terminals to forget them.
+	recordAudit(c, auditPersonDeleted, auditTargetPerson, "", c.Param("external_id"), nil)
+
+	c.Status(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Operators
+// ---------------------------------------------------------------------------
+
+// ConsoleListOperators handles GET /console/operators
+func ConsoleListOperators(c *gin.Context) {
+	users, err := database.ListUsers(c.GetInt64("company_id"))
+	if err != nil {
+		logError(c, "console list operators", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operators"})
+		return
+	}
+
+	operators := make([]models.ConsoleOperator, 0, len(users))
+	for _, user := range users {
+		grants, err := database.ListSiteGrants(user.ID)
+		if err != nil {
+			logError(c, "console list operator grants", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operators"})
+			return
+		}
+		operators = append(operators, consoleOperator(user, grants))
+	}
+
+	c.JSON(http.StatusOK, gin.H{"count": len(operators), "operators": operators})
+}
+
+// ConsoleGetOperator handles GET /console/operators/:operator_id
+func ConsoleGetOperator(c *gin.Context) {
+	user, grants, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, consoleOperator(*user, grants))
+}
+
+// loadConsoleOperator resolves the operator named in the path, within the
+// caller's company. Reports false once it has written an error response.
+func loadConsoleOperator(c *gin.Context) (*models.User, []models.SiteGrant, bool) {
+	user, err := database.GetUserByPublicID(c.GetInt64("company_id"), c.Param("operator_id"))
+	if errors.Is(err, models.ErrUserNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Operator not found"})
+		return nil, nil, false
+	}
+	if err != nil {
+		logError(c, "console get operator", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operator"})
+		return nil, nil, false
+	}
+
+	grants, err := database.ListSiteGrants(user.ID)
+	if err != nil {
+		logError(c, "console list operator grants", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operator"})
+		return nil, nil, false
+	}
+	return user, grants, true
+}
+
+// mayManageRole reports whether the caller is allowed to create or modify an
+// account at the given role.
+//
+// An ADMIN manages everyone below an OWNER but cannot create one, promote
+// anyone to one, or touch an existing one. Otherwise "ADMIN" would be a
+// synonym for "OWNER" one request later, and the distinction the role matrix
+// draws would be decorative.
+func mayManageRole(callerRole, targetRole string) bool {
+	if targetRole == models.RoleOwner {
+		return callerRole == models.RoleOwner
+	}
+	return middleware.RoleAtLeast(callerRole, models.RoleAdmin)
+}
+
+// ConsoleCreateOperator handles POST /console/operators
+func ConsoleCreateOperator(c *gin.Context) {
+	caller := middleware.Operator(c)
+
+	var req models.ConsoleOperatorRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !models.OperatorRoles[req.Role] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": models.ErrInvalidRole.Error()})
+		return
+	}
+	if !mayManageRole(caller.Role, req.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You may not create an operator at that role"})
+		return
+	}
+
+	companyID := c.GetInt64("company_id")
+
+	// AN EMPTY PASSWORD MEANS AN INVITATION, and that is the path the console
+	// offers (PPL-02).
+	//
+	// The old behaviour -- the caller chooses the new operator's password -- is
+	// kept for a deployment that cannot deliver a link at all, but it is no longer
+	// the default and no longer the only option. The realistic consequence of it
+	// being the only option was not hypothetical: initial credentials travelled by
+	// chat in plain text, typically stayed unchanged, and the administrator who
+	// created the account knew the password indefinitely with nothing recording
+	// that they did.
+	//
+	// The invited account is created with a credential nobody holds, so it cannot
+	// be signed in to at all until its owner redeems the link.
+	newUser := models.NewUser{
+		Email:    req.Email,
+		FullName: req.FullName,
+		Password: req.Password,
+		Role:     req.Role,
+	}
+
+	var (
+		user  *models.User
+		token *models.CredentialToken
+		err   error
+	)
+	if strings.TrimSpace(req.Password) == "" {
+		user, token, err = database.CreateInvitedUser(companyID, newUser,
+			caller.UserID, caller.Email)
+	} else {
+		user, err = database.CreateUser(companyID, newUser)
+	}
+
+	switch {
+	case database.IsUniqueViolation(err):
+		c.JSON(http.StatusConflict, gin.H{"error": "That email address is already in use"})
+		return
+	case errors.Is(err, models.ErrInvalidEmail),
+		errors.Is(err, models.ErrPasswordTooShort),
+		errors.Is(err, models.ErrPasswordTooLong),
+		errors.Is(err, models.ErrInvalidRole):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		logError(c, "console create operator", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create operator"})
+		return
+	}
+
+	// Site grants, if the caller supplied any. A failure here is reported, but
+	// the account exists: replaying the grants is a retry of one request, while
+	// rolling back an account whose password the caller has already chosen is
+	// not something the caller can easily redo.
+	if len(req.SiteIDs) > 0 {
+		if err := database.ReplaceSiteGrants(companyID, user.ID, req.SiteIDs); err != nil {
+			if errors.Is(err, models.ErrSiteNotFound) {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":    "The operator was created, but one or more sites were not found",
+					"operator": consoleOperator(*user, nil),
+				})
+				return
+			}
+			logError(c, "console grant sites", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "The operator was created, but its sites could not be set"})
+			return
+		}
+	}
+
+	grants, err := database.ListSiteGrants(user.ID)
+	if err != nil {
+		logError(c, "console list operator grants", err)
+		grants = nil
+	}
+
+	action := auditOperatorCreated
+	if token != nil {
+		action = auditOperatorInvited
+	}
+	recordAudit(c, action, auditTargetOperator, user.PublicID, user.Email, gin.H{
+		"role":    user.Role,
+		"invited": token != nil,
+		"sites":   len(req.SiteIDs),
+	})
+
+	// The operator body is unchanged, and the invitation is an ADDITIONAL field.
+	// A client written against the previous shape keeps working; one that knows
+	// about invitations finds the link where it expects it.
+	if token == nil {
+		c.JSON(http.StatusCreated, consoleOperator(*user, grants))
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"operator":   consoleOperator(*user, grants),
+		"invitation": token,
+		"delivery":   invitationDeliveryNotice,
+	})
+}
+
+// ConsoleUpdateOperator handles PUT /console/operators/:operator_id
+//
+// Role, active state and password, each optional.
+//
+// AN OPERATOR MAY NOT CHANGE THEIR OWN ROLE OR DISABLE THEMSELVES. Not a
+// courtesy: the sole OWNER of a company demoting themselves would leave nobody
+// able to manage operators, with no way back that does not involve the
+// database. Password changes are self-service through /auth/password.
+func ConsoleUpdateOperator(c *gin.Context) {
+	caller := middleware.Operator(c)
+	target, _, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+
+	var req models.ConsoleOperatorUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !mayManageRole(caller.Role, target.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You may not modify that operator"})
+		return
+	}
+	if req.Role != nil && !mayManageRole(caller.Role, *req.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You may not assign that role"})
+		return
+	}
+	if target.ID == caller.UserID && (req.Role != nil || req.Active != nil) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "You cannot change your own role or disable your own account",
+		})
+		return
+	}
+
+	companyID := c.GetInt64("company_id")
+
+	if req.Role != nil {
+		if err := database.SetUserRole(companyID, target.ID, *req.Role); err != nil {
+			if errors.Is(err, models.ErrInvalidRole) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			logError(c, "console set operator role", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update operator"})
+			return
+		}
+
+		// ITS OWN AUDIT ACTION, not a field inside OPERATOR_UPDATED. A privilege
+		// change is the single most consequential thing this endpoint does, and
+		// somebody scanning the trail for it should not have to open every update
+		// record to find out whether it contained one.
+		recordAudit(c, auditOperatorRoleSet, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"from": target.Role, "to": *req.Role})
+	}
+
+	if req.Active != nil {
+		if err := database.SetUserActive(companyID, target.ID, *req.Active); err != nil {
+			logError(c, "console set operator active", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update operator"})
+			return
+		}
+	}
+
+	if req.Password != nil {
+		// An administrative reset revokes every session the target holds --
+		// pass 0, sparing none. Someone whose password an administrator has
+		// just changed should not still be signed in somewhere.
+		if err := database.SetUserPassword(target.ID, *req.Password, 0); err != nil {
+			if errors.Is(err, models.ErrPasswordTooShort) || errors.Is(err, models.ErrPasswordTooLong) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			logError(c, "console reset operator password", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update operator"})
+			return
+		}
+
+		// The administrator now knows this operator's password, which is exactly
+		// what the reset-link route exists to avoid -- so the trail says an
+		// administrator chose it rather than recording it as an ordinary update.
+		// The password itself never reaches this call.
+		recordAudit(c, auditOperatorPasswordSet, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"chosen_by": "administrator"})
+	}
+
+	if req.Active != nil {
+		recordAudit(c, auditOperatorUpdated, auditTargetOperator, target.PublicID,
+			target.Email, gin.H{"active": gin.H{"from": target.Active, "to": *req.Active}})
+	}
+
+	updated, grants, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, consoleOperator(*updated, grants))
+}
+
+// ConsoleDeleteOperator handles DELETE /console/operators/:operator_id
+func ConsoleDeleteOperator(c *gin.Context) {
+	caller := middleware.Operator(c)
+	target, _, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+
+	if !mayManageRole(caller.Role, target.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You may not remove that operator"})
+		return
+	}
+	if target.ID == caller.UserID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You cannot remove your own account"})
+		return
+	}
+
+	if err := database.SoftDeleteUser(c.GetInt64("company_id"), target.ID); err != nil {
+		if errors.Is(err, models.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Operator not found"})
+			return
+		}
+		logError(c, "console delete operator", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove operator"})
+		return
+	}
+
+	// The role goes into the record because the account is gone by the time
+	// anybody reads it. audit_events denormalises its actor for the same reason,
+	// in the other direction.
+	recordAudit(c, auditOperatorDeleted, auditTargetOperator, target.PublicID,
+		target.Email, gin.H{"role": target.Role})
+
+	c.Status(http.StatusNoContent)
+}
+
+// ConsoleGetOperatorSites handles GET /console/operators/:operator_id/sites
+func ConsoleGetOperatorSites(c *gin.Context) {
+	user, grants, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"count": len(grants),
+		"sites": grants,
+		// An empty grant set is not "no access": it means the operator is not
+		// scoped, and reaches every site in the company. The flag says so
+		// rather than leaving a dashboard to infer it from an empty array.
+		"all_sites": middleware.RoleAtLeast(user.Role, models.RoleAdmin) || len(grants) == 0,
+	})
+}
+
+// ConsoleSetOperatorSites handles PUT /console/operators/:operator_id/sites
+//
+// Replaces the grants wholesale. Every site is resolved inside the caller's own
+// company before anything is written, so a grant can never point across a
+// tenant boundary, and an unknown site fails the whole call rather than being
+// skipped.
+func ConsoleSetOperatorSites(c *gin.Context) {
+	caller := middleware.Operator(c)
+	target, _, ok := loadConsoleOperator(c)
+	if !ok {
+		return
+	}
+
+	if !mayManageRole(caller.Role, target.Role) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You may not modify that operator"})
+		return
+	}
+
+	var req models.ConsoleSiteGrantsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	companyID := c.GetInt64("company_id")
+	err := database.ReplaceSiteGrants(companyID, target.ID, req.SiteIDs)
+	switch {
+	case errors.Is(err, models.ErrSiteNotFound):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "One or more sites were not found"})
+		return
+	case errors.Is(err, models.ErrUserNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Operator not found"})
+		return
+	case err != nil:
+		logError(c, "console set operator sites", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update site access"})
+		return
+	}
+
+	grants, err := database.ListSiteGrants(target.ID)
+	if err != nil {
+		logError(c, "console list operator grants", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update site access"})
+		return
+	}
+	if grants == nil {
+		grants = []models.SiteGrant{}
+	}
+
+	// The COUNT and whether the operator ended up unrestricted, rather than the
+	// list of site ids. The distinction that matters afterwards is "were they
+	// narrowed or widened", and an empty grant set means unrestricted -- which
+	// reads as the opposite of what it is unless it is stated.
+	recordAudit(c, auditOperatorSitesSet, auditTargetOperator, target.PublicID,
+		target.Email, gin.H{
+			"sites":     len(grants),
+			"all_sites": middleware.RoleAtLeast(target.Role, models.RoleAdmin) || len(grants) == 0,
+		})
+
+	c.JSON(http.StatusOK, gin.H{
+		"count":     len(grants),
+		"sites":     grants,
+		"all_sites": middleware.RoleAtLeast(target.Role, models.RoleAdmin) || len(grants) == 0,
+	})
+}

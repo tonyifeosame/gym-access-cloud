@@ -3,7 +3,9 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -68,17 +70,31 @@ func enqueuePersonChangeTx(tx *sql.Tx, companyID int64, jobType string, member *
 		return fmt.Errorf("building sync payload: %w", err)
 	}
 
+	// SCOPED BY PERMISSION, not by company (SEC-04). `p` and `d` are the
+	// aliases rosterMembershipPredicate expects; see database/roster.go for what
+	// the rule is and why DENY is only subtracted when it is unconditional.
+	//
+	// A DELETE is exempt from the predicate. A person being removed, deactivated
+	// or losing their permission must be withdrawn from terminals that were
+	// holding them -- and by the time this runs, the rule that put them there
+	// may already be gone, so testing membership would skip exactly the
+	// terminals that need telling.
+	membership := rosterMembershipPredicate
+	if jobType == "DELETE" || deleted {
+		membership = "TRUE"
+	}
+
 	query := `INSERT INTO sync_jobs
 	          (site_id, device_id, job_type, entity_type, entity_id, entity_external_id,
 	           payload, protocol_version, status, next_attempt_at)
 	          SELECT d.site_id, d.id, $1, 'PERSON', $2, $3, $4::jsonb, $5, 'PENDING', CURRENT_TIMESTAMP
 	            FROM devices d
 	            JOIN sites s ON s.id = d.site_id
+	            JOIN people p ON p.id = $2
 	           WHERE s.company_id = $6
-	             AND d.active = TRUE
-	             AND d.deleted_at IS NULL
-	             AND d.status <> 'DISABLED'
-	             AND s.deleted_at IS NULL`
+	             AND s.deleted_at IS NULL
+	             AND ` + deviceIsSyncable + `
+	             AND (` + membership + `)`
 
 	_, err = tx.Exec(query, jobType, member.ID, member.MemberID, payload,
 		models.SyncProtocolVersion, companyID)
@@ -104,6 +120,78 @@ func EnqueueSettingsJob(deviceID int64, settings any) error {
 	return err
 }
 
+// enqueueCurrentSettingsTx queues ONE settings push carrying what a device's
+// site is running right now, replacing any settings job already waiting for it.
+//
+// ---------------------------------------------------------------------------
+// WHY A DEVICE HAS TO BE SEEDED WITH THIS, AND NOT ONLY FANNED OUT TO
+// ---------------------------------------------------------------------------
+//
+// The offline policy is a safety control -- see device_settings.go for what it
+// costs to get it wrong -- and it reaches a terminal by exactly one route: a
+// SETTINGS job. THE FIRMWARE DOES NOT PULL SETTINGS. `GET /devices/settings`
+// exists and is documented and no shipped build calls it; the terminal's eight
+// routes are heartbeat, jobs, jobs/complete, access/log, enrollment/result,
+// credentials/pending, credentials/placement and claim.
+//
+// So a terminal registered at a site that had already chosen DENY_ALL received
+// its roster, received no policy, and ran the firmware default --
+// CACHED_INDEFINITE, chosen so that upgrading a deployed unit could not change
+// what its door did -- while the console showed the site as DENY_ALL. It
+// corrected itself only when something else happened to push settings to that
+// device: the next edit to the site, a compaction, a relocation or a resync. At
+// a small site none of those need ever happen.
+//
+// The snapshot path already did this, with the note "since the queued SETTINGS
+// job was just cancelled". Registration was the one seeding path that did not,
+// so both now call this and cannot drift apart.
+//
+// ---------------------------------------------------------------------------
+// THE MERGE IS THE SAME MERGE, IN SQL
+// ---------------------------------------------------------------------------
+//
+// mergeDeviceSettings layers the validated policy COLUMNS over the free-form
+// blob, so an operator cannot defeat a safety control by writing raw JSON.
+// Concatenation takes the right-hand side on a key collision, which is that
+// precedence; a blob that is not an object is treated as empty rather than
+// failing the seed, because a malformed free-form edit must not be able to stop
+// the policy being delivered.
+//
+// The DELETE first is what makes this exactly one job. Re-registration is the
+// documented recovery for a lost credential, and three recoveries must not
+// leave three identical pushes in a backlog the capacity guard reads. Replacing
+// a pending push with the current settings is never a downgrade: what is being
+// discarded is older than what replaces it.
+func enqueueCurrentSettingsTx(tx *sql.Tx, deviceID int64) error {
+	if _, err := tx.Exec(`
+		DELETE FROM sync_jobs
+		 WHERE device_id = $1 AND job_type = 'SETTINGS' AND status = 'PENDING'`,
+		deviceID); err != nil {
+		return fmt.Errorf("clearing the pending settings push: %w", err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
+		                       payload, protocol_version, status)
+		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
+		       jsonb_build_object(
+		           'settings_version', s.settings_version,
+		           'settings',
+		           (CASE WHEN jsonb_typeof(s.settings) = 'object'
+		                 THEN s.settings ELSE '{}'::jsonb END)
+		           || jsonb_build_object(
+		                  'offline_policy', s.offline_policy,
+		                  'offline_grace_minutes', s.offline_grace_minutes)
+		       ),
+		       $2, 'PENDING'
+		  FROM devices d JOIN sites s ON s.id = d.site_id
+		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
+		deviceID, models.SyncProtocolVersion); err != nil {
+		return fmt.Errorf("enqueueing the settings push: %w", err)
+	}
+	return nil
+}
+
 // enqueueSettingsFanoutTx pushes a site's settings to every device at that site.
 // Runs on the caller's transaction so the settings write and its delivery
 // records commit together, exactly as person changes do.
@@ -123,13 +211,20 @@ func enqueueSettingsFanoutTx(tx *sql.Tx, siteID int64, payload []byte) error {
 	return nil
 }
 
-// GetSiteSettings returns a site's current settings and their version
+// GetSiteSettings returns a site's current settings, their version, and the
+// offline policy actually in force.
+//
+// The policy columns are read here rather than left to the caller so that every
+// surface showing a site's settings shows the same thing the terminals at that
+// site are running. Reading the blob alone is what made an inert
+// `offline_grace_minutes` in the free-form object look real.
 func GetSiteSettings(siteID int64) (*models.SiteSettings, error) {
 	var s models.SiteSettings
 	var payload []byte
 	err := DB.QueryRow(
-		`SELECT settings, settings_version FROM sites WHERE id = $1 AND deleted_at IS NULL`,
-		siteID).Scan(&payload, &s.Version)
+		`SELECT settings, settings_version, offline_policy, offline_grace_minutes
+		   FROM sites WHERE id = $1 AND deleted_at IS NULL`,
+		siteID).Scan(&payload, &s.Version, &s.OfflinePolicy, &s.OfflineGraceMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +235,19 @@ func GetSiteSettings(siteID int64) (*models.SiteSettings, error) {
 // UpdateSiteSettings replaces a site's settings, bumps the version, and fans a
 // SETTINGS job out to every device at the site -- all in one transaction.
 func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSettings, error) {
+	// F3. The two policy keys are REFUSED in the free-form object rather than
+	// silently dropped, and the reason is that dropping them is what produced
+	// the trap: the write succeeded, the read showed the value back, and the
+	// merge overwrote it before it ever reached a terminal. An operator who set
+	// a grace window this way was told it had taken effect and it had not.
+	//
+	// The check is here, at the store, so both mountings of the handler and any
+	// future caller get it -- the console route and the site-key route are the
+	// same code, but that is a fact about today's routing table.
+	if err := models.RejectReservedSettingsKeys(settings); err != nil {
+		return nil, err
+	}
+
 	tx, err := DB.Begin()
 	if err != nil {
 		return nil, err
@@ -154,8 +262,9 @@ func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSet
 		        settings_version = settings_version + 1,
 		        settings_updated_at = CURRENT_TIMESTAMP
 		  WHERE id = $2 AND deleted_at IS NULL
-		  RETURNING settings, settings_version`,
-		[]byte(settings), siteID).Scan(&stored, &result.Version)
+		  RETURNING settings, settings_version, offline_policy, offline_grace_minutes`,
+		[]byte(settings), siteID).
+		Scan(&stored, &result.Version, &result.OfflinePolicy, &result.OfflineGraceMinutes)
 	if err != nil {
 		return nil, err
 	}
@@ -163,12 +272,18 @@ func UpdateSiteSettings(siteID int64, settings json.RawMessage) (*models.SiteSet
 
 	// The job payload carries the version so a device can discard a stale
 	// settings push it receives after a newer one.
-	payload, err := json.Marshal(models.SettingsSyncPayload{
-		SettingsVersion: result.Version,
-		Settings:        stored,
-	})
+	//
+	// Built by deviceSettingsPayloadTx rather than from `stored` directly, so
+	// the validated offline-policy columns are layered over the free-form blob
+	// exactly as GET /devices/settings does it. Marshalling `stored` here --
+	// which is what this did -- meant an operator editing the settings object
+	// pushed a payload with NO offline policy in it, and a terminal that had
+	// been told DENY_ALL would keep the policy only because absent keys are
+	// treated as "leave it alone". The two paths must not be able to describe
+	// different configurations.
+	payload, _, err := deviceSettingsPayloadTx(tx, siteID)
 	if err != nil {
-		return nil, fmt.Errorf("building settings payload: %w", err)
+		return nil, err
 	}
 
 	if err := enqueueSettingsFanoutTx(tx, siteID, payload); err != nil {
@@ -214,7 +329,10 @@ func enqueueBootstrapJobs(db execer, deviceID int64) (int, error) {
 	            JOIN people p ON p.company_id = s.company_id
 	           WHERE d.id = $2
 	             AND d.deleted_at IS NULL
-	             AND p.deleted_at IS NULL`
+	             AND p.deleted_at IS NULL
+	             -- SEC-04: a newly registered terminal is seeded with the people
+	             -- its permissions cover, not with the company's whole roster.
+	             AND ` + rosterMembershipPredicate
 
 	result, err := db.Exec(query, models.SyncProtocolVersion, deviceID)
 	if err != nil {
@@ -439,16 +557,68 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 	}
 	defer tx.Rollback()
 
+	superseded, err := compactDeviceBacklogTx(tx, deviceID, "superseded by full sync")
+	if err != nil {
+		// The refusal is recorded after the rollback, not inside it. See
+		// RecordRosterOverflow: a trace written on the transaction that was
+		// abandoned would be abandoned with it, and the trace is the point.
+		var overflow *RosterCapacityError
+		if errors.As(err, &overflow) {
+			tx.Rollback()
+			if recordErr := RecordRosterOverflow(deviceID, overflow.RosterSize,
+				overflow.Capacity); recordErr != nil {
+				log.Printf("recording roster overflow for device %d: %v", deviceID, recordErr)
+			}
+		}
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	// It fit. A terminal that was over capacity and no longer is must stop being
+	// reported as over capacity.
+	if err := ClearRosterOverflow(deviceID); err != nil {
+		log.Printf("clearing roster overflow for device %d: %v", deviceID, err)
+	}
+	return superseded, nil
+}
+
+// compactDeviceBacklogTx is the whole of compaction, on the caller's
+// transaction.
+//
+// Factored out for RELOCATION (MoveTerminal), which has to move a terminal
+// between sites and rebuild its state ATOMICALLY. A committed move whose
+// snapshot failed to enqueue would leave a terminal pointing at its new site
+// with an empty queue -- still holding the OLD site's people, and with nothing
+// durable scheduled to say otherwise.
+//
+// `reason` is recorded on the cancelled jobs. Compaction and relocation both
+// supersede work, but an operator reading a cancelled queue should be able to
+// tell "your backlog was collapsed" from "this terminal was moved".
+func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, error) {
+	// FW-01, and it is checked BEFORE anything is cancelled.
+	//
+	// Order is the whole point. Cancelling the queue and then discovering the
+	// replacement snapshot cannot be applied would leave the terminal with no
+	// queued work AND a roster it can never be brought in line with -- strictly
+	// worse than the backlog it started with. Refusing first leaves the existing
+	// queue exactly as it was.
+	if err := guardRosterCapacityTx(tx, deviceID); err != nil {
+		return 0, err
+	}
+
 	// Retire whatever was queued. These are superseded, not applied, so they
 	// are CANCELLED rather than COMPLETED -- acknowledged_at stays null and the
 	// "only acked jobs are complete" invariant holds.
 	result, err := tx.Exec(`
 		UPDATE sync_jobs
 		   SET status = 'CANCELLED',
-		       error_message = 'superseded by full sync'
+		       error_message = $2
 		 WHERE device_id = $1
 		   AND acknowledged_at IS NULL
-		   AND status IN ('PENDING', 'FAILED')`, deviceID)
+		   AND status IN ('PENDING', 'FAILED')`, deviceID, reason)
 	if err != nil {
 		return 0, err
 	}
@@ -471,10 +641,16 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  LEFT JOIN LATERAL (
+		       -- SCOPED BY PERMISSION (SEC-04). The snapshot is the AUTHORITATIVE
+		       -- roster, so listing the whole company here would make the terminal
+		       -- immediately re-add everybody the change fan-out correctly withheld
+		       -- -- the recovery path would silently undo the scoping.
 		       SELECT count(*) AS n,
 		              jsonb_agg(p.external_id ORDER BY p.external_id) AS ids
 		         FROM people p
-		        WHERE p.company_id = s.company_id AND p.deleted_at IS NULL
+		        WHERE p.company_id = s.company_id
+		          AND p.deleted_at IS NULL
+		          AND `+rosterMembershipPredicate+`
 		  ) roster ON TRUE
 		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
 		deviceID, models.SyncProtocolVersion)
@@ -500,23 +676,17 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  JOIN people p ON p.company_id = s.company_id
-		 WHERE d.id = $1 AND d.deleted_at IS NULL AND p.deleted_at IS NULL`,
+		 WHERE d.id = $1 AND d.deleted_at IS NULL AND p.deleted_at IS NULL
+		   AND `+rosterMembershipPredicate,
 		deviceID, models.SyncProtocolVersion)
 	if err != nil {
 		return 0, fmt.Errorf("enqueueing snapshot records: %w", err)
 	}
 
-	// Current settings, since the queued SETTINGS job was just cancelled
-	_, err = tx.Exec(`
-		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
-		                       payload, protocol_version, status)
-		SELECT d.site_id, d.id, 'SETTINGS', 'SETTINGS',
-		       jsonb_build_object('settings_version', s.settings_version, 'settings', s.settings),
-		       $2, 'PENDING'
-		  FROM devices d JOIN sites s ON s.id = d.site_id
-		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
-		deviceID, models.SyncProtocolVersion)
-	if err != nil {
+	// Current settings, since the queued SETTINGS job was just cancelled.
+	// Shared with the registration seed so the two cannot describe different
+	// configurations -- see enqueueCurrentSettingsTx.
+	if err = enqueueCurrentSettingsTx(tx, deviceID); err != nil {
 		return 0, fmt.Errorf("enqueueing snapshot settings: %w", err)
 	}
 
@@ -526,9 +696,6 @@ func CompactDeviceBacklog(deviceID int64) (int, error) {
 		return 0, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return int(superseded), nil
 }
 
@@ -543,10 +710,23 @@ func FetchDeviceWork(deviceID int64, limit int) ([]models.SyncJob, bool, error) 
 
 	compacted := false
 	if backlog > compactionThreshold() {
-		if _, err := CompactDeviceBacklog(deviceID); err != nil {
+		switch _, err := CompactDeviceBacklog(deviceID); {
+		case err == nil:
+			compacted = true
+
+		case errors.Is(err, ErrRosterExceedsCapacity):
+			// THE POLL STILL SUCCEEDS. This terminal cannot be given an
+			// authoritative roster, which CompactDeviceBacklog has already
+			// recorded where an operator will see it -- but it can still be
+			// given the individual jobs already queued for it, and failing its
+			// poll would take away the work it CAN do on top of the work it
+			// cannot. A door that is behind is better than a door that is also
+			// no longer talking to the platform.
+			log.Printf("device %d: backlog compaction withheld: %v", deviceID, err)
+
+		default:
 			return nil, false, err
 		}
-		compacted = true
 	}
 
 	jobs, err := GetPendingJobsForDevice(deviceID, limit)

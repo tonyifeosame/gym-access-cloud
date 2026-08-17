@@ -1,0 +1,1655 @@
+/*
+ * Shared furniture: tables, forms, dialogs, notifications, badges, paging.
+ *
+ * Kept apart from base.css, which dresses the shell and the login page. These
+ * are the pieces every resource screen is assembled from, and the layout rules
+ * live beside the component they serve rather than in one distant responsive
+ * block — so a change to a component cannot leave its small-screen behaviour
+ * behind.
+ *
+ * BREAKPOINTS. Two, and each marks a real change rather than a device name:
+ *
+ *   900px   the side navigation stops fitting beside the content
+ *   680px   a table stops fitting at all, and rows become cards
+ *
+ * This console is used standing in front of a door with a phone, so the second
+ * one is a requirement rather than a nicety.
+ */
+
+/* Available to screen readers, absent from the page. Behind required-field
+ * markers, live-region labels, and icon-only buttons. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A visible focus ring on everything interactive. Stated once here because
+ * resets remove the browser default often enough that assuming it is present
+ * is how keyboard users end up unable to see where they are. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* --- page ---------------------------------------------------------------- */
+
+.page__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.page__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.page__breadcrumb {
+  margin-bottom: var(--space-2);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.page__breadcrumb a {
+  color: inherit;
+}
+
+/* --- buttons ------------------------------------------------------------- */
+
+.button--danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  /* Same reason as the primary button: the dark theme lightens the fill. */
+  color: var(--on-danger);
+}
+
+.button--danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* --- table --------------------------------------------------------------- */
+
+.table-wrap {
+  /* The table scrolls inside its own box rather than pushing the page
+   * sideways; a horizontally scrolling document breaks every other screen. */
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+/* Names the table for assistive technology. The page heading already says it
+ * visually, so showing it again would be noise. */
+.table__caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.table th,
+.table td {
+  padding: var(--space-3) var(--space-4);
+  text-align: start;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.table thead th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.table tbody tr:last-child th,
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table__cell--end {
+  text-align: end;
+}
+
+.table__row--clickable {
+  cursor: pointer;
+}
+
+.table__row--clickable:hover {
+  background: var(--surface-raised);
+}
+
+.table__row--clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* --- forms --------------------------------------------------------------- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+
+.field__hint {
+  margin: 0 0 var(--space-1);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.field__hint--selection {
+  margin-top: var(--space-1);
+  margin-bottom: 0;
+}
+
+/* Reserved rather than conditional: a live region inserted at the same moment
+ * as its text is not reliably announced, so the element is always present and
+ * merely empty. */
+.field__error {
+  margin: var(--space-1) 0 0;
+  min-height: 1.25em;
+  font-size: 13px;
+  color: var(--danger);
+}
+
+.field--invalid .field__input {
+  border-color: var(--danger);
+}
+
+.field__required {
+  color: var(--danger);
+}
+
+.field__input--mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.field__select {
+  appearance: auto;
+}
+
+textarea.field__input {
+  resize: vertical;
+  min-height: 6em;
+}
+
+.fieldset {
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.fieldset__legend {
+  padding-inline: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fieldset__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.checkbox__input {
+  margin-top: 1px;
+  /*
+   * 24px, WHICH IS A CONFORMANCE FLOOR RATHER THAN A PREFERENCE. WCAG 2.2
+   * SC 2.5.8 (Target Size, Minimum, AA) requires 24x24 CSS pixels, and this was
+   * 16x16 — with a comment claiming it was "a target that can actually be hit
+   * on a phone", which measurement in a real browser at 360px disproved.
+   *
+   * The checkbox groups here are site grants: a list of similar rows where
+   * picking the one below the one you meant silently changes which sites an
+   * operator can reach. That is the case the size floor exists for, and it is
+   * not one to be clever about — the visual weight is the price.
+   */
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.checkbox__label {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.checkbox__description {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/*
+ * A radio group where each option carries its consequence.
+ *
+ * SEPARATE FROM .fieldset__options RATHER THAN REUSING IT, because that one caps
+ * its height and scrolls — correct for a long list of site grants, wrong here.
+ * These options are alternatives somebody has to READ AND COMPARE before
+ * choosing (what a door does during an outage), and putting three paragraphs
+ * inside a 260px scroll box means only one is visible at a time, which defeats
+ * the reason the control is radios rather than a select.
+ */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+/* 24px, the WCAG 2.2 SC 2.5.8 floor. Same reasoning as .checkbox__input. */
+.choice__input {
+  margin-top: 2px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+
+.choice__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.choice__label {
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choice__description {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.form__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.form__error {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.form__error p {
+  margin: 0;
+}
+
+/* --- dialog -------------------------------------------------------------- */
+
+.dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgba(16, 24, 40, 0.5);
+  overflow-y: auto;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100vh - var(--space-6));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.24);
+}
+
+.dialog--wide {
+  max-width: 760px;
+}
+
+.dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) 0;
+}
+
+.dialog__title {
+  margin: 0;
+  font-size: 17px;
+}
+
+.dialog--danger .dialog__title {
+  color: var(--danger);
+}
+
+.dialog__close {
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.dialog__description {
+  margin: var(--space-2) 0 0;
+  padding-inline: var(--space-5);
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.dialog__body {
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  flex-wrap: wrap;
+}
+
+.confirm__detail {
+  margin: 0 0 var(--space-3);
+  font-size: 14px;
+}
+
+.confirm__error {
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+/* --- notifications ------------------------------------------------------- */
+
+.notifications {
+  position: fixed;
+  z-index: 200;
+  bottom: var(--space-4);
+  inset-inline-end: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(380px, calc(100vw - var(--space-5)));
+  pointer-events: none;
+}
+
+.notifications > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.notification {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
+/* A coloured edge AND the text; colour never carries the meaning alone. */
+.notification--success {
+  border-inline-start: 4px solid var(--success);
+}
+
+.notification--error {
+  border-inline-start: 4px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.notification--info {
+  border-inline-start: 4px solid var(--accent);
+}
+
+.notification__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.notification__message {
+  margin: 0;
+}
+
+.notification__dismiss {
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+/* --- badges -------------------------------------------------------------- */
+
+.badge {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge--positive {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.badge--warning {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.badge--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.badge--info {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.badge-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.badge__note {
+  font-size: 12px;
+  color: var(--warning);
+}
+
+/* --- timestamps, search, pagination -------------------------------------- */
+
+.timestamp {
+  white-space: nowrap;
+}
+
+.timestamp--empty {
+  color: var(--text-muted);
+}
+
+.search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-width: 380px;
+  flex: 1 1 240px;
+}
+
+.search__control {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.search__control .field__input {
+  flex: 1;
+}
+
+.spinner--inline {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+.refreshing {
+  display: inline-flex;
+  align-items: center;
+  margin-inline-start: var(--space-2);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding-top: var(--space-3);
+  font-size: 14px;
+}
+
+.pagination__status {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.pagination__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.pagination__page {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+
+.restricted-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.notice--warning {
+  border-color: var(--warning);
+}
+
+/* --- responsive ---------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  /* The side navigation moves above the content and lies flat; below this
+   * width it would spend a third of the viewport on six links. */
+  .shell__body {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sidenav {
+    flex: none;
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .sidenav__section {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .sidenav__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .sidenav__title {
+    padding-inline: 0;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    row-gap: var(--space-2);
+  }
+
+  .topbar__context {
+    margin-inline-start: 0;
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .topbar__account {
+    margin-inline-start: auto;
+  }
+}
+
+@media (max-width: 680px) {
+  /* A table cannot shrink below its columns, so each row becomes a card and
+   * every cell carries its column name. Done with data-label and CSS rather
+   * than a second DOM, so tests and assistive technology see one tree. */
+  .table,
+  .table tbody,
+  .table tr,
+  .table th,
+  .table td {
+    display: block;
+  }
+
+  .table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .table__row {
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table th,
+  .table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-4);
+    padding: var(--space-1) 0;
+    border-bottom: 0;
+    text-align: start;
+  }
+
+  .table td::before,
+  .table tbody th::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  /* Detail that does not earn space on a phone. */
+  .table__cell--secondary {
+    display: none;
+  }
+
+  .table__cell--end {
+    text-align: end;
+  }
+
+  .dialog {
+    max-width: none;
+  }
+
+  .notifications {
+    inset-inline: var(--space-3);
+    width: auto;
+  }
+
+  .pagination {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pagination__controls {
+    justify-content: space-between;
+  }
+}
+
+/* ===========================================================================
+ * Sites module
+ * ======================================================================== */
+
+.table__link {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.table__link:hover {
+  text-decoration: underline;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.panel__header {
+  margin-bottom: var(--space-4);
+}
+
+/* --- editor tabs --------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+}
+
+.tab {
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.tab--active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- the one-time credential --------------------------------------------
+ *
+ * Loud on purpose. This is the only screen in the console where losing track
+ * of what is on it costs a credential that cannot be recovered, so it does not
+ * look like the rest of the console.
+ */
+
+.credential {
+  border: 2px solid var(--warning);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  background: var(--surface-raised);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.credential__heading {
+  margin: 0;
+  font-size: 16px;
+}
+
+/* The warning sits ABOVE the value, so it is read on the way to the thing
+ * being copied rather than after. */
+.credential__warning {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 14px;
+}
+
+.credential__impact {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.credential__value {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.credential__row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.credential__input {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.credential__acknowledge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.credential__nudge {
+  margin: 0;
+  font-size: 13px;
+  color: var(--warning);
+}
+
+.copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.copy__status {
+  font-size: 13px;
+  color: var(--success);
+}
+
+@media (max-width: 680px) {
+  .credential__acknowledge {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .credential__row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .copy {
+    justify-content: space-between;
+  }
+}
+
+/* ===========================================================================
+ * Terminals module
+ * ======================================================================== */
+
+/* Health tiles. Colour marks the tone; the label always carries the meaning,
+ * so nothing here depends on seeing it. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.tile {
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tile__label {
+  margin: 0 0 var(--space-1);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.tile__value {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 650;
+  line-height: 1.1;
+}
+
+.tile--positive {
+  border-inline-start: 3px solid var(--success);
+}
+
+.tile--warning {
+  border-inline-start: 3px solid var(--warning);
+}
+
+.tile--danger {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.toolbar__toggle {
+  align-self: flex-end;
+  padding-bottom: var(--space-2);
+}
+
+.filter-status {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.firmware {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* --- key/value detail list ------------------------------------------------
+ *
+ * A description list rather than a table: these are properties of one object,
+ * not rows of a collection, and a screen reader announces them as pairs.
+ */
+.detail-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(160px, auto) 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.detail-list__row {
+  display: contents;
+}
+
+.detail-list dt {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.detail-list dd {
+  margin: 0;
+  font-size: 14px;
+}
+
+@media (max-width: 680px) {
+  .detail-list {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+
+  /* Each pair becomes a stacked block rather than two orphaned columns. */
+  .detail-list__row {
+    display: block;
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .detail-list dt {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .toolbar__toggle {
+    align-self: flex-start;
+    padding-bottom: 0;
+  }
+}
+
+/* ===========================================================================
+ * Operators module
+ * ======================================================================== */
+
+.operator-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* Site grants, as a list of links rather than a sentence -- each one is
+ * somewhere the reader may want to go. */
+.chip-list {
+  list-style: none;
+  margin: var(--space-2) 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: inherit;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ===========================================================================
+ * Applications module
+ * ======================================================================== */
+
+.capability-list {
+  list-style: none;
+  margin: 0 0 var(--space-5);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.capability {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* An enabled capability is marked by an edge AND by its badge; the colour is
+ * never the only signal. */
+.capability[data-enabled='true'] {
+  border-inline-start: 3px solid var(--success);
+}
+
+.capability__main {
+  min-width: 0;
+}
+
+.capability__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-1);
+  font-size: 16px;
+}
+
+.capability__title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.capability__title a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.capability__description {
+  margin: 0 0 var(--space-2);
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.capability__meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* What a capability does NOT do yet, stated specifically. Full text colour
+ * rather than muted: this is the sentence a buyer is entitled to read, and
+ * greying it out would be a way of not quite saying it. */
+.capability__gap {
+  margin: 0 0 var(--space-2);
+  font-size: 14px;
+  color: var(--text);
+  max-width: 68ch;
+  padding-inline-start: var(--space-3);
+  border-inline-start: 2px solid var(--warning);
+}
+
+.capability__legend {
+  margin: var(--space-2) 0;
+  padding-inline-start: var(--space-5);
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.capability__action {
+  flex: 0 0 auto;
+}
+
+.code-block {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-x: auto;
+}
+
+/* ===========================================================================
+ * Lifecycle options
+ *
+ * Terminal disable / revoke / retire, presented as separate rows rather than
+ * as one control with a mode. The visual weight is deliberately EVEN: making
+ * the destructive ones smaller or greyer would read as "advanced", and an
+ * operator hunting for the right one under time pressure would skip them.
+ * The distinction is carried by the words and by the button tone, not by
+ * hiding anything.
+ * ======================================================================== */
+
+.lifecycle {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.lifecycle__option {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--border);
+}
+
+.lifecycle__option:last-child {
+  border-block-end: none;
+}
+
+.lifecycle__text {
+  min-width: 0;
+}
+
+.lifecycle__title {
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.lifecycle__detail {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 62ch;
+}
+
+.lifecycle__option .button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 680px) {
+  .lifecycle__option {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lifecycle__option .button {
+    width: 100%;
+  }
+}
+
+/* ===========================================================================
+ * Onboarding checklist
+ *
+ * A step that is DONE and a step that is somebody else's work read differently
+ * without relying on colour: the done marker is a badge with its own text, and
+ * the left edge is a second, redundant signal.
+ * ======================================================================== */
+
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.checklist__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  border-inline-start: 3px solid var(--border);
+}
+
+.checklist__item[data-done='true'] {
+  border-inline-start-color: var(--success);
+}
+
+.checklist__text {
+  min-width: 0;
+}
+
+.checklist__title {
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.checklist__detail {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 62ch;
+}
+
+@media (max-width: 680px) {
+  .checklist__item {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+  }
+}
+
+/* ===========================================================================
+ * Platform administration
+ *
+ * Marked, not merely different. A vendor engineer may hold a console session
+ * and a platform session in the same browser at once, and the mistake that
+ * follows from confusing the two surfaces is suspending a CUSTOMER when they
+ * meant to suspend a site.
+ * ======================================================================== */
+
+/* A bordered chip rather than a filled one, matching how every other warning
+ * surface in this console is drawn -- and keeping the text on the ordinary page
+ * background, where its contrast is already known to pass. */
+.topbar__scope {
+  margin-inline-start: var(--space-2);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* A second, redundant signal: the whole bar is edged. Colour is never the only
+ * thing distinguishing the two surfaces -- the chip above says which it is in
+ * words. */
+.shell--platform .topbar {
+  border-block-end: 2px solid var(--warning);
+}
+
+.shell--platform .shell__main {
+  /* No side navigation on this surface, so the page owns the full width. */
+  width: 100%;
+}
+
+/* ===========================================================================
+ * Access rules and schedules
+ *
+ * A DENY rule is marked by its left edge AND by a badge reading "Deny", never
+ * by colour alone — the difference between letting somebody in and keeping them
+ * out is not something to encode in a hue.
+ * ======================================================================== */
+
+.rule-list {
+  list-style: none;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.rule {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  border-inline-start: 3px solid var(--border);
+}
+
+.rule[data-effect='ALLOW'] {
+  border-inline-start-color: var(--success);
+}
+
+.rule[data-effect='DENY'] {
+  border-inline-start-color: var(--danger);
+}
+
+/* A rule that is expired, not yet valid or switched off is dimmed as well as
+ * badged — it is on the page because it exists, not because it applies. */
+.rule[data-standing='EXPIRED'],
+.rule[data-standing='NOT_YET'],
+.rule[data-standing='INACTIVE'] {
+  border-inline-start-color: var(--border-strong);
+  background: var(--surface-raised);
+}
+
+.rule__main {
+  min-width: 0;
+}
+
+.rule__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-1);
+  font-size: 15px;
+}
+
+.rule__detail {
+  margin: 0 0 var(--space-1);
+  font-size: 14px;
+  color: var(--text-muted);
+  max-width: 68ch;
+}
+
+/* Long opaque values -- a SHA-256, a build URL -- have no spaces to break at,
+ * so without this they set the width of the whole page. Measured at 360px: a
+ * 64-character checksum pushed the firmware catalogue to 517px and made the
+ * DOCUMENT scroll sideways, which breaks every other screen on the page.
+ *
+ * `anywhere` rather than `break-word`: these have no word boundaries to prefer,
+ * and the value stays selectable and copyable either way. */
+.rule__detail code {
+  overflow-wrap: anywhere;
+}
+
+.rule__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.window-list {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.window {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.window-editor {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-block-end: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+@media (max-width: 680px) {
+  .rule {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* ===========================================================================
+ * Field events
+ * ======================================================================== */
+
+.event__when,
+.event__where,
+.event__what,
+.event__unknown {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* When a terminal reported an event long after it happened, said quietly beside
+ * the door time rather than replacing it. */
+.event__delay {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.decision {
+  margin-block-start: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.decision__verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-3);
+  font-size: 16px;
+}
+
+/* ===========================================================================
+ * Activity / audit
+ * ======================================================================== */
+
+/* Filters laid out as a grid that collapses to one column on a phone. The
+ * console is used standing in front of a door, and a five-across filter row is
+ * unusable there. */
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3) var(--space-4);
+  margin-block-end: var(--space-3);
+  align-items: start;
+}
+
+.audit__actor,
+.audit__target {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* A role or target type beside a name. Small and quiet: it qualifies the value
+ * next to it rather than competing with it. */
+.audit__role {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.button--small {
+  padding-block: var(--space-1);
+  padding-inline: var(--space-2);
+  font-size: 13px;
+}
+
+/* The alternate channel inside a one-time credential panel. */
+.credential__alternate {
+  margin-block: var(--space-3);
+  font-size: 14px;
+}
+
+.credential__alternate summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-block-end: var(--space-2);
+}
+
+@media (max-width: 680px) {
+  .capability {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .capability__action .button {
+    width: 100%;
+  }
+}
+
+/* ===========================================================================
+ * Dashboard and settings
+ * ======================================================================== */
+
+.tile--link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.tile--link:hover {
+  border-color: var(--accent);
+}
+
+.tile__description {
+  margin: var(--space-1) 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* --- attention list -------------------------------------------------------
+ *
+ * Every entry restates something the platform actually reported. The tone is
+ * carried by an edge AND by the wording, so the ranking survives a monochrome
+ * screen.
+ */
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.attention {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.attention--danger {
+  border-inline-start: 3px solid var(--danger);
+}
+
+.attention--warning {
+  border-inline-start: 3px solid var(--warning);
+}
+
+.attention--info {
+  border-inline-start: 3px solid var(--accent);
+}
+
+.attention__title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.attention__detail {
+  margin: var(--space-1) 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* --- settings signposts --------------------------------------------------- */
+
+.settings-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.settings-links li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-links li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.settings-links a {
+  font-weight: 600;
+}
+
+.settings-links span {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 680px) {
+  .attention {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .attention .button {
+    width: 100%;
+  }
+}

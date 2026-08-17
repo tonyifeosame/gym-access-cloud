@@ -127,11 +127,40 @@ func DeviceHeartbeat(c *gin.Context) {
 		req.IPAddress = c.ClientIP()
 	}
 
-	pending, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
+	pending, capacityChanged, err := database.RecordHeartbeat(c.GetInt64("device_id"), req)
 	if err != nil {
 		logError(c, "record heartbeat", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record heartbeat"})
 		return
+	}
+
+	// FW-01. A terminal that has just told us its ceiling for the first time --
+	// or a different one after a firmware change -- is measured against its
+	// roster now, rather than at whatever future moment somebody happens to
+	// request a snapshot.
+	//
+	// BEST EFFORT, like the firmware offer below. A heartbeat records liveness;
+	// failing it because a capacity review could not be completed would take a
+	// door's liveness reporting down over a diagnostic.
+	if capacityChanged {
+		if err := database.ReviewTerminalCapacity(c.GetInt64("device_id")); err != nil {
+			logError(c, "review terminal capacity", err)
+		}
+	}
+
+	// What the platform would like this terminal to be running (OTA, §5).
+	//
+	// BEST EFFORT, AND DELIBERATELY SO. A heartbeat records liveness and tells
+	// a terminal whether it has work; failing it because the firmware
+	// catalogue could not be read would take the fleet's heartbeat down with
+	// it, and the console would show every door offline because of a firmware
+	// query. An offer that could not be built is simply absent, which the
+	// device reads as "nothing to do" -- exactly what it read before this
+	// field existed.
+	offer, err := database.FirmwareOfferFor(c.GetInt64("device_id"))
+	if err != nil {
+		logError(c, "resolve firmware offer", err)
+		offer = nil
 	}
 
 	c.JSON(http.StatusOK, models.DeviceHeartbeatResponse{
@@ -139,6 +168,7 @@ func DeviceHeartbeat(c *gin.Context) {
 		DeviceID:        c.GetString("device_serial"),
 		ServerTime:      time.Now().UTC(),
 		PendingJobs:     pending,
+		FirmwareUpdate:  offer,
 	})
 }
 
@@ -202,6 +232,9 @@ func ResyncDevice(c *gin.Context) {
 	}
 
 	superseded, err := database.CompactDeviceBacklog(device.ID)
+	if respondIfOverCapacity(c, err) {
+		return
+	}
 	if err != nil {
 		logError(c, "compact device backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue full sync"})
@@ -232,7 +265,12 @@ func GetDeviceSettings(c *gin.Context) {
 		return
 	}
 
-	settings, err := database.GetSiteSettings(c.GetInt64("site_id"))
+	// GetDeviceSettings, not GetSiteSettings: the device-facing object layers
+	// the validated offline-policy columns over the site's free-form settings
+	// blob. GetSiteSettings returns the blob alone and is what the OPERATOR
+	// endpoints read, because an operator edits the blob and must not be shown
+	// the merged result as though it were what they had stored.
+	settings, err := database.GetDeviceSettings(c.GetInt64("site_id"))
 	if err != nil {
 		logError(c, "get device settings", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve settings"})

@@ -22,14 +22,29 @@ import (
 
 // Site Queries
 
-// GetSiteByAPIKey retrieves a site by its API key
+// GetSiteByAPIKey retrieves a site by its provisioning key.
+//
+// THE KEY PRESENTED IS HASHED AND THE HASH IS LOOKED UP. Since
+// 011_site_credentials.sql the database holds no plaintext to compare against,
+// so this is the only way to authenticate one -- and it is the reason the wire
+// contract did not have to change when that migration ran: the caller still
+// sends the same string it always did.
+//
+// Still one index probe, on the partial unique index over api_key_hash. An
+// empty key is refused before touching the database: hashing "" produces a
+// perfectly valid-looking hash, and a row that somehow carried it would then
+// authenticate every caller who sent no key at all.
 func GetSiteByAPIKey(apiKey string) (*models.Site, error) {
-	var site models.Site
-	query := `SELECT id, public_id, company_id, site_name, api_key, active, created_at, updated_at
-	          FROM sites WHERE api_key = $1 AND active = true AND deleted_at IS NULL`
+	if apiKey == "" {
+		return nil, sql.ErrNoRows
+	}
 
-	err := DB.QueryRow(query, apiKey).Scan(
-		&site.ID, &site.PublicID, &site.CompanyID, &site.SiteName, &site.APIKey,
+	var site models.Site
+	query := `SELECT id, public_id, company_id, site_name, active, created_at, updated_at
+	          FROM sites WHERE api_key_hash = $1 AND active = true AND deleted_at IS NULL`
+
+	err := DB.QueryRow(query, HashSiteKey(apiKey)).Scan(
+		&site.ID, &site.PublicID, &site.CompanyID, &site.SiteName,
 		&site.Active, &site.CreatedAt, &site.UpdatedAt,
 	)
 	if err != nil {
@@ -93,10 +108,24 @@ func GetMemberByID(companyID int64, memberID string) (*models.Member, error) {
 	return &m, nil
 }
 
-// GetMembersChangedSince retrieves members changed since a given timestamp
+// GetMembersChangedSince retrieves members changed since a given timestamp.
+//
+// `since` arrives as the caller's raw string and is cast explicitly rather than
+// left to be coerced by context. updated_at is TIMESTAMPTZ as of migration 010,
+// so the cast decides how the caller's value is read:
+//
+//   - carrying an offset or a Z, it names an instant and is honoured exactly.
+//     Before 010 the offset was silently DISCARDED, so a terminal politely
+//     sending "…T09:00:00Z" was asking a question nobody answered correctly.
+//   - carrying none, it is resolved in the session's zone, which the pool pins
+//     to UTC. "No offset" therefore means UTC rather than meaning whatever the
+//     database host is configured for.
+//
+// Both forms now round-trip: the value a caller passes back here is one this API
+// gave it in a previous response, and those are RFC3339 in UTC.
 func GetMembersChangedSince(companyID int64, since string) ([]models.Member, error) {
 	query := `SELECT ` + memberColumns + `
-	          FROM people WHERE company_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+	          FROM people WHERE company_id = $1 AND updated_at > $2::timestamptz AND deleted_at IS NULL
 	          ORDER BY updated_at ASC`
 
 	rows, err := DB.Query(query, companyID, since)
@@ -109,6 +138,15 @@ func GetMembersChangedSince(companyID int64, since string) ([]models.Member, err
 // CreateMember creates a new member within a company and queues a CREATE sync
 // job for every device that must learn about them.
 func CreateMember(companyID int64, member *models.Member) error {
+	// FW-09, enforced at the store rather than only at the two handlers above
+	// it. Both call this, and so would a third; a person whose id no terminal
+	// can hold must not be creatable through any of them, because the failure
+	// does not appear here -- it appears at a door, ten retries later, as a
+	// counter.
+	if err := models.ValidateExternalID(member.MemberID); err != nil {
+		return err
+	}
+
 	tx, err := DB.Begin()
 	if err != nil {
 		return err
@@ -123,6 +161,17 @@ func CreateMember(companyID int64, member *models.Member) error {
 		member.Active, member.FingerprintTemplate).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 	if err != nil {
+		return err
+	}
+
+	// The company's default access policy, written BEFORE the fan-out.
+	//
+	// Order matters and is not incidental: the fan-out is scoped by permission
+	// (SEC-04), so a person with no rule yet reaches no terminal. Granting after
+	// enqueueing would produce a person who is authorized but was never sent
+	// anywhere, which is the most confusing possible state -- the console would
+	// show access they have and the door would refuse them.
+	if err := grantDefaultPersonAccessTx(tx, companyID, member.ID); err != nil {
 		return err
 	}
 
@@ -404,13 +453,39 @@ func CreateDeviceAccessLog(companyID, siteID, deviceID int64, eventID string,
 	return affected > 0, nil
 }
 
-// GetAccessLogs retrieves access logs for a company
+// GetAccessLogs retrieves access logs for a company.
+//
+// Company-wide, and therefore reachable only from an operator session. The
+// site-key surface uses GetSiteAccessLogs below.
 func GetAccessLogs(companyID int64, limit int, offset int) ([]models.AccessLog, error) {
 	query := `SELECT ` + accessLogColumns + `
 	          FROM access_logs WHERE company_id = $1
 	          ORDER BY occurred_at DESC LIMIT $2 OFFSET $3`
 
 	rows, err := DB.Query(query, companyID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return scanAccessLogs(rows)
+}
+
+// GetSiteAccessLogs retrieves access logs for ONE site within a company.
+//
+// The site filter is what the site-key surface needs and did not have: that
+// credential is installed on hardware at one location, and returning the whole
+// company's audit trail to it meant a key at the smallest site could read who
+// entered every other one.
+//
+// Both filters are applied. company_id is the tenancy boundary and site_id is
+// the scope; keeping the tenancy filter even though site_id already implies it
+// means this query is still correct if it is ever called with a site resolved
+// some other way.
+func GetSiteAccessLogs(companyID, siteID int64, limit, offset int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs WHERE company_id = $1 AND site_id = $2
+	          ORDER BY occurred_at DESC LIMIT $3 OFFSET $4`
+
+	rows, err := DB.Query(query, companyID, siteID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -430,41 +505,38 @@ func GetAccessLogsByMember(companyID int64, memberID string, limit int) ([]model
 	return scanAccessLogs(rows)
 }
 
-// CheckMemberAccess checks if a member has access.
+// GetSiteAccessLogsByMember is the same read, scoped to one site.
 //
-// This deliberately still checks only membership status. Evaluating the
-// `permissions` table (door/site scope, schedules, validity windows) is
-// business logic held back for a later sprint.
-func CheckMemberAccess(companyID int64, memberID string) (*models.AccessCheckResponse, error) {
-	var active bool
-	var membershipType string
+// The site-key surface uses this rather than the company-wide version above,
+// for the same reason GetSiteAccessLogs exists: a credential installed at one
+// location must not be able to reconstruct a person's movements across every
+// other location the company operates.
+func GetSiteAccessLogsByMember(companyID, siteID int64, memberID string, limit int) ([]models.AccessLog, error) {
+	query := `SELECT ` + accessLogColumns + `
+	          FROM access_logs
+	         WHERE company_id = $1 AND site_id = $2 AND person_external_id = $3
+	          ORDER BY occurred_at DESC LIMIT $4`
 
-	query := `SELECT active, membership_type FROM people
-	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL`
-	err := DB.QueryRow(query, memberID, companyID).Scan(&active, &membershipType)
-
-	if err == sql.ErrNoRows {
-		return &models.AccessCheckResponse{
-			Granted: false,
-			Message: "Member not found",
-			Status:  "NOT_FOUND",
-		}, nil
-	}
+	rows, err := DB.Query(query, companyID, siteID, memberID, limit)
 	if err != nil {
 		return nil, err
 	}
-
-	if !active {
-		return &models.AccessCheckResponse{
-			Granted: false,
-			Message: "Membership inactive",
-			Status:  "INACTIVE",
-		}, nil
-	}
-
-	return &models.AccessCheckResponse{
-		Granted: true,
-		Message: "Access Granted",
-		Status:  "ACTIVE",
-	}, nil
+	return scanAccessLogs(rows)
 }
+
+// CheckMemberAccess IS DELETED, DELIBERATELY, AND THIS NOTE REPLACES IT (S4).
+//
+// It answered "is this person allowed" from `people.active` and nothing else,
+// and returned the string "Access Granted" when the answer was yes. Its own
+// comment said the permission model was "held back for a later sprint" -- that
+// sprint was APP-02, the engine exists in database/authorization.go, and this
+// function outlived the reason it was allowed to be wrong.
+//
+// It is removed rather than deprecated because the hazard is that it LOOKS like
+// the thing you want. A future handler needing an authorization answer that
+// found a function called CheckMemberAccess would reasonably use it, and would
+// ship a door that ignores every rule an operator wrote. Authorize is the only
+// implementation of this question.
+//
+// The removal is safe: handlers.CheckAccess was the sole caller and now calls
+// Authorize with the terminal it resolved.

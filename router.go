@@ -7,6 +7,7 @@ import (
 
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 )
@@ -100,6 +101,328 @@ func NewRouter() *gin.Engine {
 	r.GET("/health/maintenance", handlers.HealthMaintenance)
 	r.GET("/metrics", handlers.Metrics)
 
+	// Device claim, /api/v1/devices/claim.
+	//
+	// UNAUTHENTICATED, AND MOUNTED HERE RATHER THAN IN EITHER DEVICE GROUP
+	// BELOW, because it is the one device route whose caller has no credential:
+	// obtaining one is what it is for. Putting it inside the site-key group
+	// would defeat the entire purpose -- the point is that the installer does
+	// NOT hold the site's provisioning secret.
+	//
+	// Its OWN limiter instance, not the login one. An installer standing at a
+	// door retrying a mistyped code must not exhaust the allowance an operator
+	// needs to sign in and fix it, and an attacker hammering login must not lock
+	// out a commissioning engineer.
+	//
+	// The security of an unauthenticated endpoint rests on the record, not on
+	// the route: single use, serial-bound, short-lived, hashed at rest, with
+	// every failure returning one indistinguishable answer. See
+	// database/claim.go.
+	r.POST("/api/v1/devices/claim", middleware.LoginRateLimiter(), handlers.ClaimDevice)
+
+	// Operator authentication, /api/v1/auth/*.
+	//
+	// A SEPARATE group from the v1 tree below, which authenticates with the site
+	// API key. That key is the provisioning secret -- it registers terminals and
+	// rotates their credentials -- so a browser must never hold it, and these
+	// routes never read it. The two credential classes share a URL prefix and
+	// nothing else.
+	//
+	// Domain-neutral by construction: an operator, a company, a role and a
+	// session. Nothing here knows or asks what the platform is being used for.
+	auth := r.Group("/api/v1/auth")
+	{
+		// ONE limiter shared by both credential endpoints, so an attacker
+		// cannot get a second allowance by alternating between them.
+		credentialLimit := middleware.LoginRateLimiter()
+
+		auth.POST("/login", credentialLimit, handlers.OperatorLogin)
+
+		// Credential handover, UNAUTHENTICATED BY NECESSITY (PPL-02, SEC-10).
+		//
+		// Somebody who has forgotten their password cannot authenticate to ask
+		// for a new one, and somebody redeeming an invitation has never had one.
+		// Both therefore sit outside the session, and both share the credential
+		// limiter above -- so an attacker cannot get a fresh allowance by moving
+		// between login, reset and redemption.
+		//
+		// forgot-password answers 202 with the same body whether or not the
+		// address exists; redeem takes a 256-bit single-use token as its whole
+		// authorisation. Neither returns anything about an account it was not
+		// given the secret for.
+		auth.POST("/forgot-password", credentialLimit, handlers.RequestPasswordReset)
+		auth.POST("/redeem", credentialLimit, handlers.RedeemCredential)
+
+		session := auth.Group("")
+		session.Use(middleware.OperatorAuthMiddleware())
+		{
+			session.GET("/me", handlers.OperatorMe)
+			session.POST("/logout", middleware.RequireCSRF(), handlers.OperatorLogout)
+			session.POST("/password", credentialLimit, middleware.RequireCSRF(),
+				handlers.OperatorChangePassword)
+		}
+	}
+
+	// Platform administration, /api/v1/platform/*.
+	//
+	// THE THIRD CREDENTIAL CLASS, and the answer to GP-01: no API created a
+	// company, so onboarding a customer meant SQL against production.
+	//
+	// A SEPARATE TREE WITH A SEPARATE IDENTITY, not a role above OWNER. Every
+	// function in database/ takes a companyID and every query filters on it, and
+	// that contract is what makes the tenancy boundary checkable at all -- an
+	// operator that could reach several companies would dissolve it everywhere.
+	// So this group authenticates a different table with a different cookie, and
+	// reaches `companies` and operator bootstrap and nothing inside a tenant.
+	//
+	// Both cookies are Path=/, so a browser genuinely offers each to the other's
+	// routes. Neither middleware falls through to the other; both directions are
+	// covered by tests.
+	platform := r.Group("/api/v1/platform")
+	{
+		// Its OWN limiter instance rather than the operator one. A platform
+		// administrator locked out because an attacker was hammering a tenant's
+		// login is an outage of the surface that fixes outages.
+		platformLimit := middleware.LoginRateLimiter()
+
+		platform.POST("/login", platformLimit, handlers.PlatformLogin)
+
+		admin := platform.Group("")
+		admin.Use(middleware.PlatformAuthMiddleware())
+		{
+			admin.GET("/me", handlers.PlatformMe)
+			admin.POST("/logout", middleware.RequirePlatformCSRF(), handlers.PlatformLogout)
+
+			admin.GET("/companies", handlers.PlatformListCompanies)
+			admin.GET("/companies/:company_id", handlers.PlatformGetCompany)
+
+			admin.POST("/companies", middleware.RequirePlatformCSRF(),
+				handlers.PlatformCreateCompany)
+			admin.PUT("/companies/:company_id", middleware.RequirePlatformCSRF(),
+				handlers.PlatformUpdateCompany)
+
+			// Onboarding only: refused into a company that already has an
+			// operator, by a query predicate rather than a check. A platform
+			// identity that could add accounts to a running tenant at any time
+			// would be a standing back door into every customer.
+			admin.POST("/companies/:company_id/operators",
+				middleware.RequirePlatformCSRF(), handlers.PlatformCreateFirstOperator)
+		}
+	}
+
+	// Operator console, /api/v1/console/*.
+	//
+	// The dashboard's API. Session-authenticated like /api/v1/auth above, and
+	// like it, entirely separate from the site-key and device trees below --
+	// nothing here reads X-API-Key, and nothing here returns one.
+	//
+	// The chain on every route: a session, then CSRF on anything unsafe, then
+	// the minimum role, then a site grant where the path names a site. Routes
+	// are grouped by the role they require so that a new route cannot be added
+	// without landing inside one of those groups.
+	console := r.Group("/api/v1/console")
+	console.Use(middleware.OperatorAuthMiddleware())
+	{
+		// Reads: any authenticated operator in the company.
+		read := console.Group("")
+		read.Use(middleware.RequireRole(models.RoleViewer))
+		{
+			read.GET("/company", handlers.ConsoleGetCompany)
+			read.GET("/sites", handlers.ConsoleListSites)
+			read.GET("/applications", handlers.ConsoleListApplications)
+
+			read.GET("/terminals", handlers.ConsoleListTerminals)
+			read.GET("/terminals/summary", handlers.ConsoleTerminalSummary)
+
+			// RequireTerminalGrant resolves :serial to the site the terminal
+			// is at and applies the same rule RequireSiteGrant does. Without
+			// it a scoped operator could not SEE another site's terminal in
+			// the list but could still read it by naming its serial, which is
+			// printed on the hardware.
+			read.GET("/terminals/:serial", middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleGetTerminal)
+
+			read.GET("/people", handlers.ConsoleListPeople)
+			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
+
+			// Who may go where, and when (APP-02). Readable by any operator:
+			// "why was she refused" is a question a viewer at a front desk has
+			// to be able to answer, and the rules are not secret from the
+			// people administering the deployment.
+			read.GET("/people/:external_id/permissions",
+				handlers.ConsoleListPersonPermissions)
+			read.GET("/schedules", handlers.ConsoleListSchedules)
+
+			// The event trail (SEC-08). Grant-scoped inside the handler, the
+			// same way the site and people lists are -- an operator scoped to
+			// one site reads that site's events and no others.
+			//
+			// VIEWER, unlike /console/audit which is ADMIN. An event trail says
+			// what happened in the field; an audit trail names which operators
+			// changed what, which is administrative information about
+			// colleagues rather than the product working.
+			read.GET("/events", handlers.ConsoleListEvents)
+
+			// Site-scoped reads. RequireSiteGrant resolves :site_id inside the
+			// operator's company and puts it in the context, so a site in
+			// another tenant is a 404 and one they are not scoped to is a 403.
+			read.GET("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleGetSite)
+			read.GET("/sites/:site_id/settings", middleware.RequireSiteGrant("site_id"),
+				handlers.GetSiteSettings)
+		}
+
+		// Day-to-day writes.
+		write := console.Group("")
+		write.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleManager))
+		{
+			write.POST("/people", handlers.ConsoleCreatePerson)
+			write.PUT("/people/:external_id", handlers.ConsoleUpdatePerson)
+			write.DELETE("/people/:external_id", handlers.ConsoleDeletePerson)
+
+			// Changing what a terminal does is a site operation, gated on the
+			// grant to that terminal's site exactly as the read above is.
+			write.PUT("/terminals/:serial/application-mode",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleSetTerminalMode)
+
+			// Forcing a resync is day-to-day: it queues a snapshot and changes
+			// no state an operator has to reason about afterwards. The
+			// destructive terminal operations are ADMIN, below.
+			write.POST("/terminals/:serial/resync",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleResyncTerminal)
+
+			// The authorization engine's write surface (APP-02).
+			//
+			// MANAGER rather than ADMIN, deliberately. Deciding who may come in
+			// on Tuesday is day-to-day work at any customer with more than a
+			// handful of people; putting it behind the gate that mints site
+			// provisioning credentials would mean every rota change needs an
+			// administrator. Deleting a schedule that rules still depend on is
+			// refused rather than cascaded, so the destructive case is closed
+			// by the store rather than by the role.
+			write.POST("/people/:external_id/permissions", handlers.ConsoleGrantPermission)
+			write.DELETE("/permissions/:permission_id", handlers.ConsoleRevokePermission)
+
+			write.POST("/schedules", handlers.ConsoleCreateSchedule)
+			write.PUT("/schedules/:schedule_id", handlers.ConsoleUpdateSchedule)
+			write.DELETE("/schedules/:schedule_id", handlers.ConsoleDeleteSchedule)
+
+			// "Would this person get in here, right now, and why."
+			//
+			// A POST because it takes a body, NOT because it changes anything:
+			// it writes no event by design, so that a preview cannot put a
+			// presentation that never happened into the trail an attendance
+			// report is built from.
+			write.POST("/terminals/:serial/evaluate",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleEvaluateAccess)
+
+			// GetSiteSettings/UpdateSiteSettings are the SAME handlers the
+			// site-key API uses. Both read site_id from the context, which
+			// RequireSiteGrant sets to an authorized site exactly as the
+			// site-key middleware sets it to the credential's own site. The
+			// write also enqueues a SETTINGS sync job for every terminal at
+			// that site -- business logic worth reusing, not restating.
+			write.PUT("/sites/:site_id/settings", middleware.RequireSiteGrant("site_id"),
+				handlers.UpdateSiteSettings)
+		}
+
+		// Operator administration, and site lifecycle.
+		//
+		// Sites are ADMIN rather than MANAGER: creating one mints a
+		// PROVISIONING CREDENTIAL and retiring one stops doors opening. Neither
+		// is day-to-day work, which is what the MANAGER gate above is for.
+		//
+		// The grant rule lands correctly here without extra machinery. ADMIN and
+		// OWNER are never site-scoped, so "an operator scoped to Site A creates
+		// Site B" cannot arise -- and the routes naming a site still go through
+		// RequireSiteGrant, which resolves it inside the caller's company and
+		// answers 404 for anybody else's.
+		admin := console.Group("")
+		admin.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleAdmin))
+		{
+			admin.POST("/sites", handlers.ConsoleCreateSite)
+			admin.PUT("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleUpdateSite)
+			admin.DELETE("/sites/:site_id", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleRetireSite)
+
+			// Rotation is a POST to a sub-resource rather than a PUT on the
+			// site: it does not set a value the caller supplied, it mints one
+			// and returns it. Making that a metadata update would invite a
+			// client to send it twice.
+			admin.POST("/sites/:site_id/api-key", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleRotateSiteAPIKey)
+
+			// Claim codes: the replacement for putting the site key on an
+			// installer's laptop.
+			//
+			// ADMIN, matching key rotation above, and for the same reason --
+			// issuing one authorises hardware to join this site and be handed a
+			// credential. The code is returned ONCE and no read endpoint gives
+			// it back.
+			admin.POST("/sites/:site_id/claim-codes", middleware.RequireSiteGrant("site_id"),
+				handlers.ConsoleIssueClaimCode)
+
+			// Terminal lifecycle. ADMIN rather than MANAGER for the same reason
+			// site lifecycle is: revoking a credential stops a door working and
+			// retiring a terminal is one-way. Neither is day-to-day work.
+			//
+			// All four go through RequireTerminalGrant, so a terminal in another
+			// tenant is a 404 and one at an ungranted site is a 403 -- the same
+			// rule the read and the mode change already apply.
+			admin.PUT("/terminals/:serial/state",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleSetTerminalState)
+			admin.POST("/terminals/:serial/revoke",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRevokeTerminalCredential)
+			admin.DELETE("/terminals/:serial",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRetireTerminal)
+			admin.PUT("/terminals/:serial/site",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleMoveTerminal)
+
+			// The firmware catalogue. MOVED HERE from the site-key tree, where
+			// any terminal's provisioning key could add a build and move the
+			// `is_current` target every "is this terminal outdated" report is
+			// measured against. A key installed at a door had control of the
+			// company's firmware deployment target.
+			admin.GET("/firmware", handlers.ConsoleListFirmware)
+			admin.POST("/firmware", handlers.ConsoleCreateFirmware)
+			admin.PUT("/firmware/:id/current", handlers.ConsoleSetCurrentFirmware)
+
+			// Who changed what. ADMIN because an audit trail names which
+			// operators did what, which is administrative information rather
+			// than something every viewer needs.
+			admin.GET("/audit", handlers.ConsoleListAuditEvents)
+
+			admin.GET("/operators", handlers.ConsoleListOperators)
+			admin.GET("/operators/:operator_id", handlers.ConsoleGetOperator)
+			admin.GET("/operators/:operator_id/sites", handlers.ConsoleGetOperatorSites)
+			admin.POST("/operators", handlers.ConsoleCreateOperator)
+			admin.PUT("/operators/:operator_id", handlers.ConsoleUpdateOperator)
+			admin.PUT("/operators/:operator_id/sites", handlers.ConsoleSetOperatorSites)
+			admin.DELETE("/operators/:operator_id", handlers.ConsoleDeleteOperator)
+
+			// Credential handover (PPL-02, SEC-10). Both mint a single-use link
+			// rather than a password, so an administrator can give somebody an
+			// account, or get them back into one, WITHOUT ever knowing their
+			// credential.
+			//
+			// Separate routes rather than one, because the two are audited
+			// differently and refused differently: an invitation is only valid
+			// for an account that has never signed in.
+			admin.POST("/operators/:operator_id/invite", handlers.ConsoleInviteOperator)
+			admin.POST("/operators/:operator_id/reset", handlers.ConsoleResetOperatorPassword)
+		}
+
+		// Which capabilities the company has at all. OWNER only: this decides
+		// what the whole company's deployment is for, which is a different kind
+		// of decision from running it day to day.
+		owner := console.Group("")
+		owner.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleOwner))
+		{
+			owner.PUT("/applications/:code", handlers.ConsoleSetApplication)
+		}
+	}
+
 	// API v1 routes with authentication
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.AuthMiddleware())
@@ -118,6 +441,11 @@ func NewRouter() *gin.Engine {
 		// Access endpoints
 		access := v1.Group("/access")
 		{
+			// DEPRECATED, and now truthful (S4). It answers from the
+			// authorization engine and REQUIRES ?terminal=SERIAL, because a
+			// decision without a door is not a decision. The console's
+			// POST /console/terminals/:serial/evaluate is the successor: same
+			// engine, operator identity, and a grant check on the terminal.
 			access.GET("/:member_id", handlers.CheckAccess)
 			access.POST("/log", handlers.LogAccess)
 			access.GET("/logs", handlers.GetAccessLogs)
@@ -143,18 +471,25 @@ func NewRouter() *gin.Engine {
 		// device does not have a credential of its own yet.
 		v1.POST("/devices/register", handlers.RegisterDevice)
 
-		// Fleet inventory and operator actions
-		v1.GET("/devices", handlers.ListDevices)
-		v1.GET("/devices/summary", handlers.GetFleetSummary)
+		// Fleet inventory, NARROWED TO THE AUTHENTICATED SITE.
+		//
+		// These used to report the whole company. A site key is installed on
+		// hardware at one location; it has no business enumerating terminals at
+		// every other one, and the console -- which has an operator identity and
+		// a grant model -- is where a company-wide view belongs.
+		v1.GET("/devices", handlers.ListSiteDevices)
+		v1.GET("/devices/summary", handlers.GetSiteFleetSummary)
 		v1.POST("/devices/:serial/resync", handlers.ResyncDevice)
 
-		// Firmware catalog (inventory only -- no OTA)
-		firmware := v1.Group("/firmware")
-		{
-			firmware.GET("", handlers.ListFirmwareVersions)
-			firmware.POST("", handlers.CreateFirmwareVersion)
-			firmware.PUT("/:id/current", handlers.SetCurrentFirmware)
-		}
+		// Firmware catalogue: READ ONLY on this credential, and narrowed to what
+		// a terminal at this site would be measured against.
+		//
+		// The writes moved to /console/firmware under ADMIN. Any site key could
+		// previously add a build and flip `is_current`, which is the target every
+		// "is this terminal outdated" report is measured against -- and once OTA
+		// exists, the row a terminal would be pointed at. A provisioning key
+		// installed at a door must not control that.
+		v1.GET("/firmware", handlers.ListFirmwareVersions)
 	}
 
 	// Device endpoints authenticate as the device itself, not as the site
@@ -191,6 +526,21 @@ func NewRouter() *gin.Engine {
 		// device from the authenticated terminal, so there is no parameter
 		// through which a device could write a log against another site.
 		deviceAPI.POST("/access/log", handlers.LogDeviceAccess)
+
+		// Credentials and placements, reachable with the DEVICE credential.
+		//
+		// The work list a terminal uses to answer "who should I be able to
+		// recognise that I cannot", and the report it sends back. Both are
+		// scoped to the AUTHENTICATED device -- there is no parameter naming a
+		// terminal, so one cannot ask what another is missing or report a
+		// placement onto it.
+		//
+		// NO BIOMETRIC MATERIAL CROSSES EITHER OF THESE. A credential id is a
+		// handle naming which credential a report is about; the substance stays
+		// on the sensor that captured it, which is all the fitted hardware
+		// permits in any case.
+		deviceAPI.GET("/credentials/pending", handlers.GetPendingCredentials)
+		deviceAPI.POST("/credentials/placement", handlers.ReportCredentialPlacement)
 	}
 
 	return r

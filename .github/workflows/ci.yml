@@ -1,0 +1,364 @@
+name: CI
+
+# Every push and every pull request. There is no "run it manually when you
+# remember" mode, because that is the state this pipeline was added to fix: the
+# repository had 1,043 passing tests and nothing that ran them.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first. A queue of superseded runs
+# tells nobody anything and costs the same as a useful one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: '1.26.6'
+  NODE_VERSION: '20'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend
+  # ---------------------------------------------------------------------------
+  #
+  # A REAL POSTGRESQL, not a mock. The behaviour worth protecting in this
+  # codebase lives in SQL -- the tenancy filters, the partial unique indexes, the
+  # acknowledgement constraint, SKIP LOCKED delivery, the immutability triggers --
+  # and a mocked database layer would assert that Go calls queries rather than
+  # that the queries are correct. The suite also builds its database from
+  # migrations/ on every run, so this doubles as the check that a fresh database
+  # can be built from zero.
+  backend:
+    name: Backend (Go + PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to the major version the Render blueprint provisions, so CI is
+        # testing the server the deployment actually runs.
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # gofmt first: it is the cheapest check and a formatting failure makes
+      # every diff below it noisier.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -count=1 is not optional here. `go test` caches a passing package result
+      # and replays it whenever its key matches, and that key cannot describe
+      # whether PostgreSQL was reachable -- so a pass banked with a database up
+      # is replayed after it goes away. See the note at the top of the Makefile.
+      #
+      # TEST_DB_SKIP is deliberately NOT set. If the database is unreachable the
+      # suite fails rather than skipping, because a green run that silently
+      # covered none of the tenancy or sync SQL is worse than a red one.
+      - name: Test
+        env:
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_SSLMODE: disable
+        run: go test -count=1 ./...
+
+      # Proves the migrations apply to an EMPTY database in filename order, which
+      # is what a new customer's database does and what the test suite's own
+      # fixture path does not exercise on its own.
+      - name: Migrations apply from zero
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c 'CREATE DATABASE migration_check;'
+          for f in migrations/*.sql; do
+            echo "--> $f"
+            psql -h localhost -U postgres -d migration_check -v ON_ERROR_STOP=1 -f "$f"
+          done
+          psql -h localhost -U postgres -c 'DROP DATABASE migration_check;'
+
+  # ---------------------------------------------------------------------------
+  # Frontend
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (TypeScript + React)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `npm ci`, not `npm install`: it installs exactly the lockfile, and a
+      # build that resolved different dependency versions than the one that was
+      # tested is not the same build.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      # The production build is a separate check because `vite build` does
+      # things `vitest` never runs: tree-shaking, minification, and the asset
+      # pipeline. A console that tests green and does not build is not shippable.
+      - name: Production build
+        run: npm run build
+
+      # The console must never carry a machine credential. The site API key is
+      # the provisioning secret -- it registers terminals and rotates their
+      # credentials -- and a browser holding one hands the door hardware to
+      # anything that can run script on the page.
+      #
+      # Checked against the BUILT BUNDLE, not the source: a lint rule on source
+      # cannot see a value that arrives through an environment variable at build
+      # time, which is exactly how such a secret would get there.
+      - name: No machine credentials in the bundle
+        run: |
+          if grep -rEl 'ats_[0-9a-f]{32}|atd_[0-9a-f]{32}' dist/; then
+            echo "A site or device credential is present in the built bundle."
+            exit 1
+          fi
+          if grep -rl 'X-API-Key' dist/; then
+            echo "The built bundle references X-API-Key. The console authenticates"
+            echo "with a session cookie and must never send a site key."
+            exit 1
+          fi
+          echo "Bundle carries no machine credentials."
+
+  # ---------------------------------------------------------------------------
+  # Firmware
+  # ---------------------------------------------------------------------------
+  #
+  # The firmware lives in its own repository. This job runs when it is checked
+  # out beside this one; the guard exists so the pipeline is honest about what it
+  # covered rather than silently reporting green for a suite it never ran.
+  firmware:
+    name: Firmware (native tests + size)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out firmware
+        id: firmware
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.FIRMWARE_REPO }}
+          path: firmware
+          token: ${{ secrets.FIRMWARE_REPO_TOKEN }}
+
+      # No test COUNT in this message. The number was 550 when this job was
+      # written and is not any more, and a stale figure in a warning is a claim
+      # that rots quietly -- which is the failure this whole pipeline exists to
+      # prevent. What matters is that the suite did not run, not how big it is.
+      - name: Report when firmware was not available
+        if: steps.firmware.outcome != 'success'
+        run: |
+          echo "::warning::FIRMWARE_REPO is not configured, so the firmware test"
+          echo "::warning::suite and the size budget did NOT run in this build."
+          echo "Set the FIRMWARE_REPO variable and FIRMWARE_REPO_TOKEN secret."
+
+      - uses: actions/setup-python@v5
+        if: steps.firmware.outcome == 'success'
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        if: steps.firmware.outcome == 'success'
+        run: pip install --upgrade platformio
+
+      - name: Native unit tests
+        if: steps.firmware.outcome == 'success'
+        working-directory: firmware
+        run: pio test -e native
+
+      # The production image, not just the tests. A firmware change that passes
+      # its host-compiled unit tests and does not cross-compile for the target is
+      # a change that cannot ship.
+      #
+      # CLOUD_ROOT_CA_INCLUDE names a gitignored generated file, so the build
+      # regenerates it first. That is also the check that the generator still
+      # works, which nothing else exercises.
+      - name: Generate the trust bundle
+        if: steps.firmware.outcome == 'success'
+        working-directory: firmware
+        run: python tools/make_root_ca_inc.py
+
+      - name: Production build
+        if: steps.firmware.outcome == 'success'
+        working-directory: firmware
+        run: pio run -e esp32dev
+
+      # A size budget, checked rather than hoped for. The audit's instruction was
+      # not to introduce features that exceed the actual flash and RAM budget;
+      # this is what makes that statement testable.
+      - name: Size budget
+        if: steps.firmware.outcome == 'success'
+        working-directory: firmware
+        run: |
+          pio run -e esp32dev --target size | tee size.txt
+          python - <<'PY'
+          import re, sys
+          text = open('size.txt').read()
+          # PlatformIO reports RAM and Flash as percentages of the partition.
+          budgets = {'RAM': 70.0, 'Flash': 85.0}
+          failed = False
+          for name, ceiling in budgets.items():
+              m = re.search(rf'{name}:\s+\[[=\s]*\]\s+([\d.]+)%', text)
+              if not m:
+                  print(f'::warning::could not read the {name} figure from the size report')
+                  continue
+              used = float(m.group(1))
+              print(f'{name}: {used}% used, budget {ceiling}%')
+              if used > ceiling:
+                  print(f'::error::{name} at {used}% exceeds the {ceiling}% budget')
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+  # ---------------------------------------------------------------------------
+  # Security
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security (secrets + dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret removed in the tip commit is still a secret
+          # that was published, and scanning only the tip would miss it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action posts its findings as a pull request comment, which needs
+          # `pull-requests: write`. This workflow grants `contents: read` and
+          # nothing else, so on a pull request that call fails with "Resource not
+          # accessible by integration" -- noise from a step that has already
+          # done its job. The result is on the check and in the job summary
+          # either way.
+          #
+          # Off rather than widening the token: a workflow that only ever reads
+          # is a smaller thing to trust than one that can write to pull
+          # requests, and nothing here needs to write.
+          GITLEAKS_ENABLE_COMMENTS: 'false'
+
+      # Credentials this project has actually shipped before, checked by shape
+      # rather than by entropy. 001_init_schema.sql once carried working site
+      # keys, and the comment there is the reason this step exists.
+      - name: Repository-specific credential shapes
+        run: |
+          set +e
+          hits=$(git grep -nE \
+            'ats_[0-9a-f]{64}|atd_[0-9a-f]{64}|BOOTSTRAP_OPERATOR_PASSWORD=.+' \
+            -- ':!*.md' ':!.github/*' )
+          set -e
+          if [ -n "$hits" ]; then
+            echo "Credential-shaped values found in tracked files:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "No site keys, device keys or bootstrap passwords in tracked files."
+
+      - name: Go vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # `npm audit` fails the build on HIGH and above only. Moderate advisories
+      # in a build-time dependency are worth knowing about and are not worth
+      # blocking a merge on; the level is stated here rather than left to the
+      # default so the choice is visible.
+      - name: npm audit
+        working-directory: web
+        run: |
+          npm ci
+          npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  # The gate
+  # ---------------------------------------------------------------------------
+  #
+  # One required check to protect the branch with, rather than five that have to
+  # be added individually and one of which will be forgotten.
+  #
+  # `firmware` is deliberately NOT in the needs list: it self-reports when the
+  # firmware repository is unavailable, and a pipeline that cannot run in a fork
+  # is a pipeline that gets bypassed.
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, security]
+    if: always()
+    steps:
+      - name: Verify
+        run: |
+          if [ "${{ needs.backend.result }}" != "success" ] \
+          || [ "${{ needs.frontend.result }}" != "success" ] \
+          || [ "${{ needs.security.result }}" != "success" ]; then
+            echo "backend:  ${{ needs.backend.result }}"
+            echo "frontend: ${{ needs.frontend.result }}"
+            echo "security: ${{ needs.security.result }}"
+            exit 1
+          fi
+          echo "All required checks passed."

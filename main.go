@@ -10,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"access-terminal-cloud-api/bootstrap"
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/maintenance"
+	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -110,6 +112,42 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// Create the first operator, if this system has none and the environment
+	// says who it should be.
+	//
+	// Before the server listens, and fatal on error: a half-configured or
+	// invalid bootstrap is a deployment mistake, and starting anyway would leave
+	// a console nobody can sign in to while reporting itself healthy. It is only
+	// ever fatal in the case where the bootstrap would actually run -- on a
+	// system that already has an operator the variables are not read for their
+	// content at all, so a stale value cannot stop the API starting.
+	if _, err := bootstrap.EnsureFirstOperator(); err != nil {
+		log.Fatalf("Operator bootstrap: %v", err)
+	}
+
+	// And the first PLATFORM ADMINISTRATOR, on the same terms: only on an
+	// installation that has none, fatal only where it would actually run.
+	//
+	// This is the identity that creates companies. Without it a fresh
+	// installation can serve exactly the one tenant migration 002 created, which
+	// was the audit's first blocker (GP-01).
+	if _, err := bootstrap.EnsureFirstPlatformAdmin(); err != nil {
+		log.Fatalf("Platform bootstrap: %v", err)
+	}
+
+	// SEC-05. Announced at startup rather than left to be discovered, because
+	// this is the one setting that lets a site's provisioning key authenticate
+	// as any terminal at that site -- and the deployment that has it on is
+	// usually the one that turned it on for a migration and forgot.
+	if middleware.LegacyDeviceAuthEnabled() {
+		log.Printf("SECURITY: %s is enabled. A site provisioning key plus a serial "+
+			"can authenticate AS a terminal, which means holding that key is "+
+			"equivalent to holding every device key at the site. This exists only "+
+			"to keep firmware predating per-device credentials working while a "+
+			"fleet is upgraded. Claim the remaining terminals and unset it.",
+			middleware.LegacyDeviceAuthEnv)
+	}
 
 	r := NewRouter()
 

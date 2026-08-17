@@ -83,12 +83,22 @@ func TestDeviceAuthentication(t *testing.T) {
 		{"no credential", nil, http.StatusUnauthorized},
 		{"unknown device key", deviceAuth("atd_" + "0"), http.StatusUnauthorized},
 		{"site key without serial", siteAuth(env.siteAKey), http.StatusUnauthorized},
+
+		// SEC-05. This pair used to be 200, and that was the finding: the site
+		// PROVISIONING key plus a serial anybody can read off a label was
+		// accepted as proof of being that terminal. It is off by default now.
+		// The behaviour behind LEGACY_DEVICE_AUTH, and the reason it still
+		// exists, are in device_auth_hardening_test.go.
 		{"legacy site key plus serial", map[string]string{
 			"X-API-Key": env.siteAKey, "X-Device-Serial": "ESP32-0001",
-		}, http.StatusOK},
+		}, http.StatusUnauthorized},
+
+		// Also 401 rather than the 404 it used to be. A caller with no accepted
+		// credential must not be able to probe which serials are registered at
+		// a site -- the refusal has to happen before the lookup.
 		{"legacy pair naming an unknown serial", map[string]string{
 			"X-API-Key": env.siteAKey, "X-Device-Serial": "ESP32-NOPE",
-		}, http.StatusNotFound},
+		}, http.StatusUnauthorized},
 	}
 
 	for _, tc := range cases {
@@ -169,7 +179,8 @@ func TestDeviceOfDeactivatedSiteIsLockedOut(t *testing.T) {
 	env := newTestEnv(t)
 	key := env.registerDevice(env.siteAKey, "ESP32-0001")
 
-	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key = $1`, env.siteAKey)
+	mustExec(t, `UPDATE sites SET active = FALSE WHERE api_key_hash = $1`,
+		database.HashSiteKey(env.siteAKey))
 
 	// Deactivating a site has to stop its terminals, not just its dashboard.
 	res := env.do(http.MethodGet, "/api/v1/devices/settings", nil, deviceAuth(key))
@@ -236,21 +247,28 @@ func TestJobDeliveryAndAcknowledgement(t *testing.T) {
 	key := env.registerDevice(env.siteAKey, "ESP32-0001")
 	env.createMember(env.siteAKey, "M-1", "Ada")
 
+	// Registration also seeds the site's settings, so the batch is the CREATE
+	// plus that push. The person job is selected rather than assumed to be
+	// first: what this test is about is the acknowledgement, not the ordering.
 	jobs := env.jobs(key)
-	if len(jobs) != 1 {
-		t.Fatalf("got %d jobs, want 1: %v", len(jobs), jobTypes(jobs))
+	creates := jobsOfType(jobs, "CREATE")
+	if len(creates) != 1 {
+		t.Fatalf("got %d CREATE jobs, want 1: %v", len(creates), jobTypes(jobs))
 	}
-	if got := jobs[0]["job_type"]; got != "CREATE" {
-		t.Errorf("job_type = %v, want CREATE", got)
+	if len(jobsOfType(jobs, "SETTINGS")) != 1 {
+		t.Errorf("got %v, want the seeded SETTINGS push beside the CREATE", jobTypes(jobs))
 	}
 
-	id := jobID(t, jobs[0])
+	id := jobID(t, creates[0])
 	res := env.do(http.MethodPost, jobPath(id), map[string]any{"status": "COMPLETED"}, deviceAuth(key))
 	if res.Code != http.StatusOK {
 		t.Fatalf("ack got %d, want 200 (body %s)", res.Code, res.Raw)
 	}
-	if got := res.Body["pending_jobs"]; got != float64(0) {
-		t.Errorf("pending_jobs = %v, want 0 after the only job was acked", got)
+	// One remains: the settings push, which this test did not acknowledge.
+	// The number is what the device uses to decide whether to poll, so it has
+	// to count everything still owed rather than only what was just answered.
+	if got := res.Body["pending_jobs"]; got != float64(1) {
+		t.Errorf("pending_jobs = %v, want 1 -- the seeded SETTINGS push is still owed", got)
 	}
 	if s := jobStatus(t, id); s != "COMPLETED" {
 		t.Errorf("job status = %s, want COMPLETED", s)
@@ -379,8 +397,11 @@ func TestFullSyncSnapshotReplacesBacklog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("resync got %d, want 200 (body %s)", res.Code, res.Raw)
 	}
-	if got := res.Body["superseded_jobs"]; got != float64(2) {
-		t.Errorf("superseded_jobs = %v, want the 2 queued CREATEs", got)
+	// The 2 queued CREATEs AND the settings push registration seeded. A
+	// snapshot replaces the whole queue and re-queues current settings with it,
+	// so the pending push is superseded like everything else.
+	if got := res.Body["superseded_jobs"]; got != float64(3) {
+		t.Errorf("superseded_jobs = %v, want the 2 queued CREATEs and the seeded SETTINGS", got)
 	}
 
 	jobs := env.jobs(key)
@@ -529,8 +550,11 @@ func TestEnrollingAnActiveMemberLeavesThemActive(t *testing.T) {
 		t.Error("an active member became inactive after enrolment")
 	}
 
-	// And the door still opens for them.
-	check := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	// And the door still opens for them. The check names the terminal now (S4):
+	// an authorization answer without a door was never meaningful, and the
+	// endpoint no longer pretends otherwise.
+	check := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := check.Body["granted"].(bool); !granted {
 		t.Errorf("active member was denied after enrolment (body %s)", check.Raw)
 	}
@@ -573,7 +597,8 @@ func TestASuspendedMemberCannotGainAccessByEnrolling(t *testing.T) {
 		t.Fatalf("suspending got %d, want 200 (body %s)", susp.Code, susp.Raw)
 	}
 
-	before := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	before := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := before.Body["granted"].(bool); granted {
 		t.Fatalf("fixture wrong: suspended member was already granted (body %s)", before.Raw)
 	}
@@ -582,7 +607,8 @@ func TestASuspendedMemberCannotGainAccessByEnrolling(t *testing.T) {
 		map[string]any{"member_id": "M001", "fingerprint_template": "terminal:ESP32-0001:slot:5"},
 		deviceAuth(key))
 
-	after := env.do(http.MethodGet, "/api/v1/access/M001", nil, siteAuth(env.siteAKey))
+	after := env.do(http.MethodGet, "/api/v1/access/M001?terminal=ESP32-0001", nil,
+		siteAuth(env.siteAKey))
 	if granted, _ := after.Body["granted"].(bool); granted {
 		t.Errorf("a suspended member was granted access after enrolling (body %s)", after.Raw)
 	}

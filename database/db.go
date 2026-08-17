@@ -46,39 +46,98 @@ type Config struct {
 	ConnMaxIdleTime time.Duration
 }
 
-// Connect establishes a connection to PostgreSQL and configures the pool
-func Connect(cfg Config) error {
+// Open establishes an INDEPENDENT pool against cfg and returns it.
+//
+// Same connection rules as Connect -- TLS defaulting, the pinned session time
+// zone, the pool bounds -- but the caller owns the handle and must Close it.
+// Connect is the process-wide one; this is for anything that needs a second
+// connection without disturbing it, such as a migration or maintenance task
+// operating on a different database on the same server.
+//
+// The connection string is deliberately not returned. It carries the password,
+// and Target() exists for anything that needs to name what was connected to.
+func Open(cfg Config) (*sql.DB, error) {
 	connStr, err := cfg.connString()
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("error opening database: %w", err)
+	}
+
+	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.MaxIdleConns)
+	// Recycling connections keeps a long-lived process from holding one that a
+	// restarted database or a failed-over replica no longer considers valid.
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
+
+	if err = db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("error connecting to database: %w", err)
+	}
+	return db, nil
+}
+
+// Connect establishes the process-wide connection to PostgreSQL.
+func Connect(cfg Config) error {
+	db, err := Open(cfg)
 	if err != nil {
 		return err
 	}
+	DB = db
 
-	DB, err = sql.Open("postgres", connStr)
-	if err != nil {
-		return fmt.Errorf("error opening database: %w", err)
-	}
-
-	DB.SetMaxOpenConns(cfg.MaxOpenConns)
-	DB.SetMaxIdleConns(cfg.MaxIdleConns)
-	// Recycling connections keeps a long-lived process from holding one that a
-	// restarted database or a failed-over replica no longer considers valid.
-	DB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-	DB.SetConnMaxIdleTime(cfg.ConnMaxIdleTime)
-
-	if err = DB.Ping(); err != nil {
-		return fmt.Errorf("error connecting to database: %w", err)
-	}
-
-	log.Printf("Connected to PostgreSQL %s (max_open_conns=%d)",
-		cfg.Target(), cfg.MaxOpenConns)
+	log.Printf("Connected to PostgreSQL %s (max_open_conns=%d, timezone=%s)",
+		cfg.Target(), cfg.MaxOpenConns, sessionTimeZone)
 	return nil
 }
+
+// sessionTimeZone is pinned on every connection this pool opens.
+//
+// The columns are TIMESTAMPTZ as of migration 010, so they hold instants and the
+// session zone cannot change what a stored value MEANS. It changes two things
+// that still matter:
+//
+//   - What lib/pq attaches to a time.Time on the way out. It hands back a value
+//     located in the session's zone, and encoding/json renders that location
+//     verbatim -- so an unpinned connection to a server in Africa/Lagos emits
+//     "2026-08-14T18:00:00+01:00" where a UTC one emits "2026-08-14T17:00:00Z".
+//     Both name the same instant and both are valid RFC3339, but the API's
+//     JSON should not change shape because somebody moved the database. Pinning
+//     UTC keeps the wire format exactly what it has always been.
+//   - How a naive timestamp STRING is read when it is compared against one of
+//     these columns -- `?since=2026-08-14T09:00:00` on the member-changes
+//     endpoint, say. Postgres resolves an unqualified literal in the session
+//     zone, so pinning UTC makes "no offset" mean UTC rather than meaning
+//     whatever the database host happens to be set to.
+//
+// Forced rather than defaulted. A deployment does not get to opt out of this,
+// because the API's documented output format depends on it.
+//
+// WHY THIS IS NOT A SUBSTITUTE FOR MIGRATION 010. Pinning UTC over the old naive
+// columns would have made reads and writes through THIS POOL correct, which is
+// tempting and was measured to be true. It is not enough:
+//
+//   - it does nothing for rows already written, which stay wrong by the old
+//     offset forever;
+//   - it protects only this pool. psql, a backup being restored, a reporting or
+//     BI connection, deploy/migrate.sh -- none of them are pinned, and against a
+//     naive column each of them silently reads and writes a different instant;
+//   - it leaves the value itself ambiguous, so being right depends permanently
+//     on every future caller remembering to pin. One that forgets is not an
+//     error anywhere; it is just quietly an hour out.
+//
+// The column type is what makes the value mean one thing. This pin only settles
+// how it is spelled on the way out.
+const sessionTimeZone = "UTC"
 
 // connString renders the configuration into something sql.Open understands.
 func (c Config) connString() (string, error) {
 	if c.URL == "" {
-		return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-			c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode), nil
+		return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s timezone=%s",
+			c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, sessionTimeZone), nil
 	}
 	return normalizeDatabaseURL(c.URL)
 }
@@ -176,6 +235,12 @@ func normalizeDatabaseURL(raw string) (string, error) {
 				"connection to a remote database; use sslmode=require or stronger",
 			mode, u.Hostname())
 	}
+
+	// Overwritten, not defaulted -- see sessionTimeZone. A managed provider's
+	// connection string never carries this, and one that did would be choosing
+	// the API's JSON output format on its behalf.
+	q.Set("timezone", sessionTimeZone)
+
 	u.RawQuery = q.Encode()
 
 	return u.String(), nil

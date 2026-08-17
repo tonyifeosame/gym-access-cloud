@@ -30,13 +30,32 @@ written by hand.
 9. [Devices — device-authenticated](#9-devices--device-authenticated)
 10. [Health and monitoring](#10-health-and-monitoring)
 11. [Endpoint index](#11-endpoint-index)
+12. [Operator authentication](#12-operator-authentication)
+13. [Operator console](#13-operator-console)
+14. [Applications and modules](#14-applications-and-modules)
+15. [Authorization — permissions and schedules](#15-authorization--permissions-and-schedules)
+16. [Events — the activity trail](#16-events--the-activity-trail)
+17. [Device protocol additions](#17-device-protocol-additions)
 
 ---
 
 ## 1. Authentication
 
-There are three authentication modes. Which one applies is stated on every
+There are four authentication modes. Which one applies is stated on every
 endpoint below.
+
+| Mode | Credential | Who uses it |
+|---|---|---|
+| Site API key | `X-API-Key` | provisioning and server-to-server tooling |
+| Device key | `X-Device-Key` | one terminal |
+| Site key + serial | `X-API-Key` + `X-Device-Serial` | deprecated terminal fallback |
+| **Operator session** | `__Host-al_session` cookie | the browser dashboard |
+
+**A browser must use an operator session, never a site API key.** The site key
+is the *provisioning secret*: whoever holds it can register a terminal and rotate
+any device credential at that site. It is never returned by any operator-session
+endpoint, and it authenticates nothing under `/api/v1/auth` or
+`/api/v1/console`. See [section 12](#12-operator-authentication).
 
 ### Site API key
 
@@ -44,13 +63,23 @@ endpoint below.
 X-API-Key: main-site-api-key-123
 ```
 
-Identifies a **site**, and through it a company. Used by the dashboard and by
-operator tooling. Every query is scoped to that site's company — a key issued to
-one tenant cannot reach another's data.
+Identifies a **site**, and through it a company. Used for provisioning and by
+server-to-server tooling — not by a browser. Every query is scoped to that site's
+company — a key issued to one tenant cannot reach another's data.
 
 The site key is also the **provisioning secret**: it is what authorises
 `POST /devices/register`, which mints device credentials. Treat it accordingly —
 anyone holding it can enrol a terminal at that site.
+
+**Stored as a SHA-256 hash and not recoverable.** Since migration 011 the
+database holds no plaintext, so a key exists exactly twice: in the response that
+created or rotated it, and wherever the operator put it. There is no endpoint and
+no query that reads one back. Lost it? Rotate:
+`POST /api/v1/console/sites/{site_id}/api-key`.
+
+The format is `ats_` followed by 64 hex characters — 256 bits from `crypto/rand`.
+The `ats_` prefix distinguishes it at a glance from a device key (`atd_`), which
+matters when one is pasted where the other belongs.
 
 > The key shown above is the development seed from `seeds/dev_seed.sql`. It is
 > committed to the repository and therefore public. It is **not** created by the
@@ -85,18 +114,40 @@ that loses it re-registers and receives a new one.
 | Key unknown | `401` | `{"error":"Invalid device key"}` |
 | Device inactive or `DISABLED` | `403` | `{"error":"Device is inactive"}` |
 
-### Site key + serial (deprecated)
+### Site key + serial (deprecated, and OFF by default)
 
 ```
 X-API-Key: main-site-api-key-123
 X-Device-Serial: AT-0001
 ```
 
-Accepted on device endpoints so firmware built against the Sprint 4 protocol
-keeps working during a rollout. **Weaker by construction** — the site key is
-shared by every terminal at the site, so it cannot distinguish one device from
-another beyond the serial the caller claims. Migrate to `X-Device-Key`; this
-path will be removed.
+**This is refused with `401` unless `LEGACY_DEVICE_AUTH` is set** (SEC-05).
+
+It is not a terminal authenticating. It is whoever holds the site's
+**provisioning secret** asserting which terminal they are, and the server taking
+their word for it. That key registers devices and rotates their credentials, so
+it lives on installers' laptops — and while this path was open, holding it was
+equivalent to holding every device key at the site.
+
+It was kept because removing it would have stranded firmware predating
+per-device keys. That reason has expired: `POST /devices/claim` is shipped on
+both halves, so a terminal obtains its own credential from a single-use,
+serial-bound code without the site key ever reaching it. A factory-reset unit
+re-provisions the same way, because registration is idempotent by serial.
+
+**The refusal is `401` and identical whether or not the site key is valid**, so
+this path cannot be used to probe which serials are registered at a site.
+
+To re-open it for a fleet still being upgraded:
+
+```
+LEGACY_DEVICE_AUTH=1
+```
+
+Anything not parseable as a boolean true is treated as OFF, and the server logs
+a `SECURITY:` line at startup when it is on. Revocation applies on both paths —
+`RevokeTerminalCredential` clears the key hash **and** sets the device inactive,
+so a revoked terminal is refused however it presents itself.
 
 ### Protocol version header
 
@@ -133,6 +184,22 @@ terminal reads. It is unique **per company**, so two companies may both use
 ### Timestamps
 
 RFC 3339 / ISO 8601, UTC: `2026-08-07T19:20:27.655424Z`.
+
+Every timestamp the API returns is a **true instant in UTC**, and the `Z` is
+accurate. Storage is `TIMESTAMPTZ` and the API pins its database sessions to
+UTC, so the wire format does not change with the database server's location.
+
+> **Before migration 010 this was not true**, and any client that cached
+> timestamps from an earlier build holds values that are wrong by the database
+> server's UTC offset. The columns were `TIMESTAMP WITHOUT TIME ZONE`: they
+> stored a wall-clock reading, the driver labelled it `Z` on the way out, and
+> three different writers (the database's clock, the API process's clock, and a
+> device's own UTC) disagreed about what went in. Re-fetch rather than reconcile.
+
+**Timestamps you send** are accepted in either form. A value carrying an offset
+or a `Z` names an instant and is honoured exactly; a value carrying neither is
+read as UTC. This applies to `?since=` on the member-changes feed and to
+`occurred_at` on a device access log.
 
 ### Empty collections
 
@@ -242,11 +309,24 @@ Returns a single member object as above → `200`.
 
 | Field | Type | Required |
 |---|---|---|
-| `member_id` | string | yes |
+| `member_id` | string | yes — **at most 31 characters, printable ASCII, no spaces** |
 | `full_name` | string | yes |
 | `membership_type` | string | yes |
 | `active` | bool | no (default `false`) |
 | `fingerprint_template` | string | no |
+
+**`member_id` is validated against what a terminal can store** (FW-09). The
+device field holds 31 usable bytes and its parser refuses anything longer rather
+than truncating — a truncated identifier is not a shorter name for the same
+person, it is a different person. The character rule (`0x21`–`0x7E`, so no
+spaces and no control bytes) is the firmware's, and it exists because the value
+is composed into a URL path and a JSON body by the terminal's sync client.
+
+An id that does not fit is a `400` naming the limit, not a person who is created
+and then silently refused at every door.
+
+> A **UUID does not fit.** At 36 characters it is over the limit, and it is the
+> first thing an integrator reaches for. Use your own member number.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/members \
@@ -332,6 +412,11 @@ curl "http://localhost:8080/api/v1/members/changes?since=2000-01-01T00:00:00Z" \
 
 Returns an array of member objects → `200`. Empty: `[]`.
 
+`since` is compared as an instant. An offset or `Z` is honoured; no offset means
+UTC. Before migration 010 the offset was **discarded**, so a terminal sending a
+correctly-formed `…Z` was asking about a different moment than the one it named —
+by the database server's offset, in the direction that silently skipped changes.
+
 | Error | Status | Body |
 |---|---|---|
 | `since` absent | `400` | `{"error":"since parameter required"}` |
@@ -346,24 +431,53 @@ Returns an array of member objects → `200`. Empty: `[]`.
 
 **Auth: site API key.**
 
-### `GET /api/v1/access/{member_id}`
+### `GET /api/v1/access/{member_id}?terminal={serial}` — DEPRECATED
+
+Answers from the authorization engine — the same evaluator the door path and the
+console preview use. Responses carry `Deprecation: true` and a `Link` header
+naming the successor, `POST /api/v1/console/terminals/{serial}/evaluate`, which
+takes an operator identity rather than a machine credential.
+
+**`terminal` is required.** Authorization is a question about a person *at a
+door*: permissions are scoped to companies, sites and terminals, schedules are
+evaluated in the site's timezone, and the terminal's application mode decides
+which capability the question is even about. Without one there is no truthful
+answer, so the request is refused rather than answered.
+
+The serial is resolved **inside the authenticated site**. A key installed at one
+location cannot ask what another location's door would do.
 
 ```json
-{"granted":true,"message":"Access Granted","status":"ACTIVE"}
+{
+  "granted": false,
+  "message": "Access denied: no permission",
+  "status": "NO_PERMISSION",
+  "reason": "NO_PERMISSION",
+  "member_id": "M-1",
+  "terminal": "AT-0001",
+  "evaluated_at": "2026-08-16T09:14:00Z",
+  "decided_by": "authorization_engine",
+  "deprecated": true
+}
 ```
 
-Always `200`, including for a denial — the *decision* is in the body.
+`granted`, `message` and `status` are unchanged keys so an existing client keeps
+parsing; `reason` carries the engine's own code and is what a new client should
+read. `status` now holds that reason rather than the old `ACTIVE` /
+`INACTIVE` / `NOT_FOUND` trio.
 
-| `status` | `granted` | Meaning |
+| Error | Status | Body |
 |---|---|---|
-| `ACTIVE` | `true` | Member exists and is active |
-| `INACTIVE` | `false` | Member exists, marked inactive |
-| `NOT_FOUND` | `false` | No such member in this company |
+| `terminal` omitted | `400` | `{"error":"terminal is required...","code":"TERMINAL_REQUIRED"}` |
+| Serial not registered at the authenticated site | `404` | `{"error":"Terminal not registered for this site"}` |
 
-> **Current behaviour checks membership status only.** It does not consult the
-> `permissions` table — doors, schedules, and validity windows are not yet
-> evaluated. The permission engine is a future sprint; treat this as
-> "is this person a valid member", not "may they open this door".
+> **WHAT THIS USED TO RETURN, because an integrator may have built on it.** It
+> answered `{"granted": true, "message": "Access Granted", "status": "ACTIVE"}`
+> for any person who existed and was `active`, ignoring permissions, schedules,
+> validity windows, credential state, the terminal and whether the site was in
+> service. A client that assumed "granted means open the door" was admitting
+> everybody an operator had ever added. If you consumed this endpoint before
+> this change, re-read what your integration does with the answer.
 
 ### `POST /api/v1/access/log`
 
@@ -509,14 +623,22 @@ at that site inherits them.
 {
   "settings": {
     "tamper_alarm": true,
-    "offline_grace_minutes": 60,
     "sync_interval_seconds": 60,
     "unlock_duration_seconds": 5
   },
-  "settings_version": 1
+  "settings_version": 1,
+  "offline_policy": "CACHED_GRACE",
+  "offline_grace_minutes": 60
 }
 ```
 → `200`
+
+`offline_policy` and `offline_grace_minutes` are **outside** the `settings`
+object and always present. They are validated columns, not free-form keys, and
+they are what the terminals at this site are actually running — the server
+layers them over the free-form object on the way to a device. Reading the blob
+alone would tell you nothing about the setting that matters most during an
+outage.
 
 ### `PUT /api/v1/sites/settings`
 
@@ -537,9 +659,20 @@ curl -X PUT http://localhost:8080/api/v1/sites/settings \
 `settings_version` increments on every change. **Side effect:** queues a
 `SETTINGS` job to every device at the site.
 
+**`offline_policy` and `offline_grace_minutes` are REFUSED here** (`400`). They
+are validated columns, and a value written into the free-form object is
+overwritten before any terminal sees it. Accepting them silently is the trap
+this refusal closes: the write returned `200`, a read handed the number back,
+and no door was ever told — so an operator who set a grace window this way was
+given a receipt for a safety decision that never took effect.
+
+Set them with `PUT /api/v1/console/sites/{site_id}`, which validates the values,
+bumps `settings_version`, and fans the change out in the same transaction.
+
 | Error | Status | Body |
 |---|---|---|
 | Body is not a JSON object | `400` | `{"error":"Settings must be a JSON object"}` |
+| `offline_policy` or `offline_grace_minutes` present | `400` | `{"error":"...","code":"RESERVED_SETTINGS_KEY"}` |
 
 ---
 
@@ -615,6 +748,7 @@ the current build for their release channel.
       "id": 1,
       "public_id": "185e129c-071b-4429-a2ee-8f364adc9b38",
       "site_id": 1,
+      "site_public_id": "6adb7321-5581-4287-96b4-dbe1dc922685",
       "site_name": "Main Site",
       "serial_number": "AT-0001",
       "device_name": "Front Door",
@@ -636,6 +770,13 @@ the current build for their release channel.
 `boot_count`, `last_seen_at`, `last_sync_at`, `last_heartbeat_at` appear once
 reported/known. `firmware_outdated` is `false` when no current build is marked
 for that type and channel.
+
+`member_capacity` appears once the terminal has reported one (FW-01), and its
+**absence must be rendered as "unknown", never as unlimited or zero**.
+`roster_overflow_at` and `roster_overflow_count` appear when the terminal's
+permitted roster last exceeded what it can hold; they are stored state, so this
+list read costs nothing extra. The live roster size is on the single-terminal
+read (`GET /console/terminals/{serial}`, as `roster_size` and `over_capacity`).
 
 **Device states:** `PROVISIONING`, `ONLINE`, `OFFLINE`, `UPDATING`, `ERROR`,
 `DISABLED`. See [docs/sync-protocol.md](docs/sync-protocol.md#device-states).
@@ -660,6 +801,29 @@ when a terminal is believed to have drifted.
 | Error | Status | Body |
 |---|---|---|
 | Serial not at this site | `404` | `{"error":"Device not registered for this site"}` |
+| Roster larger than the terminal can hold | `409` | see below |
+
+**`409` when the snapshot would not fit** (FW-01). A terminal that has reported
+a `member_capacity` smaller than its permitted roster cannot apply a `FULL_SYNC`
+— the firmware refuses an oversized roster wholesale rather than truncating it,
+because a short roster reads as a list of deletions. The server therefore
+declines to queue one, and **the existing queue is left untouched**: cancelling
+it and failing to replace it would be strictly worse than the backlog.
+
+```json
+{
+  "error": "terminal AT-0001 can hold 256 people and its permissions cover 312",
+  "code": "ROSTER_EXCEEDS_TERMINAL_CAPACITY",
+  "serial_number": "AT-0001",
+  "roster_size": 312,
+  "capacity": 256
+}
+```
+
+The same `409` is returned by `PUT /console/terminals/{serial}/site` when the
+destination site's roster would not fit — the relocation is rolled back whole,
+so the terminal has not moved. A terminal that has reported **no** capacity is
+never refused, because the server does not know its ceiling.
 
 ---
 
@@ -747,6 +911,20 @@ All fields optional; body may be omitted entirely.
 | `status` | string | `ONLINE`, `UPDATING`, or `ERROR` only |
 | `error` | string | recorded when `status` is `ERROR` |
 | `ip_address` | string | defaults to the caller's IP |
+| `member_capacity` | integer | how many people this terminal can hold (FW-01) |
+
+**`member_capacity` is the terminal's own ceiling, and its absence is
+meaningful.** The server treats "not reported" as *unknown* and never
+substitutes a constant: the on-device limit has already changed once (64 → 256)
+and a server that guessed would refuse rosters a terminal holds happily. A
+reported value is remembered — a later heartbeat omitting the field keeps it,
+because the hardware has not changed.
+
+Values ≤ 0 are ignored and the heartbeat still succeeds; a garbage field must
+not take a door out of service.
+
+**No firmware sends this yet.** The contract it has to meet is in
+`docs/sync-protocol.md`.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices/heartbeat \
@@ -1092,32 +1270,1345 @@ exactly as documented in [section 5](#5-enrollment), differing only in which
 credential opens them and in reading their tenant from the device rather than
 from the site key.
 
+### Operator session routes
+
+The dashboard's surface. None of these accept a site API key, and none returns
+one. CSRF is required on every unsafe method.
+
+| Method | Path | Auth | Min role |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | none | — |
+| `GET` | `/api/v1/auth/me` | session | any |
+| `POST` | `/api/v1/auth/logout` | session + CSRF | any |
+| `POST` | `/api/v1/auth/password` | session + CSRF | any |
+| `GET` | `/api/v1/console/company` | session | VIEWER |
+| `GET` | `/api/v1/console/sites` | session | VIEWER |
+| `GET` | `/api/v1/console/sites/{site_id}` | session | VIEWER |
+| `GET` | `/api/v1/console/sites/{site_id}/settings` | session | VIEWER |
+| `PUT` | `/api/v1/console/sites/{site_id}/settings` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/applications` | session | VIEWER |
+| `PUT` | `/api/v1/console/applications/{code}` | session + CSRF | OWNER |
+| `GET` | `/api/v1/console/terminals` | session | VIEWER |
+| `GET` | `/api/v1/console/terminals/summary` | session | VIEWER |
+| `GET` | `/api/v1/console/terminals/{serial}` | session | VIEWER |
+| `PUT` | `/api/v1/console/terminals/{serial}/application-mode` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/people` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}` | session | VIEWER |
+| `POST` | `/api/v1/console/people` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/operators` | session | ADMIN |
+| `POST` | `/api/v1/console/operators` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/operators/{operator_id}` | session | ADMIN |
+| `PUT` | `/api/v1/console/operators/{operator_id}` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/operators/{operator_id}` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/operators/{operator_id}/sites` | session | ADMIN |
+| `PUT` | `/api/v1/console/operators/{operator_id}/sites` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/operators/{operator_id}/invite` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/operators/{operator_id}/reset` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/sites` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/sites/{site_id}/api-key` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/resync` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/terminals/{serial}/state` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/revoke` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/terminals/{serial}` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/terminals/{serial}/site` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/firmware` | session | ADMIN |
+| `POST` | `/api/v1/console/firmware` | session + CSRF | ADMIN |
+| `PUT` | `/api/v1/console/firmware/{id}/current` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/audit` | session | ADMIN |
+| `GET` | `/api/v1/console/events` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}/permissions` | session | VIEWER |
+| `POST` | `/api/v1/console/people/{external_id}/permissions` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/permissions/{permission_id}` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/schedules` | session | VIEWER |
+| `POST` | `/api/v1/console/schedules` | session + CSRF | MANAGER |
+| `PUT` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
+| `DELETE` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
+| `POST` | `/api/v1/console/terminals/{serial}/evaluate` | session + CSRF | MANAGER |
+| `POST` | `/api/v1/console/sites/{site_id}/claim-codes` | session + CSRF | ADMIN |
+
+### Credential handover routes
+
+Unauthenticated by necessity: somebody who has forgotten their password cannot
+authenticate to ask for a new one, and somebody redeeming an invitation has
+never had one. Both share the login rate limiter.
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists |
+| `POST` | `/api/v1/auth/redeem` | the single-use token is the whole authorisation |
+
+### Platform administration routes
+
+A **separate credential class** with its own table, session and cookie. It
+reaches `companies` and operator bootstrap, and deliberately nothing inside a
+tenant — there is no platform route that loads a person, a credential, an event,
+a terminal or a site key.
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/platform/login` | none |
+| `GET` | `/api/v1/platform/me` | platform session |
+| `POST` | `/api/v1/platform/logout` | platform session + CSRF |
+| `GET` | `/api/v1/platform/companies` | platform session |
+| `GET` | `/api/v1/platform/companies/{company_id}` | platform session |
+| `POST` | `/api/v1/platform/companies` | platform session + CSRF |
+| `PUT` | `/api/v1/platform/companies/{company_id}` | platform session + CSRF |
+| `POST` | `/api/v1/platform/companies/{company_id}/operators` | platform session + CSRF |
+
+Issuing a first operator is refused into a company that already has one, by a
+query predicate rather than a check: a platform identity that could add accounts
+to a running tenant at any time would be a standing back door into every
+customer.
+
+---
+
+## 12. Operator authentication
+
+`/api/v1/auth/*` — how a human signs in to the dashboard. A separate credential
+class from everything above: **no route in this section or the next reads
+`X-API-Key`, and none returns one.**
+
+### The session cookie
+
+```
+Set-Cookie: __Host-al_session=ats_<64 hex>; Path=/; HttpOnly; Secure; SameSite=Lax
+```
+
+Fixed, and not configurable. The `__Host-` prefix is enforced by the browser: it
+refuses the cookie unless `Secure` and `Path=/` are set and `Domain` is absent,
+which makes it host-only and un-settable by any sibling subdomain of the API.
+There is no `Max-Age` — the session's real lifetime is the server-side row.
+
+The token is opaque, 256 bits from `crypto/rand`, and stored only as a SHA-256
+hash. **It never appears in a response body.**
+
+Two expiries. The idle window (12h by default) slides forward as the session is
+used; the absolute cap (7d) never moves. Both are enforced server-side on every
+request, so logout, disabling an account, changing a role and changing a password
+all take effect on the *next* request.
+
+**Deployment constraint.** `SameSite=Lax` sends the cookie only on *same-site*
+requests. `app.accesslink.store` → `api.accesslink.store` works because both
+share the registrable domain `accesslink.store`. A dashboard on an unrelated
+domain would never receive the cookie. `CORS_ALLOWED_ORIGINS` must additionally
+name the dashboard's exact origin, or the browser will not send credentials
+cross-origin — both halves are required and neither substitutes for the other.
+
+For local development without TLS, `SESSION_COOKIE_INSECURE=1` drops `Secure`
+**and renames the cookie to `al_session`** — a `__Host-` cookie without `Secure`
+is rejected outright, so the prefix has to go with it. Exactly one name is
+accepted at a time.
+
+### CSRF
+
+Every unsafe method (anything but `GET`, `HEAD`, `OPTIONS`) under
+`/api/v1/auth` and `/api/v1/console` requires:
+
+```
+X-CSRF-Token: <csrf_token from login or /me>
+```
+
+The token is per-session, returned in the **body** of `login` and `/me` — not as
+a second cookie, because a dashboard on another origin cannot read a cookie
+scoped to the API host. Hold it in memory and re-fetch it from `/me` after a page
+reload. Comparison is by hash, in constant time. Missing → `403 CSRF token
+required`; wrong → `403 Invalid CSRF token`.
+
+### `POST /api/v1/auth/login`
+
+Unauthenticated. Requires `Content-Type: application/json` — an HTML form cannot
+send JSON, so a cross-site form post cannot reach this endpoint.
+
+```json
+{"email": "ops@example.com", "password": "..."}
+```
+
+`200` sets the cookie and returns the session body ([below](#the-session-body)).
+
+| Code | When |
+|---|---|
+| `400` | missing `email` or `password` |
+| `401` | **any** credential failure — unknown address, wrong password, disabled account, disabled company. One message for all of them, and an unknown address still costs a bcrypt comparison so timing does not answer what the message will not |
+| `415` | body was not `application/json` |
+| `429` | too many attempts (per address) **or** the account is temporarily locked (5 failures → 1 min, doubling to a 15 min cap). Carries `Retry-After` |
+| `500` | database unavailable — never reported as a credential failure |
+
+### `GET /api/v1/auth/me`
+
+Session required. Returns the same body as `login`, so a dashboard can restore
+its whole state after a reload with one request. `401` when the session is
+missing, unknown, revoked, expired, or belongs to a disabled account or company.
+
+### The session body
+
+Returned identically by `login` and `/me`:
+
+```json
+{
+  "operator": {
+    "id": "1f0c…", "email": "ops@example.com",
+    "full_name": "Ops Person", "role": "OWNER"
+  },
+  "company": { "id": "9b2a…", "name": "Acme", "slug": "acme" },
+  "role": "OWNER",
+  "sites": [ { "site_id": "5120…", "site_name": "Site A" } ],
+  "all_sites": true,
+  "applications": [
+    { "code": "ATTENDANCE", "settings": { "grace_minutes": 5 } }
+  ],
+  "csrf_token": "…",
+  "session_expires_at": "2026-08-21T09:12:33Z",
+  "session_expires_in_seconds": 604800
+}
+```
+
+- `sites` — the operator's explicit site grants, possibly empty.
+- **`all_sites`** — an empty `sites` array means *not scoped to particular
+  sites*, which is **every site in the company**, not none. This flag says which.
+  It is true for OWNER and ADMIN always, and for anyone holding no grants.
+- `applications` — the capabilities this company has **enabled**, in a stable
+  order, and what the dashboard should build its navigation from. An empty array
+  is a legitimate, common state; see [section 14](#14-applications-and-modules).
+- `session_expires_in_seconds` — a duration, resolved server-side. Prefer it over
+  the absolute timestamp when scheduling anything.
+
+An object, deliberately: new fields are added without breaking clients.
+
+### `POST /api/v1/auth/logout`
+
+Session + CSRF. Revokes the row **and** clears the cookie, then `204`. Idempotent
+in effect; a copy of the cookie is worthless afterwards.
+
+### `POST /api/v1/auth/password`
+
+Session + CSRF, and rate-limited on the same allowance as `login`.
+
+```json
+{"current_password": "...", "new_password": "..."}
+```
+
+`204` on success. The current password is required even though the caller is
+signed in — a session proves possession of the browser, not knowledge of the
+secret. **Every other session for that operator is revoked** in the same
+transaction; the calling session survives.
+
+| Code | When |
+|---|---|
+| `400` | new password fails the policy (minimum 12 characters, maximum 72 bytes) |
+| `403` | current password is wrong, or CSRF failed |
+| `415` | body was not `application/json` |
+
+---
+
+## 13. Operator console
+
+`/api/v1/console/*` — the dashboard's API. Operator session on every route, CSRF
+on every unsafe method, a minimum role per route, and a site-grant check wherever
+the path names a site.
+
+**Roles are ordered:** `OWNER > ADMIN > MANAGER > VIEWER`. A route names the
+lowest role that may reach it and everyone above inherits. An insufficient role is
+`403`; no session at all is `401`.
+
+**Site grants.** An operator may hold grants to specific sites. OWNER and ADMIN
+are never scoped, and an operator with *no* grants is not scoped either — absence
+means every site in the company. On a site-scoped route:
+
+- a site in another company → **`404`** (never `403`; the API does not confirm an
+  id exists in someone else's account)
+- a site in your company you are not granted → **`403`**
+
+Lists are narrowed by the same rule, so the console never shows a site the detail
+route would then refuse.
+
+**Terminals are governed by the grant on the site they stand at.** A route that
+names a `{serial}` rather than a `{site_id}` resolves the terminal's own site and
+applies exactly the rule above — another company's serial is `404`, an ungranted
+site's serial is `403`. A serial is printed on the hardware and is not a secret,
+so knowing one has never been a substitute for a grant.
+
+**Tenancy.** Every query is scoped to the caller's company. A resource in another
+tenant is `404`.
+
+### Company and sites
+
+| Method | Path | Role | Returns |
+|---|---|---|---|
+| `GET` | `/console/company` | VIEWER | `{id, name, slug, contact_email, active, created_at}` |
+| `GET` | `/console/sites` | VIEWER | `{count, sites: [...]}` |
+| `GET` | `/console/sites/{site_id}` | VIEWER | one site |
+| `GET` | `/console/sites/{site_id}/settings` | VIEWER | `{settings, settings_version}` |
+| `PUT` | `/console/sites/{site_id}/settings` | MANAGER | updated settings |
+| `POST` | `/console/sites` | **ADMIN** | new site **+ its key, once** |
+| `PUT` | `/console/sites/{site_id}` | **ADMIN** | updated site |
+| `DELETE` | `/console/sites/{site_id}` | **ADMIN** | `{retired, terminals_retired}` |
+| `POST` | `/console/sites/{site_id}/api-key` | **ADMIN** | **new key, once** |
+
+A site:
+
+```json
+{
+  "id": "5120…", "name": "Site A", "address": "…", "timezone": "UTC",
+  "active": true, "terminal_count": 3, "created_at": "…"
+}
+```
+
+**There is no `api_key` field.** The column is never selected for these
+endpoints. `{site_id}` is a site's `public_id` (a UUID); a malformed one is
+`404`, not a `500`.
+
+Writing settings replaces the object wholesale and enqueues a `SETTINGS` sync job
+for every terminal at that site — the same handler and the same behaviour as
+[section 6](#6-site-settings).
+
+Site lifecycle is **ADMIN**, above the MANAGER gate on day-to-day writes:
+creating a site mints a provisioning credential and retiring one stops doors
+opening. ADMIN and OWNER are never site-scoped, so an operator scoped to one site
+cannot create or modify another; the `{site_id}` routes still resolve inside the
+caller's company, so another tenant's site is `404`.
+
+#### `POST /console/sites`
+
+```json
+{"name": "Lagos Depot", "address": "14 Marina Road", "timezone": "Africa/Lagos"}
+```
+
+`name` is required and unique per company (`409` on a clash; a *retired* site's
+name is free for reuse). `timezone` defaults to `UTC` — it describes where the
+hardware stands, which is a different question from the zone an operator reads
+timestamps in.
+
+```json
+{
+  "site": { "id": "…", "name": "Lagos Depot", "…": "…" },
+  "credential": {
+    "api_key": "ats_9f1c…",
+    "api_key_prefix": "ats_9f1c2a",
+    "shown_once": true
+  }
+}
+```
+→ `201`
+
+> ### The key is shown once and cannot be recovered
+>
+> `api_key` is the **provisioning secret**: whoever holds it can register a
+> terminal at that site and rotate any device credential there. The server stores
+> only its SHA-256 hash, so this response is the only time it exists outside
+> whatever the caller does with it. **No `GET` ever returns it**, and there is no
+> endpoint that can. An operator who loses it must rotate.
+>
+> `api_key_prefix` is the first 12 characters. It is **not** secret, it *does*
+> appear in later reads, and it exists so a key can be identified in a log or a
+> support conversation without being reconstructible.
+
+#### `PUT /console/sites/{site_id}`
+
+```json
+{"name": "…", "address": "…", "timezone": "…", "active": false}
+```
+
+Metadata only; every field optional, and only what is supplied is applied.
+
+`active: false` is **deactivation, not retirement**. The site key and every
+terminal at the site stop authenticating immediately, and **nothing is
+destroyed** — setting it back to `true` restores service. This is what "we are
+closing this depot for a month" needs.
+
+#### `DELETE /console/sites/{site_id}`
+
+Retires the site **and soft-deletes every terminal at it, in one transaction**.
+
+```json
+{"retired": true, "terminals_retired": 3}
+```
+→ `200`
+
+> **This stops doors opening.** A terminal whose site is retired fails
+> authentication immediately — on its own device key as well as on the site key,
+> because both middlewares refuse a device whose site is gone. `terminals_retired`
+> is how many; a client that does not show that number is not describing what
+> happened. One-way through the API; use `PUT active:false` if you want it back.
+
+Rows are soft-deleted and retained for audit. The site's *name* becomes reusable,
+because the per-company unique index ignores retired rows.
+
+#### `POST /console/sites/{site_id}/api-key`
+
+Issues a replacement key and **invalidates the previous one immediately**. There
+is no overlap window — a window is a period in which a credential believed to be
+revoked still provisions hardware.
+
+```json
+{
+  "credential": {"api_key": "ats_…", "api_key_prefix": "ats_…", "shown_once": true},
+  "legacy_terminals": 2
+}
+```
+→ `200`
+
+`legacy_terminals` counts terminals at this site that have **never been issued a
+device credential of their own** and therefore certainly still authenticate with
+the site key — the ones this rotation just locked out. **Terminals holding their
+own `X-Device-Key` are unaffected**: that is a different secret and rotation does
+not touch it.
+
+### Terminals
+
+| Method | Path | Role | Returns |
+|---|---|---|---|
+| `GET` | `/console/terminals` | VIEWER | `{count, terminals: [...]}` |
+| `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
+| `GET` | `/console/terminals/{serial}` | VIEWER | inventory row + application configuration |
+| `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | inventory row + application configuration |
+
+`terminals` entries are the inventory objects from
+[section 7](#get-apiv1devicesoutdatedtrue). They carry **no credential material**
+— not the device key, not its hash, not the site key. `?outdated=true` filters as
+it does there.
+
+**All four are narrowed by site grants**, including the summary: the counts sit
+above a list that is itself narrowed, so a company-wide rollup would both misread
+to a scoped operator and disclose how much hardware stands at sites they were
+deliberately not given. The two `{serial}` routes are gated on the grant to that
+terminal's own site — `403` for an ungranted site in your company, `404` for
+another tenant's serial or one that does not exist. The gate runs **before** the
+handler, so a malformed body against a terminal you may not reach is still `403`
+rather than a `400` that would confirm the serial exists.
+
+`GET /console/terminals/{serial}` returns the **same inventory row as the list**,
+plus the application assignment:
+
+```json
+{
+  "public_id": "…", "serial_number": "TERM-1", "device_name": "Front Desk",
+  "site_id": 4, "site_public_id": "6adb7321-…", "site_name": "Lagos Depot",
+  "device_type": "TERMINAL",
+  "status": "ONLINE", "active": true, "release_channel": "STABLE",
+  "firmware_version": "1.2.0", "current_firmware_version": "1.3.0",
+  "firmware_outdated": true, "hardware_revision": "rev-c", "build_number": "456",
+  "boot_count": 12, "last_heartbeat_at": "…", "last_seen_at": "…",
+
+  "application_mode": "CHECK_IN",
+  "effective_applications": ["CHECK_IN"],
+
+  "roster_size": 42,
+  "over_capacity": false,
+
+  "health": {
+    "pending_jobs": 3,
+    "failed_jobs": 0,
+    "last_apply_error": "member table full",
+    "last_apply_error_at": "2026-08-16T08:12:44Z",
+    "credential_active": true,
+    "offline_policy": "CACHED_GRACE",
+    "offline_grace_minutes": 60
+  }
+}
+```
+
+**`health` is the terminal's live operational state** (SYN-04), and it is the
+answer to "is this terminal behind, is it failing, and can it still
+authenticate". It is nested rather than flattened because `pending_jobs` beside
+`firmware_version` would read as the same kind of fact, and it is not — one is
+inventory, the other changes between two refreshes.
+
+| Field | Meaning |
+|---|---|
+| `pending_jobs` | Unacknowledged work the terminal still owes. Maintained by trigger from `sync_jobs` |
+| `failed_jobs` | Work that exhausted its attempts and parked. A non-zero value means people are missing from that door |
+| `last_apply_error` | The **terminal's own words** — "member table full", not "failed". Omitted when there is none |
+| `last_apply_error_at` | When it said so. Omitted with the message. An error from four months ago and one from four minutes ago are not the same problem |
+| `credential_active` | Whether the device key still resolves. Derived from the hash being present, which is what authentication itself probes — so a console showing `true` agrees with the door |
+| `offline_policy`, `offline_grace_minutes` | The **site's** validated policy, repeated here because a terminal is where an operator thinks about an outage |
+
+`credential_active` is a **boolean and nothing more**. No response on this route
+carries the device key, its hash, its prefix, or the site provisioning key.
+
+`roster_size` is how many people this terminal's permissions currently cover.
+`over_capacity` is true **only** when the terminal has reported a
+`member_capacity` smaller than that — a terminal that has reported none is never
+marked over capacity, because the server does not know its ceiling.
+
+`application_mode` is what the terminal is **assigned**;
+`effective_applications` is what that **resolves to now**, and goes empty when
+the company disables the capability — the assignment is retained, not rewritten.
+`PUT …/application-mode` returns this same shape, so a client can use the
+response instead of refetching.
+
+```json
+PUT {"application_mode": "CHECK_IN"}
+```
+
+| Code | When |
+|---|---|
+| `400` | not a known mode (the response lists the accepted values) |
+| `404` | no such terminal in this company |
+| `409` | that capability is not enabled for the company |
+
+#### Revoking a credential, and recovering from it
+
+`POST /console/terminals/{serial}/revoke` (ADMIN) destroys the device key: the
+hash is cleared, the terminal is set `DISABLED` and inactive, and its queued work
+is cancelled. The response carries the terminal detail plus:
+
+```json
+{
+  "credential_cleared": true,
+  "pending_jobs_cancelled": 7,
+  "recovery": "Re-enable this terminal, then issue a single-use claim code for its serial and redeem it at the unit. Re-enabling first is required: provisioning refuses a disabled terminal. The site provisioning key is not needed and should not be used."
+}
+```
+
+**`recovery` is an instruction, not a description**, and a client is expected to
+show it verbatim. The order in it is required and neither step can be skipped:
+
+1. `PUT /console/terminals/{serial}/state` with `{"disabled": false}`.
+   Provisioning **refuses a disabled terminal** (`401` on claim, `403` on
+   registration), so a claim attempted before this is rejected and issues no
+   credential.
+2. `POST /console/sites/{site_id}/claim-codes` for that serial, redeemed at the
+   unit through `POST /devices/claim`.
+
+> **This response previously said "This terminal must re-register with the site
+> provisioning key before it can authenticate again."** That was wrong twice: it
+> omitted step 1, so following it produced a refusal with no explanation, and it
+> named the credential that enrols every terminal at a site when a single-use,
+> serial-bound code is the supported route. A client that hard-coded the old
+> sentence should drop its copy and render this field.
+
+**Issuing a claim code is a console operation; redeeming one is not.** A device
+credential is only ever produced by `POST /api/v1/devices/claim` or by
+`POST /api/v1/devices/register` behind the site API key, in each case exactly
+once, and never by a console read.
+
+### People
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/people?limit=&offset=&q=` | VIEWER |
+| `GET` | `/console/people/{external_id}` | VIEWER |
+| `POST` | `/console/people` | MANAGER |
+| `PUT` | `/console/people/{external_id}` | MANAGER |
+| `DELETE` | `/console/people/{external_id}` | MANAGER |
+
+The list is **paginated and searchable**:
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `limit` | 50 | 1–200 | page size |
+| `offset` | 0 | ≥ 0 | rows to skip |
+| `q` | — | ≤ 100 chars | matches `external_id` **or** `full_name`, anywhere, case-insensitively |
+
+Out-of-range and unparseable values are **clamped, not rejected** — a `limit` of
+5000 is a caller asking for as much as it can have, and `limit=abc` falls back to
+the default rather than failing the request.
+
+`%`, `_` and `\` in `q` are matched **literally**. Without that, `%` would select
+the whole roster, `_` would match any single character, and a trailing `\` would
+produce a malformed pattern; a search box can pass any of them safely. `q` is
+trimmed and truncated to 100 characters — a term longer than any stored value
+cannot match anything.
+
+```json
+{
+  "count": 50, "total": 1284, "limit": 50, "offset": 0, "has_more": true,
+  "people": [ … ]
+}
+```
+
+`count` is this page; `total` is the size of the whole match, so `total` reflects
+the search rather than the roster. Ordering is newest first with a stable
+tiebreak, so paging visits every row exactly once.
+
+**`GET /api/v1/members` (site key) is deliberately unchanged** — it still returns
+a bare array of everyone. Terminals and existing tooling speak that contract, and
+bounding it would silently truncate a roster somebody depends on being complete.
+
+```json
+{
+  "id": "7ac1…", "external_id": "P-100", "full_name": "Sam Taylor",
+  "category": "STANDARD", "active": true,
+  "biometric_enrolled": true,
+  "created_at": "…", "updated_at": "…"
+}
+```
+
+- `external_id` is the identifier a terminal reads. Unique per company. Required
+  on create, taken from the path on update.
+- `category` is **optional** and free text, defaulting to `STANDARD`. It maps to a
+  legacy column; the platform has no opinion about what class of person a company
+  records.
+- **`biometric_enrolled` is the entire biometric surface.** No template, locator
+  or credential detail is ever returned. Biometrics are an abstraction the backend
+  owns — do not model a person as *having a fingerprint*, model them as having
+  zero or more credentials whose details the API will describe when that resource
+  exists.
+- An update **never** alters a person's biometric enrolment. Enrolment happens at
+  a terminal, through the enrolment flow.
+
+`POST` → `201`. `409` if the `external_id` is taken. `PUT`/`DELETE` → `200`/`204`,
+and deleting is idempotent. Person writes enqueue the `CREATE`/`UPDATE`/`DELETE`
+sync jobs that keep terminals in step.
+
+People are company-wide in this schema, so **site grants do not narrow the people
+list** — see the known limitations.
+
+### Operators
+
+All ADMIN. `{operator_id}` is an operator's `public_id`.
+
+| Method | Path |
+|---|---|
+| `GET` | `/console/operators` |
+| `POST` | `/console/operators` |
+| `GET` | `/console/operators/{operator_id}` |
+| `PUT` | `/console/operators/{operator_id}` |
+| `DELETE` | `/console/operators/{operator_id}` |
+| `GET` | `/console/operators/{operator_id}/sites` |
+| `PUT` | `/console/operators/{operator_id}/sites` |
+
+```json
+POST {"email": "…", "full_name": "…", "password": "…", "role": "MANAGER",
+      "site_ids": ["5120…"]}
+
+PUT  {"role": "ADMIN", "active": false, "password": "…"}   // all optional
+PUT  /sites {"site_ids": ["5120…", "80e5…"]}               // replaces wholesale
+```
+
+Guards, each a `403`:
+
+- an **ADMIN cannot create, promote to, or modify an OWNER** — otherwise ADMIN is
+  a synonym for OWNER one request later;
+- nobody may change **their own** role, disable themselves, or delete themselves —
+  a sole OWNER demoting themselves would leave nobody able to manage operators.
+
+`409` on a duplicate address, `400` on a password below the policy. An
+administrative password reset revokes **every** session the target holds. Site
+grants are resolved inside the caller's company: an unknown or foreign site fails
+the whole call with `400` and changes nothing.
+
+### Applications
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/applications` | VIEWER |
+| `PUT` | `/console/applications/{code}` | OWNER |
+
+See [section 14](#14-applications-and-modules).
+
+---
+
+## 14. Applications and modules
+
+AccessLink is a **general-purpose biometric terminal platform**. The same
+hardware and the same API serve a company running door access, one recording
+attendance, and one doing nothing but identity verification. What a deployment is
+*for* is configuration, not a property of the product.
+
+An **application** is a capability the platform offers:
+
+| Code | Capability |
+|---|---|
+| `ACCESS_CONTROL` | decide whether to release a door, barrier or lock |
+| `ATTENDANCE` | record presence against a schedule |
+| `REGISTRATION` | enrol people and their credentials |
+| `CHECK_IN` | record arrival at an event or appointment |
+| `VERIFICATION` | confirm a person is who they claim, and report it |
+| `TIME_TRACKING` | accumulate worked time from arrivals and departures |
+| `VISITOR_MANAGEMENT` | admit and record people who are not on the roster |
+
+**Nothing is enabled by default.** A company with no capabilities enabled is a
+legitimate, fully-working state, and it is the state every company starts in. A
+client must render that rather than fall back to a default set — assuming a
+workflow is precisely what this model exists to prevent. Read the catalog from
+`available` rather than hard-coding it, so a capability added to the platform
+appears without a client change.
+
+### `GET /api/v1/console/applications`
+
+```json
+{
+  "configured": [
+    { "id": "…", "code": "ATTENDANCE", "enabled": true,
+      "settings": {"grace_minutes": 5},
+      "created_at": "…", "updated_at": "…" }
+  ],
+  "enabled": ["ATTENDANCE"],
+  "available": ["ACCESS_CONTROL", "ATTENDANCE", "REGISTRATION", "CHECK_IN",
+                "VERIFICATION", "TIME_TRACKING", "VISITOR_MANAGEMENT"]
+}
+```
+
+`configured` holds every row the company has, enabled or not; `enabled` is the
+subset currently on. **A disabled capability is never reported as enabled** — but
+its row and its settings are retained, so turning it back on restores what was
+configured rather than starting over.
+
+### `PUT /api/v1/console/applications/{code}`
+
+OWNER + CSRF.
+
+```json
+{"enabled": true, "settings": {"grace_minutes": 5}}
+```
+
+Both fields optional: omitting `enabled` enables, and omitting `settings` leaves
+the existing configuration alone, so a toggle does not discard it. `settings` must
+be a **JSON object**. `400` for an unknown code, a lowercase code, a non-object
+`settings`, or `MULTI_PURPOSE`.
+
+### Terminal application mode
+
+Separate from company capabilities, and per **terminal** — one site routinely
+mixes purposes, such as a door terminal at the entrance and a registration desk
+in the office.
+
+`application_mode` is one capability code **or** `MULTI_PURPOSE`:
+
+- **`MULTI_PURPOSE`** is the default for every terminal, and means the terminal
+  serves whatever its company has enabled. It is a **device mode, never a company
+  capability** — `PUT /console/applications/MULTI_PURPOSE` is a `400`.
+- A specific mode may only be assigned while the company has that capability
+  enabled (`409` otherwise).
+- If the company later disables it, the assignment is **retained** and
+  `effective_applications` goes empty. Re-enabling restores it; the terminal's
+  configuration is never silently rewritten.
+
+`effective_applications` is what the terminal actually serves right now, and is
+empty for a company that has enabled nothing.
+
+**The device protocol is unaffected.** No device-facing endpoint reports an
+application mode, and no terminal is told anything new — a terminal in the field
+cannot tell whether any of this is configured.
+
+---
+
+## 15. Authorization — permissions and schedules
+
+The engine that decides whether somebody may present a credential at a terminal.
+Before this existed, `permissions` was a table nothing read: every active person
+with a bound credential opened every terminal in their company, permanently.
+
+**The rule, stated once:**
+
+> Absence of permission is not permission.
+
+A decision is DENIED unless a live, matching, in-window `ALLOW` says otherwise,
+and any matching `DENY` beats every `ALLOW` at any scope.
+
+### How a decision is reached
+
+1. The terminal, its site and its company must all be in service.
+2. The capability the terminal is assigned to must be enabled for the company.
+3. The person must resolve inside the terminal's company, be active, and be
+   inside their own validity window.
+4. The credential, where one is named, must belong to that person, be `ACTIVE`,
+   and be inside its validity window.
+5. Every live permission whose scope covers the terminal and whose application
+   matches is collected. Any `DENY` wins outright. Otherwise any `ALLOW` grants.
+6. Otherwise denied, because absence of permission is not permission.
+
+### Reason codes
+
+Returned on **every** outcome including grants. A trail that records why somebody
+was refused but not why they were admitted answers half the question a security
+review asks.
+
+| Reason | Meaning |
+|---|---|
+| `ALLOWED` | A matching rule admitted them. |
+| `NO_PERMISSION` | Nothing granted access here. The deny-by-default answer. |
+| `EXPLICIT_DENY` | A `DENY` rule matched. |
+| `OUTSIDE_SCHEDULE` | A rule matched but its schedule could not be evaluated. |
+| `PERMISSION_EXPIRED` / `PERMISSION_NOT_YET_VALID` | Validity window closed or not yet open. |
+| `PERSON_INACTIVE` / `PERSON_UNKNOWN` | The subject. |
+| `CREDENTIAL_UNKNOWN` / `_REVOKED` / `_SUSPENDED` / `_EXPIRED` / `_NOT_YET_VALID` | The credential. |
+| `APPLICATION_NOT_ENABLED` | The capability is off for this company. |
+| `TERMINAL_DISABLED` / `SITE_INACTIVE` / `COMPANY_INACTIVE` | Context out of service. |
+
+### Scopes
+
+A permission names exactly one:
+
+| Scope | Reaches |
+|---|---|
+| `COMPANY` | every terminal the company has, including ones installed later |
+| `SITE` | every terminal at one site (`site_id` required) |
+| `TERMINAL` | exactly one terminal (`device_serial` required) |
+
+### `GET /api/v1/console/people/{external_id}/permissions`
+
+Role **VIEWER**. Returns `{count, permissions[]}`.
+
+```json
+{
+  "id": "9f1c…",
+  "person_id": "3ab2…",
+  "scope_type": "SITE",
+  "site_id": "7c4d…",
+  "site_name": "North Gate",
+  "application": "ACCESS_CONTROL",
+  "effect": "ALLOW",
+  "schedule_id": "1f0a…",
+  "schedule_name": "Office hours",
+  "starts_at": null,
+  "ends_at": "2026-12-31T00:00:00Z",
+  "active": true
+}
+```
+
+`application` empty means the rule applies to whatever the terminal is doing.
+`schedule_id` empty means no time restriction.
+
+### `POST /api/v1/console/people/{external_id}/permissions`
+
+Role **MANAGER**. CSRF required. **Idempotent** — it upserts onto the unique
+index for the scope, so a retried create is not a conflict.
+
+```json
+{
+  "scope_type": "SITE",
+  "site_id": "7c4d…",
+  "application": "ACCESS_CONTROL",
+  "effect": "ALLOW",
+  "schedule_id": "1f0a…",
+  "starts_at": null,
+  "ends_at": "2026-12-31T00:00:00Z",
+  "active": true
+}
+```
+
+`effect` defaults to `ALLOW`. A `COMPANY` scope must not name a site or terminal;
+a `SITE` or `TERMINAL` scope must name one. `201` with the stored permission.
+`404` if the person, site, terminal or schedule is not in the caller's company.
+
+### `DELETE /api/v1/console/permissions/{permission_id}`
+
+Role **MANAGER**. CSRF required. Soft-deletes the rule.
+
+### Schedules
+
+A schedule is a **named, reusable set of windows**, referenced by many
+permissions — so "office hours" is edited in one place rather than retyped on
+every rule.
+
+| Method | Path | Role |
+|---|---|---|
+| `GET` | `/console/schedules` | VIEWER |
+| `POST` | `/console/schedules` | MANAGER |
+| `PUT` | `/console/schedules/{schedule_id}` | MANAGER |
+| `DELETE` | `/console/schedules/{schedule_id}` | MANAGER |
+
+```json
+{
+  "name": "Office hours",
+  "timezone": "Europe/London",
+  "active": true,
+  "windows": [
+    {"days_of_week": 31, "start_time": "09:00", "end_time": "17:00"},
+    {"days_of_week": 32, "start_time": "09:00", "end_time": "13:00"}
+  ]
+}
+```
+
+`days_of_week` is a bitmask: Mon=1, Tue=2, Wed=4, Thu=8, Fri=16, Sat=32, Sun=64,
+every day=127.
+
+**Windows may cross midnight.** `end_time <= start_time` means the window runs
+into the following day, and `days_of_week` names the day it **starts** on — so a
+22:00–06:00 Friday window admits Friday 23:00 and Saturday 02:00, and refuses
+Friday 05:00.
+
+`timezone` omitted means the window is evaluated in the timezone of the site the
+terminal stands at. Set it explicitly for a company running one shift pattern
+across several countries.
+
+**On update, `windows` REPLACES the whole set.** A schedule is a set, and the
+caller sends the set it wants.
+
+`DELETE` answers **409** while permissions still reference the schedule. The
+foreign key is `ON DELETE SET NULL`, which on a soft delete would silently widen
+every rule that used it — a permission restricted to office hours would become
+one with no time restriction at all.
+
+### `POST /api/v1/console/terminals/{serial}/evaluate`
+
+Role **MANAGER**. CSRF required. *"Would this person get in here, right now, and
+why."*
+
+```json
+{"external_id": "P-1042", "credential_id": "…", "application": "ACCESS_CONTROL",
+ "at": "2026-08-18T09:30:00Z"}
+```
+
+`at` makes a schedule testable without waiting for Tuesday. Returns an
+`AccessDecision` — `granted`, `reason`, `person_id`, `person_name`,
+`external_id`, `credential_id`, `application`, `matched_permission`,
+`decided_at`.
+
+**This writes no event.** A preview that recorded a door event would put a
+presentation that never happened into the trail an attendance report is built
+from.
+
+### What a new person is allowed
+
+`companies.default_person_access` decides what permission is written when
+somebody is created:
+
+| Value | Effect |
+|---|---|
+| `COMPANY_ALLOW` | a company-scoped `ALLOW` is written at creation |
+| `NONE` | nothing is written; they can open nothing until a rule says otherwise |
+
+Companies that existed before the engine were migrated to `COMPANY_ALLOW`, which
+reproduces their previous behaviour exactly. Companies created through the
+platform API start at `NONE`. The grant is a real permission row an operator can
+see and remove, not a special case in the evaluator.
+
+---
+
+## 16. Events — the activity trail
+
+What actually happened in the field. Distinct from `/console/audit`, which
+records what **operators changed**.
+
+`access_logs` is unchanged and still carries the device wire contract. `events`
+is the model going forward: an open `event_type`, an `application`, four
+decisions, a `direction`, a machine-readable `reason_code` and an opaque
+`payload` — enough to carry attendance, check-in, verification and visitor
+records without another migration.
+
+### `GET /api/v1/console/events`
+
+Role **VIEWER**. **Grant-scoped**: an operator scoped to one site sees that
+site's events only.
+
+| Parameter | Meaning |
+|---|---|
+| `limit` / `offset` | default 50, max 500 |
+| `site_id`, `serial`, `person_id`, `external_id` | narrow to one subject |
+| `event_type`, `application`, `decision`, `direction` | narrow by kind |
+| `from`, `to` | RFC3339, on `occurred_at` |
+| `q` | free text over person name and the id the terminal read |
+
+`decision` is one of `GRANTED`, `DENIED`, `RECORDED`, `ERROR`. `RECORDED` is the
+no-outcome case: nothing was released, the event **is** the outcome.
+
+**A malformed `from`/`to` is a 400, not an ignored filter.** Silently dropping
+`from=lastweek` and answering with the whole trail looks like an answer to the
+question that was asked. The same now applies to `since`/`until` on
+`/console/audit`, which previously ignored them.
+
+```json
+{
+  "count": 2, "total": 2, "limit": 50, "offset": 0, "has_more": false,
+  "events": [{
+    "id": "8c2f…",
+    "event_type": "ACCESS_DENIED",
+    "application": "ACCESS_CONTROL",
+    "decision": "DENIED",
+    "reason": "NO_PERMISSION",
+    "site_name": "North Gate",
+    "device_serial": "ESP32-0007",
+    "person_id": "3ab2…",
+    "person_name": "A Person",
+    "subject_external_id": "P-1042",
+    "credential_id": "…",
+    "credential_type": "FINGERPRINT",
+    "occurred_at": "2026-08-15T09:30:00Z",
+    "recorded_at": "2026-08-15T09:30:02Z",
+    "occurred_at_trusted": true
+  }]
+}
+```
+
+**Two times, and the difference matters.** `occurred_at` is when it happened at
+the terminal; `recorded_at` is when the server heard. An event queued through an
+outage and uploaded hours later has an `occurred_at` hours before its
+`recorded_at`. Filters and ordering use `occurred_at`, because an operator asking
+what happened on Tuesday means at the door. `occurred_at_trusted` is false when
+the terminal's clock was not believable and the server stamped arrival instead.
+
+### Divergence
+
+When a terminal reports a decision the platform would not have made, the event
+records the **terminal's** decision — that is the one that released the lock —
+and carries the platform's verdict beside it:
+
+```json
+"payload": {"source": "FINGERPRINT", "diverged": true,
+            "server_decision": {"granted": false, "reason": "NO_PERMISSION"}}
+```
+
+That is a terminal running on a cache it synced before a permission was revoked.
+It is what the site's offline policy is a trade against, and it is now visible
+and searchable.
+
+---
+
+## 17. Device protocol additions
+
+Everything in this section implements
+`docs/firmware-protocol-requirements.md` in the **firmware** repository, which
+is the contract of record between the two sides. The field names, enum
+spellings and shapes below were taken from the firmware source that parses them
+(`sync_job.cpp`, `heartbeat.cpp`, `provisioning.cpp`, `credential_ref.h`), not
+from prose.
+
+**`SyncProtocolVersion` is unchanged and stays at 1.** Every addition is either
+a new optional key inside an existing object or a new route, which is the
+extension path the compatibility policy already relies on.
+
+### 17.1 The site's offline policy reaches the terminal
+
+Two keys inside the existing `settings` object, on **both**
+`GET /api/v1/devices/settings` and every `SETTINGS` job payload:
+
+```json
+{
+  "settings_version": 7,
+  "settings": {
+    "unlock_duration_seconds": 5,
+    "sync_interval_seconds": 60,
+    "offline_policy": "CACHED_GRACE",
+    "offline_grace_minutes": 720
+  }
+}
+```
+
+| Key | Type | Values |
+|---|---|---|
+| `offline_policy` | string | `DENY_ALL`, `CACHED_GRACE`, `CACHED_INDEFINITE` |
+| `offline_grace_minutes` | integer | `0`–`43200` |
+
+Both come from `sites.offline_policy` and `sites.offline_grace_minutes`.
+
+**The columns are layered OVER the stored settings blob.** `sites.settings` is a
+free-form JSON object an operator can write anything into; the policy is a
+validated column. If the two disagree, the column wins — otherwise an operator
+could bypass a safety control by writing raw JSON.
+
+**Setting it:** `PUT /api/v1/console/sites/{site_id}` now accepts
+`offline_policy` and `offline_grace_minutes`. **ADMIN**, matching site key
+rotation, because it decides what a door does during an outage.
+
+Changing either **increments `settings_version` and queues a `SETTINGS` job to
+every terminal at the site**. This is required, not incidental: the terminal
+gates a push behind a strictly-greater version check, so a policy change written
+without the bump is discarded as a replay — a silent no-op the console would
+report as applied.
+
+Renaming a site does **not** bump the version or push a job.
+
+**Backward compatibility.** Purely additive. Firmware that does not know the keys
+ignores them; firmware that does treats absent keys as "leave the stored policy
+alone", so old-server/new-terminal and new-server/old-terminal both behave
+exactly as before.
+
+### 17.2 Firmware updates on the heartbeat response
+
+`POST /api/v1/devices/heartbeat` gains one optional object:
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "AT-A1B2C3",
+  "server_time": "2026-08-15T09:30:00Z",
+  "pending_jobs": 0,
+  "firmware_update": {
+    "version": "1.2.0",
+    "download_url": "https://updates.example.com/at-1.2.0.bin",
+    "checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "size_bytes": 1003664,
+    "is_mandatory": false
+  }
+}
+```
+
+**Absent when there is nothing to offer**, so a fleet that is up to date sees
+exactly the response it saw before this field existed.
+
+The offer is the `is_current` build for the device's own **company, device type
+and release channel**, and is withheld when the device already runs that
+version.
+
+**Only one transport is implemented — this one.** The requirements document
+offered a `FIRMWARE` sync job as an alternative; it is deliberately not built,
+because the firmware's `syncJobTypeFromName` has no `FIRMWARE` case, so such
+jobs would be enqueued per terminal per poll only to be acknowledged and
+discarded. Adding it later is additive and needs no version bump.
+
+**The server withholds an offer that breaks any of the four hard rules**, and
+logs the catalogue row and the reason:
+
+1. `checksum_sha256` present — the device refuses an offer without one.
+2. **Lower-case** 64-hex — the device refuses upper case rather than folding it.
+3. `size_bytes` present and positive — it sizes the flash write and is trusted
+   over `Content-Length`.
+4. `download_url` is `https`.
+
+Two further limits come from the device's fixed buffers: a `download_url` over
+127 characters or a `version` over 23 is withheld, because the terminal would
+truncate it and fetch the wrong image.
+
+`server_time` is RFC3339 **UTC with a `Z`**. The terminal adopts it as a clock
+when it cannot reach NTP and **refuses a numeric offset** rather than
+mis-parsing it, so this must never become a local time.
+
+### 17.3 Credential placements, device-facing
+
+Two device-authenticated routes. **No biometric material crosses either, in
+either direction.** A `credential_id` is a handle naming which credential a
+report is about; the template stays on the sensor that captured it, which is all
+the fitted hardware permits.
+
+#### `GET /api/v1/devices/credentials/pending`
+
+What this terminal is expected to hold and does not — the work list that makes
+"person A is recognised at terminals A, B and C" real without moving a template.
+
+`?limit=` defaults to 25, capped at 100.
+
+```json
+{
+  "protocol_version": 1,
+  "device_id": "AT-A1B2C3",
+  "count": 1,
+  "credentials": [{
+    "credential_id": "8c2f…",
+    "placement_id": "1a9b…",
+    "member_id": "MEM001",
+    "full_name": "A Person",
+    "credential_type": "FINGERPRINT",
+    "template_format": "SENSOR_LOCAL",
+    "vendor": "ZFM",
+    "state": "PENDING",
+    "attempts": 0,
+    "last_error": "",
+    "generation": 1
+  }]
+}
+```
+
+Scoped to the **authenticated device** — there is no parameter naming a
+terminal — and to people that terminal's **permissions would admit**, so the
+enrolment surface is exactly as narrow as the access surface. Credentials that
+are `REVOKED`/`SUSPENDED`, or already `PLACED`/`REMOVING`/`REMOVED` here, are
+excluded.
+
+#### `POST /api/v1/devices/credentials/placement`
+
+```json
+{"credential_id": "8c2f…", "member_id": "MEM001",
+ "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+ "vendor": "ZFM", "slot": 5, "state": "PLACED", "error": ""}
+```
+
+`state` is `PLACED`, `FAILED` or `REMOVED`. `PENDING` and `REMOVING` are the
+**platform's** intentions and are refused with 400 — a terminal claiming either
+would be a device deciding what the platform wants.
+
+`slot` is 1-based and required for `PLACED`. `error` carries the device's own
+words ("sensor full") so an operator sees why.
+
+Idempotent on `(credential, device)`. A `PLACED` report promotes a `PENDING`
+credential to `ACTIVE`. A credential named in the body that does not belong to
+`member_id`, or to this tenant, is a **404**.
+
+#### `generation`
+
+`credential_placements.generation` (migration 019) records the sensor era a
+placement belongs to, copied from `devices.placement_generation`. The sensor
+hands out the lowest free slot, so a slot freed by a deletion names a different
+finger afterwards; the counter removes the ambiguity outright.
+
+#### Enrolment results
+
+`POST /api/v1/devices/enrollment/result` now **binds** the `credential` object
+the firmware already sends, writing a real credential and placement:
+
+```json
+{"member_id": "MEM001",
+ "fingerprint_template": "terminal:AT-0001:slot:5",
+ "credential": {"credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+                "vendor": "ZFM", "terminal": "AT-0001", "slot": 5}}
+```
+
+`fingerprint_template` is unchanged, still required, and still written — it is a
+**locator, not material**, and deployed firmware plus the 012 back-fill depend on
+it. The `credential` object is optional; older firmware omits it and the
+enrolment completes exactly as before. Placement writing is best-effort: it
+never fails an enrolment that has already committed. `terminal` is recorded but
+**not trusted** — the placement is written against the authenticated device.
+
+### 17.4 `POST /api/v1/devices/claim`
+
+**Unauthenticated by necessity**: the caller is a terminal that has no
+credential, and obtaining one is what it is for. This removes the need to put the
+**site API key** — which registers devices and rotates their credentials — on an
+installer's laptop.
+
+```
+POST /api/v1/devices/claim
+{"claim_code": "K7M2-P4QX", "serial_number": "AT-A1B2C3"}
+
+200 {"api_key": "atd_…", "serial_number": "AT-A1B2C3"}
+```
+
+The response is deliberately tiny: the firmware refuses a body over 512 bytes.
+`api_key` is `atd_` + 64 lower-case hex, which is what
+`DeviceCredential::keyLooksIssued` requires.
+
+| Status | Meaning to the firmware |
+|---|---|
+| `200` | claimed |
+| `400` | malformed body — the endpoint exists |
+| `401` | the code was refused |
+| `404` | **this server does not support claim codes**; use `set key` |
+| `429` | rate limited |
+| `5xx` | server error, retry |
+
+`404` is reserved for "unsupported" and is never used for a bad code — it would
+send an installer to look at the wrong thing.
+
+**Every failure returns the same 401 with the same body.** Wrong code, expired,
+superseded, or the right code with the wrong serial — all identical.
+Distinguishing them would let an unauthenticated caller learn that a code is real
+but the serial is wrong, which is exactly what turns an intercepted code back
+into something worth having.
+
+Security properties:
+
+- **Single use** — redemption marks it, and issuing a new code for a serial
+  supersedes any outstanding one.
+- **Serial-bound** — the device sends the serial it derives from its factory MAC;
+  a code redeemed by other hardware is refused, and the legitimate code survives
+  the attempt.
+- **Short-lived** — 2 hours by default, capped at 24.
+- **Hashed at rest** — SHA-256; the plaintext exists once, in the response that
+  mints it.
+- **Rate limited** — its own limiter instance, so an installer retrying a
+  mistyped code cannot exhaust the allowance an operator needs to sign in.
+- **Audited** — `DEVICE_CLAIM_CODE_ISSUED` (who, which serial, code prefix) and
+  `DEVICE_CLAIMED` (which unit, from which address). The code itself is never
+  recorded.
+- **Cannot revive a disabled terminal** — it goes through the same registration
+  lifecycle as the site-key path, which refuses a `DISABLED` unit.
+
+#### `POST /api/v1/console/sites/{site_id}/claim-codes`
+
+**ADMIN.** Mints a code for one serial.
+
+```json
+{"serial_number": "AT-A1B2C3", "expires_in_minutes": 120}
+
+201 {"claim_code": "K7M2-P4QX", "code_prefix": "K7M2",
+     "serial_number": "AT-A1B2C3", "site_name": "North Gate",
+     "expires_at": "…", "shown_once": true, "superseded_codes": 0}
+```
+
+The code is returned **once** and no read endpoint gives it back.
+`serial_number` is limited to 15 characters — what the firmware can store —
+refused when minted rather than discovered at a door. `superseded_codes` lets the
+console warn that an installer's earlier printout has just stopped working.
+
+### 17.5 What is still outstanding for the firmware side
+
+Recorded because the requirements document lists them as done on the device and
+they are not consumed today:
+
+- **The heartbeat response's `firmware_update` object is not parsed.**
+  `parseHeartbeatResponse` reads `protocol_version`, `pending_jobs` and
+  `server_time` only. The OTA *execution* path is complete and reachable from the
+  serial console; the network transport that feeds it is not wired.
+- **`GET /devices/credentials/pending` has no client.** The firmware document
+  describes it as what the terminal *would* use.
+- **A `REMOVING` placement has no sync job to carry it.** Listed in the document
+  as the third route; withdrawal is currently visible only through the pending
+  list ceasing to offer the credential.
+
 ---
 
 ## Known limitations
 
-Behaviour a client must design around today:
+Behaviour a client must design around today. This list is maintained against the
+code, not against intent — an item is removed only when a test that would catch
+its return exists and passes.
 
-1. **Access checks ignore permissions.** `GET /access/{member_id}` tests
-   membership status only — no door scope, schedule, or validity window.
-2. **`GET /members` is unpaginated.**
-3. **No rate limiting** on any endpoint, including authentication. A leaked site
-   key can be brute-forced against `/devices/register` without resistance, and
-   nothing bounds how many terminals one key may enrol.
-4. **Site API keys are stored in plaintext**, and are compared with a plain SQL
-   equality. Device keys are hashed with SHA-256 and never stored in the clear.
-   Fixing this needs a way to re-issue a site key, which no endpoint offers yet —
-   see the note in README.md.
-5. **The deprecated site-key + serial device auth is still accepted.** It cannot
+1. **The legacy `GET /access/{member_id}` still ignores permissions.** It tests
+   membership status only. It is retained for deployed tooling and is
+   **deprecated**: the authorization engine is reached through
+   `POST /console/terminals/{serial}/evaluate` (operator) and is applied
+   automatically to every event a terminal reports. Do not build anything new on
+   the legacy route.
+2. **`GET /members` is unpaginated.** `GET /console/people` is paginated and
+   searchable; use it.
+3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`,
+   `POST /auth/password`, `POST /auth/forgot-password`, `POST /auth/redeem` and
+   the platform login share per-address allowances and per-account lockout. The
+   limiter is **in-process**, so with more than one instance the effective rate
+   multiplies by the instance count (SEC-09, open). Nothing else is limited — a
+   leaked site key can still be brute-forced against `/devices/register`.
+4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
-   claims.
-6. **People are tenant-wide, not site-scoped.** Every terminal in a company
-   receives every person in that company, including terminals at other sites.
-   Site settings, by contrast, reach only that site's devices. This is by
-   design; door-level scoping belongs to the permission engine.
-7. **`/metrics` is fleet-wide and unauthenticated unless `METRICS_TOKEN` is
-   set.** It exposes counts across all tenants. Keep it off the public network
-   or set the token.
-8. **Response envelopes are inconsistent** — bare arrays for members, access
-   logs, and enrollment; `{count, ...}` objects for devices and firmware.
-9. **Error message strings are not stable.** Branch on status codes.
+   claims. It cannot be removed until firmware self-registration exists (FW-05).
+5. **A conditional `DENY` is not enforced at an offline terminal.** A terminal
+   caches a flat roster and does not evaluate permissions, so a `DENY` narrowed
+   to one application or one schedule cannot be applied by removing the person
+   from the roster without also refusing them when they *are* allowed. Those
+   people stay on the roster and the server decides at the door. An
+   **unconditional** `DENY` does remove them, so exclusion survives an outage.
+   The site's offline policy bounds the exposure; `DENY_ALL` removes it.
+6. **Permission validity windows take effect at an offline terminal on a
+   reconciliation cycle, not instantly.** Roster membership changes with the
+   clock, and the reconciler runs every 15 minutes by default
+   (`ROSTER_RECONCILE_INTERVAL_SECONDS`). An online terminal is decided by the
+   server at the door and is exact.
+7. **Response envelopes are inconsistent** — bare arrays for members, access
+   logs and enrollment; `{count, …}` objects for devices, firmware and every
+   console list.
+8. **Error message strings are not stable.** Branch on status codes.
+9. **Terminals are not told their application mode.** The device protocol is
+   unchanged, so a mode is operator-facing configuration and a server-side input
+   to the decision, but the terminal does not know it (APP-03, open). Delivering
+   it will be an additive field in the settings payload.
+10. **Only `ACCESS_CONTROL` has behaviour.** `ATTENDANCE`, `CHECK_IN`,
+    `VERIFICATION`, `TIME_TRACKING` and `VISITOR_MANAGEMENT` are configuration
+    and an event model that can carry them; no capability logic is implemented
+    on top. Enabling one changes what the dashboard should offer and what the
+    authorization engine will refuse, not what the platform does with the event
+    afterwards.
+11. **Biometric templates remain terminal-local, and this is a hardware
+    limit rather than a schema one.** The fitted sensor's driver implements
+    template export but **not import**, so a template captured at one door
+    cannot be installed at another by this firmware at all. What the platform
+    now does instead is tell each terminal which people it is expected to
+    recognise and does not (section 17.3) — which turns "enrolled at one door,
+    silently does nothing at the others" into a work list. No template ever
+    crosses the device API in either direction.
+12. **Site API keys are hashed** (SHA-256) and rotatable through
+    `POST /console/sites/{site_id}/api-key`. Device keys are hashed and never
+    stored in the clear. Neither is ever returned by a read endpoint — a key is
+    shown once, at the moment it is minted.
+13. **OTA offers are delivered, not yet consumed.** The heartbeat response
+    carries a `firmware_update` object when a newer current build exists for the
+    device's company, type and channel, and the server withholds one that breaks
+    any of the four hard rules. The firmware's heartbeat parser does not read the
+    field yet, so no fleet updates itself today — see section 17.5.
+14. **A `REMOVING` placement has no delivery mechanism.** A credential withdrawn
+    from a terminal stops appearing in that terminal's pending list, but nothing
+    instructs it to erase the template it already holds. That is the third route
+    in the firmware requirements and is not built.
+15. **Claim codes remove the credential exposure, not the serial cable.** The
+    code still has to be typed into the unit over a serial console, because the
+    fitted keypad cannot reach the admin menu on this hardware revision.
+16. **The 64-person on-device ceiling is a firmware constant.** The server no
+    longer fans a whole company at every terminal (SEC-04), which removes most
+    of the pressure, but a single site with more than 64 permitted people will
+    still exhaust a terminal's table. The server-side capacity model and the
+    firmware limit are both open (FW-01).

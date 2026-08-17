@@ -48,13 +48,71 @@ The credential is stored server-side as a SHA-256 hash and is returned in
 plaintext exactly once, at registration. It cannot be recovered — a device that
 loses it re-registers and is issued a new one.
 
-### Deprecated fallback
+### Deprecated fallback — now OFF by default
 
-`X-API-Key` (site key) plus `X-Device-Serial` is still accepted so firmware built
-against the Sprint 4 protocol keeps working during a rollout. It is weaker by
-construction: the site key is shared by every terminal at the site, so it cannot
-distinguish one device from another beyond the serial the caller claims. **Move
-to `X-Device-Key` and expect this path to be removed.**
+`X-API-Key` (site key) plus `X-Device-Serial` is **refused with `401` unless
+`LEGACY_DEVICE_AUTH` is set** (SEC-05).
+
+It is weaker by construction, and the phrase understates it: the site key is the
+site's *provisioning secret* — it registers terminals and rotates their
+credentials — so with this path open, holding it was equivalent to holding every
+device key at the site. The serial is not a secret; it is printed on the unit.
+
+It was kept for firmware predating per-device keys. `POST /devices/claim` is now
+shipped on both halves, so a terminal gets its own credential from a single-use
+serial-bound code and that reason has expired. A fleet still being upgraded can
+set `LEGACY_DEVICE_AUTH=1`; the server logs a `SECURITY:` line at startup while
+it is on, and revocation still refuses a revoked terminal on both paths.
+
+## Response framing
+
+**A client must not assume `Content-Length` is present, and must decode
+`Transfer-Encoding: chunked`.**
+
+This is not a hypothetical. Every response from the Render deployment is
+chunked, including bodies of under a hundred bytes:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Transfer-Encoding: chunked
+
+5d
+{"commit":"5f8eb3e","service":"Access Terminal Cloud API","status":"healthy","version":"dev"}
+0
+
+```
+
+The API does not choose this. Go sets `Content-Length` on a small response, and
+the Nginx deployment in `deploy/` passes it through — but the managed edge in
+front of the Render service re-frames responses on its way out, and the origin's
+length header does not survive. **Framing is a property of the deployment, not
+of the contract**, so firmware must handle both and must not be tuned to
+whichever one a given environment happens to use.
+
+The failure mode when it is not handled is quiet and total. A client reading the
+socket directly receives the chunk-size line as though it were payload, so the
+body begins `5d\r\n{` — which is not JSON. On the ESP32 that surfaced as
+`Sync: response did not parse -- InvalidInput` on every sync cycle, while
+heartbeat, enrolment upload, job acknowledgement and access-log upload all
+appeared to work, because those calls only inspect the status code and never
+parse the body. `GET /devices/jobs` is the only device call whose body is read,
+which is what made a total transport fault look like a sync-specific one.
+
+Two consequences for anyone writing a client:
+
+- **Use an HTTP client that de-chunks**, rather than reading the socket. On the
+  ESP32 that means `HTTPClient::writeToStream()`; `getStreamPtr()` is the raw
+  stream and returns the framing with the payload.
+- **Do not use `Content-Length` as the completeness check.** Over a chunked
+  transfer there is nothing to compare against, so a length-based check silently
+  passes rather than failing closed — and a partially delivered `FULL_SYNC`
+  roster that is treated as complete is read as a list of deletions. Take
+  completeness from whether the transfer itself finished.
+
+Nothing about the JSON bodies documented below changes with the framing, and
+this is not a protocol version concern: `SyncProtocolVersion` describes the
+envelope, not the transport that carries it.
 
 ## `POST /api/v1/devices/register`
 
@@ -105,11 +163,30 @@ key already on the row is left exactly as it was.
 
 ```json
 { "protocol_version": 1, "device_id": "AT-0001",
-  "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4 }
+  "server_time": "2026-08-07T17:40:31Z", "pending_jobs": 4,
+  "firmware_update": {
+    "version": "1.2.0",
+    "download_url": "https://updates.example.com/at-1.2.0.bin",
+    "checksum_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "size_bytes": 1003664,
+    "is_mandatory": false } }
 ```
 
 Records liveness and inventory. `pending_jobs` lets a device skip polling when
 there is nothing waiting.
+
+`server_time` is RFC3339 **UTC with a `Z`**. A terminal that can reach the API
+but not an NTP server adopts it for stamping queued events, and refuses a
+numeric offset rather than mis-parsing it — so this must never become a local
+time.
+
+`firmware_update` is **present only when there is an update to offer**, so a
+fleet that is up to date sees exactly the response it saw before the field
+existed. It is the `is_current` build for the device's own company, device type
+and release channel. The server withholds an offer whose digest is missing or
+not 64 lower-case hex, whose `size_bytes` is absent, whose URL is not `https`,
+or whose URL or version would not fit the device's fixed buffers — and logs the
+catalogue row and the reason. See API_SPEC.md section 17.2.
 
 ### Device states
 
@@ -221,6 +298,76 @@ kilobytes. The `CREATE` jobs that follow supply anything the device is missing.
 
 An operator can force this with `POST /api/v1/devices/{serial}/resync`.
 
+### Terminal capacity — the contract the firmware still has to meet (FW-01)
+
+**This section is a request to the firmware side. The server half is built; the
+device half is not.**
+
+#### The problem, stated exactly
+
+`FULL_SYNC` carries the authoritative roster and the firmware refuses one longer
+than its member table **wholesale** — `sync_handoff.cpp`,
+`if (count > kMaxMembers) return false`. That refusal is correct: a truncated
+roster reads as a list of deletions, which is the most destructive misreading
+available in this protocol.
+
+But the server had no idea what `kMaxMembers` is, so it generated the snapshot
+anyway. The job then failed, retried, exhausted its attempts, parked `FAILED`,
+and **the terminal went on serving the roster it already had**. The door kept
+working, for the wrong set of people, indefinitely, and the only trace was a
+counter.
+
+#### What the server does now
+
+- Refuses to queue a snapshot for a terminal whose **reported** capacity is
+  smaller than its permitted roster, answering `409` with both numbers, and
+  leaves the existing queue intact.
+- Records the overflow on the device row, in `last_apply_error`, and as a
+  `ROSTER_CAPACITY_EXCEEDED` event.
+- Does **none** of that when the capacity is unknown. Guessing a ceiling would
+  break every installation whose terminals hold more than the guess.
+
+#### What the firmware needs to send
+
+One optional integer on the heartbeat body:
+
+```json
+{ "status": "ONLINE", "member_capacity": 256 }
+```
+
+| Property | Requirement |
+|---|---|
+| Value | `MemberStore::capacity()` — the real compile-time ceiling, not a constant copied into the network layer |
+| When | Every heartbeat, or at least after every boot. It is cheap and idempotent |
+| Type | Positive integer. `0` or negative is ignored by the server and the heartbeat still succeeds |
+| Omitted | Treated as *unknown*, which is the current behaviour and is safe |
+
+Nothing else changes. `SyncProtocolVersion` stays at 1 — this is an additive
+optional request field, and a server that does not know it ignores it.
+
+**Report the ceiling, not the headroom.** The server compares against the
+permitted roster it computes itself; a terminal reporting free rows would be
+reporting a number that is stale by the time it is read.
+
+#### The paging question, and why it is not being answered yet
+
+A roster larger than any single terminal can hold cannot be fixed by a bigger
+`FULL_SYNC`. It needs either fewer people per terminal (a permissions decision
+an operator makes) or a paged roster — and paging is **not** proposed here.
+
+If it is ever built, the shape has to preserve the one property that makes
+`FULL_SYNC` safe: a page must not be interpretable as a complete set, or the
+missing pages read as deletions. That means a page count, a page index, and a
+generation token, with the terminal applying the set difference only after every
+page of one generation has arrived — and with the partial state held somewhere
+that survives a reboot mid-sequence, which on this hardware is not free.
+
+Given a 256-row table and a per-site roster, the capacity report plus a refusal
+an operator can act on is the correct amount of mechanism for now. Paging should
+wait for a customer who actually has a site with more permitted people than a
+terminal can hold, because their answer to "how should this behave" is the
+requirement, and nobody has one yet.
+
 `payload.deleted` is `true` only on `DELETE`. A terminal that trusts `job_type`
 alone is correct; `deleted` is a redundant safety check.
 
@@ -237,6 +384,7 @@ Settings live at the site; every device at that site receives the same push.
     "settings": {
       "unlock_duration_seconds": 8,
       "sync_interval_seconds": 30,
+      "offline_policy": "CACHED_GRACE",
       "offline_grace_minutes": 120,
       "tamper_alarm": true
     }
@@ -251,11 +399,80 @@ which is what keeps settings idempotent under redelivery and reordering.
 `settings` is an opaque JSON object to the transport — adding a key does not
 change the protocol version. Firmware must ignore keys it does not recognise.
 
+**Two keys are not opaque and are server-authoritative.** `offline_policy`
+(`DENY_ALL` / `CACHED_GRACE` / `CACHED_INDEFINITE`) and `offline_grace_minutes`
+(0–43200) come from validated columns on the site and are layered OVER the
+stored settings object, so an operator cannot override a safety control by
+writing raw JSON into the free-form blob. They appear in this payload and in
+`GET /api/v1/devices/settings` identically — the push and the pull are built by
+the same code so they cannot describe different configurations.
+
+Absent keys mean "leave the stored policy alone", so firmware predating them is
+unaffected.
+
 Settings are managed by an operator through:
 
 - `GET /api/v1/sites/settings` — read current settings and version
 - `PUT /api/v1/sites/settings` — replace settings; bumps the version and fans
   a SETTINGS job out to every device at the site in the same transaction
+- `PUT /api/v1/console/sites/{site_id}` — set `offline_policy` /
+  `offline_grace_minutes` (ADMIN). Also bumps the version and fans out, which is
+  required rather than incidental: a policy change delivered without a version
+  bump is discarded by the terminal as a replay.
+
+## Credentials, device-facing
+
+Two routes added for multi-terminal identity. **No biometric material crosses
+either, in either direction** — a `credential_id` is a handle naming which
+credential a report is about, and the template stays on the sensor that captured
+it, which is all the fitted hardware permits.
+
+`GET /api/v1/devices/credentials/pending?limit=25` — what this terminal is
+expected to hold and does not. Scoped to the authenticated device and to people
+that terminal's permissions would admit.
+
+```json
+{ "protocol_version": 1, "device_id": "AT-0001", "count": 1,
+  "credentials": [{ "credential_id": "8c2f…", "placement_id": "1a9b…",
+    "member_id": "MEM001", "full_name": "A Person",
+    "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+    "vendor": "ZFM", "state": "PENDING", "attempts": 0,
+    "last_error": "", "generation": 1 }] }
+```
+
+`POST /api/v1/devices/credentials/placement` — report the outcome.
+
+```json
+{ "credential_id": "8c2f…", "member_id": "MEM001",
+  "credential_type": "FINGERPRINT", "template_format": "SENSOR_LOCAL",
+  "vendor": "ZFM", "slot": 5, "state": "PLACED", "error": "" }
+```
+
+`state` is `PLACED`, `FAILED` or `REMOVED`. `PENDING` and `REMOVING` are the
+platform's intentions and are refused — a terminal claiming either would be a
+device deciding what the platform wants. Idempotent on `(credential, device)`.
+
+`POST /api/v1/devices/enrollment/result` additionally binds an optional
+`credential` object, writing a real credential and placement instead of only the
+`fingerprint_template` locator. The locator is unchanged and still required.
+
+## `POST /api/v1/devices/claim`
+
+**Unauthenticated**, because the caller has no credential yet — obtaining one is
+what it is for. Removes the need to put the site provisioning key on an
+installer's laptop.
+
+```json
+{"claim_code": "K7M2-P4QX", "serial_number": "AT-A1B2C3"}
+
+200 {"api_key": "atd_…", "serial_number": "AT-A1B2C3"}
+```
+
+Single use, bound to one serial, short-lived, hashed at rest, rate limited and
+audited. **Every failure is the same `401` with the same body** — distinguishing
+"wrong code" from "right code, wrong serial" is what would make an intercepted
+code worth having. `404` means the server does not implement claim codes at all
+and is never used for a bad code.
 
 ## `POST /api/v1/devices/jobs/{id}/complete`
 
@@ -300,17 +517,19 @@ That is correct and safe, because applies are idempotent.
 
 These are known gaps, not oversights:
 
-- **OTA.** Firmware is inventory only. Marking a build current changes what
-  "outdated" means; nothing downloads, schedules, or applies firmware, and no
-  `FIRMWARE_UPDATE` job is ever dispatched.
-- **Site API keys are still stored in plaintext.** Device credentials are
-  hashed, but `sites.api_key` predates that and was left alone deliberately —
-  hashing it needs its own migration and a rotation window.
-- **The offline sweep is not scheduled.** `MarkDevicesOffline` exists but nothing
-  calls it periodically yet, so `status` only advances to `OFFLINE` when
-  something invokes the sweep.
-- **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync today. Doors,
-  schedules, and permissions arrive with the permission engine (Sprint 6).
+- **OTA is offered but not yet consumed.** The heartbeat response now carries a
+  `firmware_update` object (above), and the device-side download, verification,
+  commit and rollback are built — but the firmware's heartbeat parser does not
+  read the field yet, so nothing updates itself today. There is deliberately no
+  `FIRMWARE` job type: the firmware has no case for one, so such jobs would be
+  enqueued only to be acknowledged and discarded.
+- **Withdrawing a placement has no job.** A credential that should no longer be
+  on a terminal stops appearing in that terminal's pending list, but nothing
+  instructs it to erase the template it holds.
+- **Permission jobs.** Only `PERSON` and `SETTINGS` entities sync. The
+  authorization engine evaluates on the server and shapes the roster a terminal
+  receives; schedules themselves are not delivered, so a terminal cannot enforce
+  a time window while offline.
 
 ## Changing this protocol
 

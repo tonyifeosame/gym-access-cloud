@@ -82,15 +82,150 @@ services:
       - key: MAINTENANCE_ENABLED
         value: "true"
 
-      # Browser origins allowed to read the API. Empty until a dashboard exists;
+      # Browser origins allowed to read the API, with credentials.
+      #
+      # The operator console authenticates with a cookie, and a browser only
+      # sends one cross-origin when the response carries
+      # Access-Control-Allow-Credentials with an EXACT origin -- which happens
+      # only for an origin on this list. Set it to the dashboard:
+      #
+      #   https://app.accesslink.store
+      #
       # `sync: false` means Render prompts for it once and never overwrites what
       # is set in the dashboard from this file.
       - key: CORS_ALLOWED_ORIGINS
         sync: false
 
+      # ---------------------------------------------------------------------
+      # First operator bootstrap
+      # ---------------------------------------------------------------------
+      #
+      # A database built from migrations/ has no operator accounts, and this
+      # tier has no shell to create one from. These two create the first OWNER
+      # at startup, and ONLY on a system that has no live operator -- they can
+      # never overwrite an account, reset a password or change a role.
+      #
+      # sync: false keeps both out of the repository: Render prompts once and
+      # stores them in its own environment. The PASSWORD IS A SECRET -- set it
+      # in the dashboard, sign in, then DELETE BOTH from the environment. While
+      # they remain set on a system that already has an operator the API logs a
+      # warning on every start and ignores them.
+      - key: BOOTSTRAP_OPERATOR_EMAIL
+        sync: false
+      - key: BOOTSTRAP_OPERATOR_PASSWORD
+        sync: false
+
+      # Optional. Company slug for the first OWNER; defaults to the oldest
+      # company. An unknown slug fails startup rather than inventing a tenant.
+      - key: BOOTSTRAP_OPERATOR_COMPANY
+        sync: false
+
+      # Optional. Display name; defaults to the local part of the address.
+      - key: BOOTSTRAP_OPERATOR_NAME
+        sync: false
+
+      # Dead operator sessions are deleted after this many days. The sweep only
+      # matches rows that are already expired or revoked, so it cannot log
+      # anybody out.
+      - key: SESSION_RETENTION_DAYS
+        value: "30"
+
+      # NOT set here, deliberately: SESSION_COOKIE_INSECURE. It drops Secure and
+      # renames the cookie for local development without TLS, and setting it on
+      # a deployment would strip the __Host- protections from every operator
+      # session. There is no reason for it to exist in this file.
+
     # NOT set here: PORT. Render injects it, and main.listenAddress reads it
     # before SERVER_PORT. Overriding it in this file would only create a second
     # place for the two to disagree.
+
+  # ---------------------------------------------------------------------------
+  # The operator console.
+  #
+  # A SEPARATE ORIGIN from the API, not a path on it. The Go service serves no
+  # static files at all -- there is no embed, no StaticFS and no NoRoute in
+  # router.go -- so the console has to be hosted somewhere, and a static site is
+  # what a Vite bundle is.
+  #
+  # THE HOSTNAME IS NOT COSMETIC. This must answer on app.accesslink.store and
+  # not on its onrender.com address. The operator session is a SameSite=Lax
+  # cookie: app.accesslink.store and api.accesslink.store share the registrable
+  # domain accesslink.store, so they are SAME-SITE and the cookie is sent on the
+  # cross-origin fetch. An onrender.com console is cross-SITE, the browser
+  # withholds the cookie, and the failure looks like a login that succeeds and
+  # then 401s on everything after it -- with nothing in the console saying why.
+  # ---------------------------------------------------------------------------
+  - name: accesslink-console
+    type: web
+    runtime: static
+    branch: main
+    # Matching the API above. Deploys stay manual on this blueprint by choice;
+    # flip both together if that changes.
+    autoDeploy: false
+
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    # Relative to rootDir. Vite's default, and vite.config.ts sets no outDir.
+    staticPublishPath: ./dist
+
+    envVars:
+      # Pinned rather than inherited. package.json declares no `engines`, and
+      # .github/workflows/ci.yml builds this console on 20 -- so 20 is the
+      # version it is actually tested against.
+      - key: NODE_VERSION
+        value: "20"
+
+      # BUILD TIME, not runtime. This is baked into the bundle in two places and
+      # both matter: src/api/client.ts reads it for the request prefix, and the
+      # cspPlugin in vite.config.ts reads it to emit connect-src. A build made
+      # without it produces `connect-src 'self'`, which yields a console whose
+      # every request to the API is blocked as a CSP violation -- presenting as
+      # an API outage rather than a build fault.
+      #
+      # Not secret. Only VITE_-prefixed variables reach the browser and this one
+      # is a public URL; no key of any kind belongs in this bundle.
+      - key: VITE_API_BASE_URL
+        value: https://api.accesslink.store
+
+    # src/router.tsx uses createBrowserRouter with real paths. Without this,
+    # /sites/:siteId and /redeem 404 on refresh and on any shared deep link.
+    # REWRITE and not redirect: the URL has to survive so the router can read it.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+    headers:
+      # The same policy the build emits as a meta tag, plus the one directive a
+      # meta tag CANNOT express -- frame-ancestors. See src/security/csp.ts,
+      # which says exactly this and asks for it to be repeated as a header.
+      #
+      # Keep in step with buildCsp() if that changes; the two disagreeing is
+      # worse than either alone.
+      - path: /*
+        name: Content-Security-Policy
+        value: >-
+          default-src 'none'; script-src 'self'; connect-src 'self'
+          https://api.accesslink.store; img-src 'self' data:; style-src 'self'
+          'unsafe-inline'; font-src 'self'; frame-src 'none'; object-src 'none';
+          base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+
+      # The console puts site and person identifiers in the path. no-referrer
+      # keeps them out of the Referer header of anything it ever links to.
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+
+      # Two years, this host only. NOT preload and NOT includeSubDomains: this
+      # service does not own the apex and has no business making a commitment
+      # for sibling names it does not control.
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000
 
 databases:
   - name: accesslink-db
