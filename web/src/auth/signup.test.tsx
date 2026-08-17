@@ -58,7 +58,7 @@ async function fillSignupForm(
 ) {
   await user.type(screen.getByLabelText('Your name'), overrides.name ?? 'Amaka Obi')
   await user.type(screen.getByLabelText('Company name'), overrides.company ?? 'Harbour Freight Ltd')
-  await user.type(screen.getByLabelText('Work email'), overrides.email ?? 'amaka@harbourfreight.com')
+  await user.type(screen.getByLabelText('Email'), overrides.email ?? 'amaka@harbourfreight.com')
   await user.type(screen.getByLabelText('Password'), overrides.password ?? 'correct-horse-battery')
 }
 
@@ -77,10 +77,42 @@ describe('creating an account', () => {
     await screen.findByRole('heading', { name: /create your accesslink account/i })
 
     expect(container.querySelectorAll('input')).toHaveLength(4)
-    for (const label of ['Your name', 'Company name', 'Work email', 'Password']) {
+    for (const label of ['Your name', 'Company name', 'Email', 'Password']) {
       expect(screen.getByLabelText(label)).toBeInTheDocument()
     }
     expect(screen.queryByLabelText(/slug|company id|claim code|api key|site/i)).toBeNull()
+  })
+
+  it('says plainly that this creates a company and makes them its owner', async () => {
+    // Somebody who thinks they are joining a company that already exists will
+    // fill this in and be confused by what they land in. The screen has to
+    // settle that before the first field.
+    renderAt('/register')
+    await screen.findByRole('heading', { name: /create your accesslink account/i })
+
+    // The heading names the product; the line under it says what else the form
+    // does. Between them: an AccessLink account, a company, and who owns it.
+    expect(screen.getByText(/sets up your company/i)).toHaveTextContent(
+      /makes you its owner/i,
+    )
+
+    // And the field whose consequence is not obvious says what it does.
+    expect(screen.getByText(/this is the company your team will join/i)).toBeInTheDocument()
+  })
+
+  it('keeps our vocabulary off the form', async () => {
+    // "Tenant", "slug", "provisioning" and "site" are how we talk about the
+    // platform, not how a customer thinks about their company. The one
+    // exception is deliberate: "Main Site" is named because it is the first
+    // thing they will see inside the console.
+    renderAt('/register')
+    await screen.findByRole('heading', { name: /create your accesslink account/i })
+
+    const copy = document.body.textContent ?? ''
+    for (const jargon of [/tenant/i, /slug/i, /provisioning/i, /operator/i, /deployment/i]) {
+      expect(copy).not.toMatch(jargon)
+    }
+    expect(copy).toMatch(/Main Site/)
   })
 
   it('passes the automated accessibility sweep', async () => {
@@ -157,10 +189,34 @@ describe('creating an account', () => {
     // The shortfall is ANNOUNCED in the live region, not merely implied by a
     // disabled button — a control that will not respond and does not say why is
     // the worst of both.
-    expect(
-      screen.getByText(/password must be at least 12 characters\./i),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/too short/i)).toHaveTextContent(/use at least 12 characters/i)
     expect(screen.getByLabelText('Password')).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('turns the password hint into the correction rather than adding a second line', async () => {
+    // It used to render a hint AND an error that said the same thing in
+    // different words, so a short password produced two sentences about length
+    // and a taller form. One element, whose text changes in place.
+    const user = userEvent.setup()
+    renderAt('/register')
+    await screen.findByRole('heading', { name: /create your accesslink account/i })
+
+    const mentions = () =>
+      screen.getAllByText(/12 characters/i).filter((node) => node.tagName === 'P')
+
+    expect(mentions()).toHaveLength(1)
+    const hint = mentions()[0] as HTMLElement
+
+    await user.type(screen.getByLabelText('Password'), 'short')
+
+    // The SAME element, recoloured and reworded — not a new one below it.
+    expect(mentions()).toHaveLength(1)
+    expect(mentions()[0]).toBe(hint)
+    expect(hint.className).toMatch(/field__hint--invalid/)
+
+    // And it is what the input points at, so it is read out as the field's
+    // description either way.
+    expect(screen.getByLabelText('Password')).toHaveAttribute('aria-describedby', hint.id)
   })
 
   it('reports a server failure as a failure, not as a rejected signup', async () => {
@@ -190,6 +246,53 @@ describe('the sign-in screen', () => {
     expect(link).toHaveAttribute('href', '/register')
   })
 
+  it('presents signup as a control, not as a third grey link', async () => {
+    // It shipped as a sentence in the muted note style, below two recovery
+    // links — invisible to the one visitor on this screen who has no account.
+    // It is now the card's second button: outlined, because signing in is still
+    // what almost everybody is here to do.
+    renderAt('/login')
+
+    const link = await screen.findByRole('link', { name: /create an account/i })
+    expect(link.className).toMatch(/\bbutton\b/)
+    expect(link.className).not.toMatch(/button--primary/)
+
+    // Sign in keeps the emphasis.
+    expect(screen.getByRole('button', { name: /^sign in$/i }).className).toMatch(
+      /button--primary/,
+    )
+
+    // And it is separated from the recovery links rather than sitting among
+    // them: somebody with no account is not looking for a password reset.
+    const recovery = screen.getByRole('link', { name: /forgotten your password/i })
+    expect(recovery.closest('p')).not.toBe(link.closest('p'))
+  })
+
+  it('keeps the recovery routes reachable', async () => {
+    // The signup CTA was added beside these, never in place of them: an
+    // invitation whose URL was mangled in a chat client still has a code that
+    // can be pasted, and somebody locked out still needs the reset.
+    renderAt('/login')
+
+    expect(await screen.findByRole('link', { name: /forgotten your password/i })).toHaveAttribute(
+      'href',
+      '/forgot-password',
+    )
+    expect(screen.getByRole('link', { name: /invitation code/i })).toHaveAttribute(
+      'href',
+      '/redeem',
+    )
+  })
+
+  it('passes the automated accessibility sweep', async () => {
+    // The screen the CTA was just added to, swept as a whole — a link dressed
+    // as a button is exactly the sort of change that loses its accessible name
+    // or its landmark.
+    renderAt('/login')
+    await screen.findByRole('button', { name: /^sign in$/i })
+    await expectNoViolations()
+  })
+
   it('does not link the platform administration surface', async () => {
     // A different identity, a different table and a different cookie. A customer
     // signing up has no business being shown that it exists.
@@ -199,5 +302,38 @@ describe('the sign-in screen', () => {
     for (const link of screen.getAllByRole('link')) {
       expect(link.getAttribute('href')).not.toMatch(/platform/)
     }
+  })
+})
+
+describe('the two screens are one flow', () => {
+  it('mirrors the sign-in card: same layout, the two actions swapped', async () => {
+    // Somebody who arrives at the wrong one of these has to be able to see the
+    // other immediately, and a person moving between them within a minute
+    // should feel they never left. So the secondary action sits in the same
+    // place, in the same style, on both.
+    renderAt('/register')
+
+    const signIn = await screen.findByRole('link', { name: /^sign in$/i })
+    expect(signIn).toHaveAttribute('href', '/login')
+    expect(signIn.className).toMatch(/\bbutton\b/)
+    expect(signIn.className).not.toMatch(/button--primary/)
+
+    // Create account keeps the emphasis here, exactly as Sign in does there.
+    expect(screen.getByRole('button', { name: /create account/i }).className).toMatch(
+      /button--primary/,
+    )
+  })
+
+  it('walks from sign in to signup and back without a dead end', async () => {
+    const user = userEvent.setup()
+    renderAt('/login')
+
+    await user.click(await screen.findByRole('link', { name: /create an account/i }))
+    expect(
+      await screen.findByRole('heading', { name: /create your accesslink account/i }),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('link', { name: /^sign in$/i }))
+    expect(await screen.findByRole('heading', { name: 'AccessLink' })).toBeInTheDocument()
   })
 })

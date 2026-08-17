@@ -44,7 +44,7 @@ export function PlatformLoginPage() {
   }
 
   return (
-    <div className="login">
+    <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">AccessLink</h1>
         <p className="login__subtitle">Platform administration</p>
@@ -92,7 +92,7 @@ export function PlatformLoginPage() {
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
-    </div>
+    </main>
   )
 }
 

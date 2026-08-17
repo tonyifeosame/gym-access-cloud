@@ -188,6 +188,16 @@ textarea:focus-visible,
   margin-bottom: 0;
 }
 
+/* A hint that has become a correction.
+ *
+ * The same line in the same place, recoloured -- so a field whose answer is not
+ * yet acceptable says so without the form growing a second sentence about it,
+ * and without saying the same thing twice in different words. The colour is not
+ * the only signal: the input carries aria-invalid, and the text itself changes. */
+.field__hint--invalid {
+  color: var(--danger);
+}
+
 /* Reserved rather than conditional: a live region inserted at the same moment
  * as its text is not reliably announced, so the element is always present and
  * merely empty. */

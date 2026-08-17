@@ -58,7 +58,7 @@ export function ForgotPasswordPage() {
 
   if (submitted) {
     return (
-      <div className="login">
+      <main className="login">
         <div className="login__card">
           <h1 className="login__title">Check with your administrator</h1>
 
@@ -82,12 +82,12 @@ export function ForgotPasswordPage() {
             <Link to="/login">Back to sign in</Link>
           </p>
         </div>
-      </div>
+      </main>
     )
   }
 
   return (
-    <div className="login">
+    <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">Reset your password</h1>
         <p className="login__subtitle">
@@ -121,7 +121,7 @@ export function ForgotPasswordPage() {
           <Link to="/login">Back to sign in</Link>
         </p>
       </form>
-    </div>
+    </main>
   )
 }
 

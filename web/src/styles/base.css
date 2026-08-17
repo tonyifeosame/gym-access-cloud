@@ -424,15 +424,29 @@ code {
 /* Login                                                                  */
 /* --------------------------------------------------------------------- */
 
+/*
+ * ONE CARD, FIVE SCREENS. Sign in, create an account, forgotten password,
+ * redeem an invitation, and platform sign-in all render this block and nothing
+ * else -- so the rules below are the whole visual language of the pages a
+ * customer meets before they are anybody. They have to agree with each other,
+ * because a person moves between two of them in the space of a minute.
+ */
+
 .login {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-4);
 }
 
 .login__card {
-  width: min(360px, 100%);
+  /*
+   * Wide enough for "Forgotten your password?" and a 12-character password hint
+   * on one line, and no wider. A card that grows to fill a desktop screen reads
+   * as a page rather than as a form, and the fields would then be far longer
+   * than anything typed into them.
+   */
+  width: min(380px, 100%);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -447,13 +461,32 @@ code {
   font-size: var(--font-size-xl);
 }
 
+/*
+ * The subtitle belongs TO the title, so it sits a hair under it rather than a
+ * full card gap away.
+ *
+ * The negative margin cancels that gap and re-adds a small one, which is why it
+ * is written as the subtraction it is instead of as a magic number -- change
+ * --space-4 and this still means "one small step below the heading".
+ */
 .login__subtitle {
-  margin: calc(var(--space-3) * -1) 0 0;
+  margin: calc(var(--space-1) - var(--space-4)) 0 0;
   color: var(--text-muted);
   font-size: var(--font-size-xs);
   line-height: var(--leading-snug);
 }
 
+/*
+ * A failure that has to be read, not glanced at: body size rather than hint
+ * size, snug leading because several of these run to two lines, and a soft
+ * danger panel rather than red text alone -- colour is not the only signal.
+ *
+ * It renders ABOVE the fields, where a screen reader reaches it on the way into
+ * the form and a sighted reader sees it without hunting. The card grows by one
+ * panel when a submission fails, which is the only movement on these screens:
+ * everything that reacts as somebody TYPES is a reserved line that was already
+ * there.
+ */
 .login__error {
   margin: 0;
   padding: var(--space-3);
@@ -461,6 +494,7 @@ code {
   background: var(--danger-soft);
   color: var(--danger);
   font-size: var(--font-size-sm);
+  line-height: var(--leading-snug);
 }
 
 /* Supporting prose on the unauthenticated screens: why a link is needed, what
@@ -474,8 +508,79 @@ code {
   line-height: var(--leading-snug);
 }
 
-/* The login card centres its controls; a wider card on the credential screens
- * would reflow the whole layout, so the prose wraps instead. */
+/* A hint under a field on these cards sits closer to its input than the card
+ * gap allows, for the same reason the subtitle does: it belongs to the control
+ * above it rather than being the next thing on the card. */
 .login__card .field__hint {
-  margin-block-start: var(--space-1);
+  margin-block-start: calc(var(--space-1) - var(--space-4));
+  margin-block-end: 0;
+}
+
+/* A labelled rule introducing the card's OTHER action.
+ *
+ * Signing in and signing up are different intentions rather than steps in a
+ * sequence, and a second button directly under the first reads as the next
+ * step. The rule is what says "or, if none of the above is you". */
+.login__divider {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+}
+
+.login__divider::before,
+.login__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* The card's secondary action: a LINK that has to read as a control.
+ *
+ * Sign in offers "Create an account" and signup offers "Sign in", each as the
+ * outlined twin of the filled button above it — so the two screens are the same
+ * card with the two actions swapped, which is what makes moving between them
+ * feel like one flow rather than two products.
+ *
+ * .button is written for <button>, which is already block-level, centred and
+ * free of text decoration. An <a> is none of those, so these three lines are
+ * what make the two look like the same control rather than nearly the same
+ * control. Nothing else about the button is restated here. */
+.login__secondary {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* Small screens. The card already fills the width; what is left is the air
+ * around and inside it, which at phone size is the difference between a form
+ * that fits above the keyboard and one that does not. */
+@media (max-width: 680px) {
+  .login {
+    padding: var(--space-4) var(--space-3);
+    /* Top-aligned rather than centred: a centred card whose height exceeds the
+     * viewport is centred by pushing its own heading off the top of the screen. */
+    align-content: start;
+  }
+
+  .login__card {
+    padding: var(--space-5) var(--space-4);
+  }
+
+  /*
+   * 16px, and the one hard-coded size in this file.
+   *
+   * iOS Safari zooms the page when a focused input's text is smaller than 16px,
+   * and it does not zoom back out afterwards -- so a 14px field leaves somebody
+   * signing up on a phone in a magnified, horizontally scrolling page for the
+   * rest of the form. This is the browser's threshold, not a design choice, and
+   * a token would imply it moves with the type scale when it cannot.
+   */
+  .login__card .field__input {
+    font-size: 16px;
+  }
 }

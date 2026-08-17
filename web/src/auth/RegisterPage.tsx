@@ -21,11 +21,14 @@ const MIN_PASSWORD_LENGTH = 12
  * WHAT THIS SCREEN DELIBERATELY DOES NOT DO:
  *
  *   - It does not offer a role. The server forces OWNER; the account that
- *     creates a company has to be able to create the others.
- *   - It does not name or show a site. One is created for them, and its
- *     PROVISIONING KEY never leaves the server — the response carries a session
- *     and nothing else. An anonymous browser must never be handed the credential
- *     that registers door hardware.
+ *     creates a company has to be able to create the others. The word "owner"
+ *     appears once, in the subtitle, as plain English about who they will be.
+ *   - It does not ask about a site, and it never shows one's PROVISIONING KEY.
+ *     A site is created for them and the key never leaves the server — the
+ *     response carries a session and nothing else. An anonymous browser must
+ *     never be handed the credential that registers door hardware. The site is
+ *     MENTIONED, by the name they will see inside the console, because meeting
+ *     "Main Site" here is better than wondering where it came from.
  *   - It does not reach the platform administration surface, which authenticates
  *     a different table with a different cookie and is not linked from here.
  *
@@ -88,9 +91,24 @@ export function RegisterPage() {
     // `region` rule is what catches the difference.
     <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
+        {/*
+          WHAT THE FIRST TWO LINES HAVE TO GET ACROSS, in the customer's words
+          rather than ours: this creates an account AND sets up their company,
+          and they are the person who will own it. Somebody who thinks they are
+          joining a company that already exists here will fill this in and be
+          confused by what they land in.
+
+          "Tenant", "slug", "operator" and "provisioning" are absent
+          deliberately, here and everywhere else on this screen. They are our
+          vocabulary; the customer meets the product first and the words for it
+          afterwards, inside the console.
+
+          The brand is named once, in the heading. Repeating it in the line
+          directly under it reads as a template rather than as a sentence.
+        */}
         <h1 className="login__title">Create your AccessLink account</h1>
         <p className="login__subtitle">
-          Your company and its first site are set up for you. It takes one form.
+          It also sets up your company and makes you its owner.
         </p>
 
         {error ? (
@@ -112,9 +130,16 @@ export function RegisterPage() {
           />
         </label>
 
-        <label className="field">
+        {/*
+          The hint says what this field DOES, because it is the one field on the
+          form whose consequence is not obvious: a name typed here becomes the
+          company everybody else will be invited into. Tied on with
+          aria-describedby rather than nested, for the reason given below.
+        */}
+        <label className="field" htmlFor="register-company">
           <span className="field__label">Company name</span>
           <input
+            id="register-company"
             className="field__input"
             type="text"
             name="organization"
@@ -122,11 +147,18 @@ export function RegisterPage() {
             required
             value={companyName}
             onChange={(event) => setCompanyName(event.target.value)}
+            aria-describedby="register-company-hint"
           />
         </label>
+        <p className="field__hint" id="register-company-hint">
+          This is the company your team will join. You can rename it later.
+        </p>
 
         <label className="field">
-          <span className="field__label">Work email</span>
+          {/* "Email", matching the sign-in screen. The same person reads both,
+              often minutes apart, and two names for one thing is a needless
+              moment of doubt about whether they are the same thing. */}
+          <span className="field__label">Email</span>
           <input
             className="field__input"
             type="email"
@@ -141,8 +173,15 @@ export function RegisterPage() {
         {/*
           The hint sits OUTSIDE the <label> and is tied on with
           aria-describedby, for the reason set out on RedeemPage: nesting it
-          would fold "At least 12 characters" into the control's accessible
+          would fold "Use at least 12 characters" into the control's accessible
           NAME, and a name and a description are different things.
+
+          ONE LINE, WHICH BECOMES THE CORRECTION. It was a hint plus a separate
+          error that said the same thing in different words, so a short password
+          produced two sentences about length and a taller form. Keeping one
+          element means the guidance turns into the complaint in place: nothing
+          moves, nothing is repeated, and because the element is always present
+          and its text changes, the live region announces it properly.
         */}
         <label className="field" htmlFor="register-password">
           <span className="field__label">Password</span>
@@ -159,22 +198,41 @@ export function RegisterPage() {
             aria-invalid={tooShort || undefined}
           />
         </label>
-        <p className="field__hint" id="register-password-hint">
-          At least {MIN_PASSWORD_LENGTH} characters.
-        </p>
-
-        {/* A live region so the shortfall is ANNOUNCED, not merely drawn. */}
-        <p className="field__error" aria-live="polite">
-          {tooShort ? `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` : ''}
+        <p
+          className={`field__hint${tooShort ? ' field__hint--invalid' : ''}`}
+          id="register-password-hint"
+          aria-live="polite"
+        >
+          {tooShort
+            ? `That is too short — use at least ${MIN_PASSWORD_LENGTH} characters.`
+            : `Use at least ${MIN_PASSWORD_LENGTH} characters.`}
         </p>
 
         <button className="button button--primary" type="submit" disabled={!ready || submitting}>
           {submitting ? 'Creating your account…' : 'Create account'}
         </button>
 
+        {/*
+          What happens the moment they press it, in one sentence.
+          "Main Site" is named ON PURPOSE and is the only piece of product
+          vocabulary on this screen: it is the first thing they will see inside
+          the console, and meeting it here — with permission to rename it — is
+          better than wondering where it came from.
+        */}
         <p className="login__note">
-          Already have an account? <Link to="/login">Sign in</Link>
+          You will be signed in straight away, with a first location called
+          &ldquo;Main Site&rdquo; to get you started.
         </p>
+
+        {/*
+          The mirror of the sign-in card, which offers "Create an account" in
+          exactly this position and style. Same card, two actions, swapped.
+        */}
+        <p className="login__divider">Already have an account?</p>
+
+        <Link className="button login__secondary" to="/login">
+          Sign in
+        </Link>
       </form>
     </main>
   )
@@ -193,7 +251,10 @@ function describeFailure(caught: unknown): string {
       // The one case where the person is better off somewhere else entirely.
       return 'An account already exists for that email address. Sign in instead, or use "Forgotten your password?" on the sign-in page.'
     case 403:
-      return 'Self-service signup is switched off on this deployment. Ask whoever runs your AccessLink installation for an account.'
+      // No "deployment", no "self-service", no "instance". Whoever hits this is
+      // being told to go and ask a person, so the sentence has to say which
+      // person rather than describe how the software is configured.
+      return 'New accounts cannot be created here. Ask whoever set up AccessLink for your organisation to invite you.'
     case 429:
       return caught.retryAfterSeconds
         ? `Too many attempts. Try again in ${formatWait(caught.retryAfterSeconds)}.`
