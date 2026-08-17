@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 import { roleLabel } from '../auth/roles'
 import { ErrorBoundary } from '../components/ErrorBoundary'
@@ -50,11 +50,24 @@ export function AppShell() {
 function TopBar() {
   const session = useAuthenticatedSession()
   const { logout } = useSession()
-  const navigate = useNavigate()
 
+  /*
+    NO EXPLICIT NAVIGATION HERE, and that is the whole of it.
+
+    logout() ends the session, RequireAuth sees `anonymous`, and it redirects to
+    the login form — the same path a session that expires on its own takes, and
+    the same one a 401 on any other request takes. Signing out is not a special
+    case and does not need its own redirect.
+
+    Adding one back would not be belt-and-braces, it would be a SECOND
+    navigation to a DIFFERENT url (`/login`, where the guard sends `/login?next=`),
+    and the router would tear the login form down and build it again. Whether
+    React coalesces the two updates depends on scheduler timing: it does on one
+    Node version and does not on another, which is exactly how this last
+    surfaced — as a frontend suite that passed locally and failed in CI.
+  */
   async function signOut() {
     await logout()
-    navigate('/login', { replace: true })
   }
 
   return (
