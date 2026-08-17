@@ -1,0 +1,27 @@
+# Findings gitleaks has raised that are not secrets.
+#
+# FINGERPRINTS, not paths or rules. Each line pins the exemption to one commit,
+# one file, one rule and one line, so a genuine secret on the next line -- or the
+# same line under a different rule -- still fails the build. Silencing the rule
+# or the file would turn a scan of this repository into a scan of nothing much,
+# and migrations/001_init_schema.sql once carried working site keys, which is the
+# reason the secret scan exists at all.
+#
+# Why an ignore file and not a `//gitleaks:allow` comment: on a pull request the
+# action scans base..head, so the finding lives in the PATCH OF THE COMMIT that
+# introduced it. Annotating the file today writes the comment into a NEW commit
+# and leaves the old diff exactly as it was -- the finding would keep firing, and
+# it would look like the fix simply had not worked.
+
+# terminal_lifecycle_test.go:154 --
+#
+#   neighbour := env.registerDevice(env.siteAKey, "<device serial>")
+#
+# The generic-api-key rule wants a key-ish identifier beside a high-entropy
+# quoted string, and this line supplies both halves innocently: `env.siteAKey` is
+# a struct field, not a literal (main_test.go seeds it with an obvious test
+# constant), and the quoted value is a hardcoded ESP32 device SERIAL naming a
+# fixture terminal, in the same shape as the lines either side of it. Entropy
+# 3.77 against a hyphenated mixed-case label; nothing on the line is a
+# credential.
+1d9d94c8ff8ed1a8b779375a0660347290cb7b09:terminal_lifecycle_test.go:generic-api-key:154

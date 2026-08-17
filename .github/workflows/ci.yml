@@ -291,6 +291,17 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action posts its findings as a pull request comment, which needs
+          # `pull-requests: write`. This workflow grants `contents: read` and
+          # nothing else, so on a pull request that call fails with "Resource not
+          # accessible by integration" -- noise from a step that has already
+          # done its job. The result is on the check and in the job summary
+          # either way.
+          #
+          # Off rather than widening the token: a workflow that only ever reads
+          # is a smaller thing to trust than one that can write to pull
+          # requests, and nothing here needs to write.
+          GITLEAKS_ENABLE_COMMENTS: 'false'
 
       # Credentials this project has actually shipped before, checked by shape
       # rather than by entropy. 001_init_schema.sql once carried working site
