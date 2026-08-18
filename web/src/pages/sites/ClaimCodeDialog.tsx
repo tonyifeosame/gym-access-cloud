@@ -274,8 +274,13 @@ export function ProvisionTerminalDialog({
   return (
     <Dialog
       open={open}
-      title={`Provision a terminal at ${site.name}`}
-      description="Issues a one-time code for one terminal. The site's provisioning key is not involved and is never handed out for this."
+      title={`Pre-authorise a terminal at ${site.name}`}
+      // THE SENTENCE ABOUT THE SITE KEY IS LOAD-BEARING AND STAYS. It is the
+      // one thing this dialog has always had to say, and it has a test of its
+      // own: the console must never let the provisioning key look like the
+      // easier alternative to a claim code. What is added is where a customer
+      // should be instead — this is now the specialist path, not the default.
+      description="For an installer bringing up hardware that is not in front of you: issues a one-time code for one serial. The site's provisioning key is not involved and is never handed out for this. Most terminals are added from the Terminals page instead, using the code the unit shows on its own screen — which needs no serial number and no cable."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"

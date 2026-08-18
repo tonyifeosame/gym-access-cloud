@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
-import { MULTI_PURPOSE } from '../../api/types'
+import { MULTI_PURPOSE, type ProvisioningSource } from '../../api/types'
 import { describeApplication } from '../../applications/registry'
 import { can } from '../../auth/permissions'
 import { Badge, TerminalStatusBadge, humaniseCode } from '../../components/Badge'
@@ -16,6 +16,7 @@ import {
 } from '../sites/offlinePolicy'
 import { useSession } from '../../session/useSession'
 import { ApplicationModeDialog } from './ApplicationModeDialog'
+import { ChangeWifiDialog } from './ChangeWifiDialog'
 import { EvaluateAccessDialog } from './EvaluateAccessDialog'
 import {
   MoveTerminalDialog,
@@ -51,11 +52,16 @@ export function TerminalDetailPage() {
   const site = useSite(query.data?.site_public_id)
   const [configuring, setConfiguring] = useState(false)
   const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
+  const [changingWifi, setChangingWifi] = useState(false)
 
   const mayConfigure = can(session, 'configureTerminals')
   // ADMIN, matching the server's route group: revoking a credential stops a door
   // working and retiring is one-way. Neither is day-to-day work.
   const mayAdminister = can(session, 'manageTerminalLifecycle')
+  // ADMIN as well, and named separately from the lifecycle gate so the two can
+  // be argued about independently — the server gates them on the same role today
+  // but for different reasons.
+  const mayChangeWifi = can(session, 'changeTerminalWifi')
 
   if (query.isPending) return <LoadingState label="Loading terminal…" />
 
@@ -327,6 +333,20 @@ export function TerminalDetailPage() {
             <dt>Boot count</dt>
             <dd>{terminal.boot_count ?? <span className="muted">—</span>}</dd>
           </div>
+          {/*
+            HOW THIS DOOR GOT HERE. The audit trail records the provisioning
+            action, but joining a terminal back to it means knowing which of
+            three action names to look for and searching a window nobody wrote
+            down — so the row carries the answer.
+
+            "Not recorded" rather than a guess for terminals that predate the
+            column. Backfilling them all to the site key would be probably-true
+            and occasionally false, and a console cannot un-say "site key".
+          */}
+          <div className="detail-list__row">
+            <dt>Set up using</dt>
+            <dd>{describeProvisioning(terminal.provisioned_via)}</dd>
+          </div>
         </dl>
 
         {terminal.firmware_outdated ? (
@@ -344,6 +364,88 @@ export function TerminalDetailPage() {
             reboots on its own. If it stays behind, the catalogue entry is probably
             missing something the terminal requires — <Link to="/settings/firmware">Firmware</Link>{' '}
             says which.
+          </InfoNote>
+        ) : null}
+      </section>
+
+      {/*
+        --- how it reaches the platform -------------------------------------
+
+        A SECTION OF ITS OWN rather than a sixth entry in Lifecycle, and the
+        split is the point. Everything in Lifecycle answers "should this terminal
+        be in service"; this answers "how does it get to us", which is the
+        question somebody has when the answer to the first one is yes and the
+        door still does not work.
+
+        It also has a different audience. Disable, revoke and retire are things
+        an administrator decides. Changing the Wi-Fi is something that HAPPENS TO
+        a customer — the router was replaced, the password rotated — and they
+        arrive here looking for the word "Wi-Fi" rather than for a lifecycle
+        operation.
+      */}
+      <section className="panel" aria-labelledby="terminal-network-heading">
+        <div className="panel__header">
+          <h2 className="panel__title" id="terminal-network-heading">
+            Network
+          </h2>
+          <p className="field__hint">
+            How this terminal reaches the platform. AccessLink never stores your
+            Wi-Fi password — the network is joined at the terminal itself.
+          </p>
+        </div>
+
+        {/*
+          NO STATUS BADGE AND NO HEARTBEAT HERE, deliberately. Both are already
+          on the cards at the top of this page, and a second copy is not extra
+          information — it is a second thing to keep in agreement, and the first
+          time they disagree an operator has to work out which one to believe.
+          This section is the ACTION and the sentence that goes with it.
+        */}
+
+        {!mayChangeWifi ? (
+          <InfoNote title="Read only">
+            Moving a terminal to a different Wi-Fi network is an administrator
+            action. Ask an administrator or owner of your company, or use the
+            terminal&apos;s own recovery: hold the button on the unit for five
+            seconds and it returns to Wi-Fi setup mode.
+          </InfoNote>
+        ) : null}
+
+        <ul className="lifecycle">
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Change Wi-Fi</h3>
+              <p className="lifecycle__detail">
+                For a new router, or a Wi-Fi password that has changed. The
+                terminal returns to setup mode and somebody joins it to the new
+                network from a phone standing next to it. Its people, credential
+                and settings are untouched.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button"
+              disabled={!mayChangeWifi}
+              onClick={() => setChangingWifi(true)}
+            >
+              Change Wi-Fi
+            </button>
+          </li>
+        </ul>
+
+        {/*
+          STATED WHERE IT IS NEEDED, not only inside the dialog. A terminal that
+          is already offline cannot be sent anything, and that is the state most
+          people reading this section are in — the Wi-Fi broke, which is why they
+          are here. Telling them only after they press the button would be the
+          console making them ask.
+        */}
+        {terminal.status !== 'ONLINE' ? (
+          <InfoNote tone="warning" title="This terminal cannot be reached right now">
+            The terminal is offline. Connect it to the network again or use the
+            terminal&apos;s local Wi-Fi recovery procedure — hold the button on
+            the unit for five seconds and it returns to Wi-Fi setup mode without
+            needing the network at all.
           </InfoNote>
         ) : null}
       </section>
@@ -511,6 +613,10 @@ export function TerminalDetailPage() {
         </p>
       </section>
 
+      {changingWifi ? (
+        <ChangeWifiDialog open terminal={terminal} onClose={() => setChangingWifi(false)} />
+      ) : null}
+
       {configuring ? (
         <ApplicationModeDialog
           open
@@ -549,3 +655,26 @@ export function TerminalDetailPage() {
 }
 
 type LifecycleAction = 'state' | 'revoke' | 'retire' | 'move' | 'resync' | 'evaluate'
+
+/**
+ * How this terminal's CURRENT credential was issued.
+ *
+ * PLAIN LANGUAGE RATHER THAN THE CODE, because the audience is a customer
+ * wondering how a door got onto their account, not somebody reading the schema.
+ * The three answers have genuinely different meanings for them: one says a
+ * secret that provisions the whole site was in play, one says a single-use code
+ * was, and one says they approved it from this console.
+ */
+function describeProvisioning(source: ProvisioningSource | undefined) {
+  switch (source) {
+    case 'ANNOUNCEMENT':
+      return 'Added from this console after the terminal showed a code'
+    case 'CLAIM_CODE':
+      return 'A single-use claim code, redeemed at the terminal'
+    case 'SITE_KEY':
+      return 'The site’s provisioning key'
+    default:
+      // Not a guess. See the note at the call site.
+      return <span className="muted">Not recorded</span>
+  }
+}

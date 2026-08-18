@@ -7,6 +7,7 @@ import type {
   CredentialToken,
   FirmwareVersion,
   OperatorAccount,
+  PendingTerminal,
   Person,
   Session,
   Site,
@@ -99,6 +100,49 @@ export function makeTerminal(overrides: Partial<Terminal> = {}): Terminal {
     last_heartbeat_at: '2026-08-14T17:00:00Z',
     current_firmware_version: '1.2.0',
     firmware_outdated: false,
+
+    // CAPABLE BY DEFAULT, because the default fixture is a terminal on current
+    // firmware and that is the case most tests are about. The interesting rows
+    // are the overrides: `capabilities: []` is a unit that reports and cannot,
+    // and OMITTING the field entirely is the whole fleet in the field today --
+    // one that has never said. Both are refused, and a test that wants either
+    // has to ask for it.
+    capabilities: ['wifi_provisioning', 'wifi_recovery', 'terminal_announce'],
+    ...overrides,
+  }
+}
+
+/**
+ * A terminal that has announced itself and been adopted.
+ *
+ * DEFAULTS TO THE ORDINARY CASE: new hardware, nobody owns it, waiting for
+ * somebody to choose a site. The interesting rows are the overrides — a
+ * RE_PROVISION carries `existing_terminal`, and the two refusals carry a
+ * verdict the console must not offer an Approve button for.
+ */
+export function makePendingTerminal(
+  overrides: Partial<PendingTerminal> = {},
+): PendingTerminal {
+  return {
+    id: 'announcement-1',
+    serial_number: 'AT-A1B2C3',
+    state: 'ADOPTED',
+    verdict: 'NEW',
+    firmware_version: '1.4.0',
+    hardware_revision: 'rev-C',
+
+    // REPORTED BY DEFAULT, because the default fixture is current firmware.
+    // The interesting rows are the overrides: `capabilities: []` is a unit that
+    // reports and cannot, and OMITTING the field is one that never said —
+    // which the approval screen has to render as unknown rather than as none.
+    capabilities: ['wifi_provisioning', 'wifi_recovery', 'terminal_announce'],
+    first_seen_ip: '81.2.0.5',
+    last_seen_ip: '81.2.0.5',
+    last_seen_at: '2026-08-17T12:00:00Z',
+    announced_at: '2026-08-17T11:58:00Z',
+    adopted_by: 'owner@example.com',
+    adopted_at: '2026-08-17T11:59:00Z',
+    expires_at: '2026-08-17T12:14:00Z',
     ...overrides,
   }
 }

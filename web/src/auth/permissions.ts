@@ -124,6 +124,29 @@ export const ACTION_ROLES = {
   manageTerminalLifecycle: 'ADMIN',
 
   /**
+   * Change Wi-Fi: putting one terminal back into its setup portal.
+   *
+   * ADMIN, matching the server's route group, and it sits beside revoke and
+   * retire rather than beside `configureTerminals` for a reason worth stating.
+   * A resync is invisible to everybody. This takes the door OUT OF SERVICE until
+   * somebody physically stands next to it with a phone — so if it is sent to the
+   * wrong terminal, the recovery is a site visit.
+   */
+  changeTerminalWifi: 'ADMIN',
+
+  /**
+   * Adopting and approving a terminal that has announced itself.
+   *
+   * ADMIN, matching the server, and for the reason claim-code issue is ADMIN:
+   * approving authorises hardware to join a site and be handed a credential.
+   *
+   * SEEING the waiting list is NOT gated on this — it is `viewTerminals`.
+   * The person who unpacked the box is often not an administrator, and a
+   * terminal waiting where nobody can see it is a support call.
+   */
+  addTerminals: 'ADMIN',
+
+  /**
    * The audit trail. ADMIN because it names which operators did what, which is
    * administrative information rather than something every viewer needs.
    */

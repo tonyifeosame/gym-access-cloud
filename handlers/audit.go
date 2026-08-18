@@ -41,12 +41,41 @@ const (
 	auditTerminalResynced = "TERMINAL_RESYNCED"
 	auditTerminalModeSet  = "TERMINAL_MODE_SET"
 
+	// The console's Change Wi-Fi command (024).
+	//
+	// REQUESTED, not "changed". The record is written when an operator asks for
+	// the terminal to be put back into Wi-Fi setup mode, which is the only thing
+	// the platform knows at that moment -- whether the terminal collected the
+	// command, and whether somebody then joined it to a network, is in sync_jobs
+	// and at the door respectively. A past-tense "TERMINAL_WIFI_CHANGED" would
+	// be an audit trail asserting something it cannot observe.
+	auditTerminalWifiRecovery = "TERMINAL_WIFI_RECOVERY_REQUESTED"
+
 	// Claim codes. Two actions, because they are performed by two different
 	// identities: an operator issues, and a terminal with no credential at all
 	// redeems. The redemption record carries the address it came from, which is
 	// the only identity there is on that path.
 	auditDeviceClaimCodeIssued = "DEVICE_CLAIM_CODE_ISSUED"
 	auditDeviceClaimed         = "DEVICE_CLAIMED"
+
+	// Announce and approve (022). FOUR actions for one setup, because four
+	// separable decisions happen and a single "terminal added" record would not
+	// be able to say which of them somebody is asking about.
+	//
+	// THERE IS NO TERMINAL_ANNOUNCED. An announcement has no company until it is
+	// adopted, and audit_events.company_id is NOT NULL -- so the announcement's
+	// own facts ride on the ADOPTED record, which is the first moment any
+	// company is entitled to them. The announcement itself is in the operational
+	// log. See handlers/announcements.go.
+	auditTerminalAdopted   = "TERMINAL_ADOPTED"
+	auditTerminalApproved  = "TERMINAL_APPROVED"
+	auditTerminalRejected  = "TERMINAL_SETUP_REJECTED"
+	auditTerminalCollected = "TERMINAL_CREDENTIAL_COLLECTED"
+
+	// Written into the trail of the company that LOSES the terminal, by a
+	// platform administrator. The gaining company's half is its own
+	// TERMINAL_ADOPTED record.
+	auditTerminalReleased = "TERMINAL_RELEASED"
 
 	auditPersonCreated = "PERSON_CREATED"
 	auditPersonUpdated = "PERSON_UPDATED"

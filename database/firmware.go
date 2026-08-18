@@ -38,7 +38,18 @@ const deviceInventoryColumns = `
 	-- a list read -- so the list reports what was recorded the last time a
 	-- snapshot was withheld, and the single-terminal read computes the current
 	-- number. Both are useful; conflating them would make the list slow.
-	d.member_capacity, d.roster_overflow_at, d.roster_overflow_count`
+	d.member_capacity, d.roster_overflow_at, d.roster_overflow_count,
+
+	-- How the credential this row holds was issued (023). Empty on rows that
+	-- predate the column, which the console renders as "not recorded".
+	COALESCE(d.provisioned_via, ''),
+
+	-- What this terminal reported it can do (025). NULL where it has never
+	-- reported, which the console must render as "unknown" rather than as
+	-- "none" -- a brand-new unit that has not heartbeat yet and a build that
+	-- predates capability reporting are both NULL here and deserve different
+	-- answers.
+	d.capabilities`
 
 // The firmware join carries company_id as well as type and channel: "current"
 // is a per-tenant target, so a device must only ever be measured against its own
@@ -90,6 +101,7 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 	var devices []models.DeviceInventory
 	for rows.Next() {
 		var d models.DeviceInventory
+		var capabilities []byte
 		err := rows.Scan(
 			&d.ID, &d.PublicID, &d.SiteID, &d.SitePublicID,
 			&d.SiteName, &d.SerialNumber, &d.DeviceName,
@@ -98,10 +110,19 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			&d.LastSeenAt, &d.LastSyncAt, &d.LastHeartbeatAt,
 			&d.CurrentFirmwareVersion, &d.FirmwareOutdated,
 			&d.MemberCapacity, &d.RosterOverflowAt, &d.RosterOverflowCount,
+			&d.ProvisionedVia, &capabilities,
 		)
 		if err != nil {
 			return nil, err
 		}
+
+		// A malformed list is dropped rather than failing the read. This column
+		// is filled by devices; one terminal that wrote nonsense into it must
+		// not be able to take the whole fleet page down.
+		if parsed, parseErr := scanCapabilities(capabilities); parseErr == nil {
+			d.Capabilities = parsed
+		}
+
 		devices = append(devices, d)
 	}
 	return devices, rows.Err()

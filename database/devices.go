@@ -6,7 +6,9 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"access-terminal-cloud-api/models"
 )
@@ -74,7 +76,7 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 	}
 	defer tx.Rollback()
 
-	device, key, bootstrapped, err := registerDeviceTx(tx, siteID, req)
+	device, key, bootstrapped, err := registerDeviceTx(tx, siteID, req, ProvisionedViaSiteKey)
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -97,8 +99,18 @@ func RegisterDevice(siteID int64, req models.DeviceRegistrationRequest) (*models
 // check, the same bootstrap seeding. A second registration path that drifted
 // from this one is how a claimed device would quietly become a device with
 // different rules.
+//
+// THE THIRD CALLER is announcement collection (database/announcements.go), for
+// the same reason and with the same consequence: the announcement is marked
+// COLLECTED in the transaction that mints the key.
+//
+// `source` records WHICH of the three paths issued the credential this row now
+// holds (023). It is written on re-registration as well as on creation, because
+// what it describes is the current credential rather than the row's origin -- a
+// terminal first registered with a site key and later recovered through an
+// announcement was, from that moment, provisioned by the announcement.
 func registerDeviceTx(tx *sql.Tx, siteID int64,
-	req models.DeviceRegistrationRequest) (*models.Device, string, int, error) {
+	req models.DeviceRegistrationRequest, source string) (*models.Device, string, int, error) {
 
 	key, hash, prefix, err := generateDeviceKey()
 	if err != nil {
@@ -128,12 +140,18 @@ func registerDeviceTx(tx *sql.Tx, siteID int64,
 		INSERT INTO devices (site_id, serial_number, device_name, device_type,
 		                     status, api_key_hash, api_key_prefix, registered_at,
 		                     firmware_version, hardware_revision, build_number,
-		                     release_channel, ip_address, active)
+		                     release_channel, ip_address, active, provisioned_via,
+		                     capabilities, capabilities_reported_at)
 		VALUES ($1, $2, $3, $4, 'ONLINE', $5, $6, CURRENT_TIMESTAMP,
-		        NULLIF($7,''), NULLIF($8,''), NULLIF($9,''), $10, NULLIF($11,''), TRUE)
+		        NULLIF($7,''), NULLIF($8,''), NULLIF($9,''), $10, NULLIF($11,''), TRUE,
+		        NULLIF($12,''),
+		        $13::jsonb,
+		        CASE WHEN $13::jsonb IS NOT NULL THEN CURRENT_TIMESTAMP END)
 		ON CONFLICT (serial_number) WHERE deleted_at IS NULL
 		DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash,
 		              api_key_prefix = EXCLUDED.api_key_prefix,
+		              -- Which path issued the key that is now in the row.
+		              provisioned_via = EXCLUDED.provisioned_via,
 
 		              -- THE REVOCATION MARKER IS CLEARED WITH THE CREDENTIAL IT
 		              -- DESCRIBES, and without this line a revoked terminal
@@ -173,6 +191,19 @@ func registerDeviceTx(tx *sql.Tx, siteID int64,
 		              firmware_version = COALESCE(EXCLUDED.firmware_version, devices.firmware_version),
 		              hardware_revision = COALESCE(EXCLUDED.hardware_revision, devices.hardware_revision),
 		              build_number = COALESCE(EXCLUDED.build_number, devices.build_number),
+
+		              -- Gated on the same COALESCE rule the heartbeat uses
+		              -- (025): a registration that does not name capabilities
+		              -- leaves the stored list alone. Re-registering an old
+		              -- image must not erase what a newer one reported, because
+		              -- the row survives a downgrade and the console would then
+		              -- offer a command the terminal cannot carry out.
+		              capabilities = COALESCE(EXCLUDED.capabilities, devices.capabilities),
+		              capabilities_reported_at = CASE
+		                  WHEN EXCLUDED.capabilities IS NOT NULL
+		                   AND EXCLUDED.capabilities IS DISTINCT FROM devices.capabilities
+		                  THEN CURRENT_TIMESTAMP
+		                  ELSE devices.capabilities_reported_at END,
 		              release_channel = EXCLUDED.release_channel,
 		              ip_address = COALESCE(EXCLUDED.ip_address, devices.ip_address),
 		              -- DISABLED survives re-registration.
@@ -192,7 +223,8 @@ func registerDeviceTx(tx *sql.Tx, siteID int64,
 		RETURNING id, public_id, site_id, serial_number, device_name, device_type,
 		          status, active, api_key_prefix, registered_at`,
 		siteID, req.SerialNumber, deviceName, deviceType, hash, prefix,
-		req.FirmwareVersion, req.HardwareRevision, req.BuildNumber, channel, req.IPAddress).
+		req.FirmwareVersion, req.HardwareRevision, req.BuildNumber, channel,
+		req.IPAddress, source, capabilityJSON(req.Capabilities)).
 		Scan(&device.ID, &device.PublicID, &device.SiteID, &device.SerialNumber,
 			&device.DeviceName, &device.DeviceType, &device.Status, &device.Active,
 			&device.APIKeyPrefix, &wasRegistered)
@@ -333,7 +365,28 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bo
 		       member_capacity = COALESCE($9, member_capacity),
 		       member_capacity_reported_at = CASE
 		           WHEN $9 IS NOT NULL THEN CURRENT_TIMESTAMP
-		           ELSE member_capacity_reported_at END
+		           ELSE member_capacity_reported_at END,
+
+		       -- WHAT THIS TERMINAL CAN DO (025). COALESCE, on exactly the same
+		       -- terms as build_number above: an ABSENT list means "unchanged",
+		       -- so a heartbeat from an image that does not report capabilities
+		       -- cannot switch a gated feature off for that door. A terminal
+		       -- that genuinely loses one says so by sending a SHORTER array,
+		       -- which is a value and therefore replaces.
+		       capabilities = COALESCE($10::jsonb, capabilities),
+
+		       -- Stamped only when the list actually CHANGED, so the column
+		       -- answers "when was this terminal reflashed" rather than "when
+		       -- did it last beat" -- which last_heartbeat_at already answers.
+		       --
+		       -- IS DISTINCT FROM, not <>, because the prior value is NULL on
+		       -- every row that has never reported and <> would be NULL there,
+		       -- leaving the very first report unstamped.
+		       capabilities_reported_at = CASE
+		           WHEN $10::jsonb IS NOT NULL
+		            AND $10::jsonb IS DISTINCT FROM capabilities
+		           THEN CURRENT_TIMESTAMP
+		           ELSE capabilities_reported_at END
 		 WHERE id = $8 AND deleted_at IS NULL`,
 		reported, req.FirmwareVersion, req.HardwareRevision, req.BuildNumber,
 		req.BootCount, req.IPAddress, req.Error, deviceID,
@@ -341,7 +394,8 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bo
 		// hold nobody is not a state the firmware can be in, and the CHECK
 		// constraint would refuse it anyway -- as a 500 on the heartbeat, which
 		// is not how a garbage field should take a door offline.
-		positiveCapacity(req.MemberCapacity))
+		positiveCapacity(req.MemberCapacity),
+		capabilityJSON(req.Capabilities))
 	if err != nil {
 		return 0, false, err
 	}
@@ -358,6 +412,94 @@ func positiveCapacity(reported *int) *int {
 		return nil
 	}
 	return reported
+}
+
+// capabilityJSON renders a reported capability list for the COALESCE above
+// (025).
+//
+// nil IN MEANS NULL OUT, which the SQL reads as "unchanged". A NON-NIL EMPTY
+// slice renders as `[]`, which is a real answer -- "this terminal reports its
+// capabilities and has none" -- and replaces whatever was stored. Collapsing
+// the two would mean a build that stopped reporting silently switched off every
+// gated feature for that door.
+//
+// Blank and duplicate tokens are dropped rather than stored. They cannot come
+// from the firmware's compile-time table, but this value arrives over the wire
+// from an unauthenticated-at-registration path, and a list with three copies of
+// one token is a list the console would render three times.
+func capabilityJSON(reported []string) interface{} {
+	if reported == nil {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(reported))
+	clean := make([]string, 0, len(reported))
+	for _, token := range reported {
+		token = strings.TrimSpace(token)
+		if token == "" || len(token) > maxCapabilityTokenLength || seen[token] {
+			continue
+		}
+		seen[token] = true
+		clean = append(clean, token)
+
+		// A cap on the LIST as well as on each token. Both bound what one
+		// device can write into a row every other request then reads.
+		if len(clean) >= maxCapabilityTokens {
+			break
+		}
+	}
+
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		// Unreachable for a []string. Reported as "unchanged" rather than as an
+		// error, because a capability list is not worth failing a heartbeat
+		// over -- a terminal that cannot beat reads as one that has gone
+		// offline.
+		return nil
+	}
+	return string(encoded)
+}
+
+// Bounds on what a device may write here. Generous against the three tokens the
+// firmware sends today, and finite -- which is the property that matters for a
+// column filled by a device-authenticated request.
+const (
+	maxCapabilityTokenLength = 64
+	maxCapabilityTokens      = 32
+)
+
+// DeviceHasCapability reports whether a stored capability list contains
+// `capability`.
+//
+// A NIL LIST IS NOT A NO. It means the terminal has never reported, and every
+// caller has to decide for itself what to do about that -- an old build and a
+// brand-new unit that has not beaten yet are both nil, and they deserve
+// different answers. This function only answers the question it can.
+func DeviceHasCapability(reported []string, capability string) bool {
+	for _, token := range reported {
+		if token == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// scanCapabilities decodes the stored JSONB into a slice.
+//
+// A NULL column yields nil -- "never reported" -- and stored `[]` yields a
+// non-nil empty slice, preserving the distinction the column exists to carry.
+func scanCapabilities(raw []byte) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
 }
 
 // MarkDevicesOffline flags devices that have missed heartbeats for longer than

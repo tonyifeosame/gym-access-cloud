@@ -375,6 +375,18 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	               WHERE device_id = $1
 	                 AND status = 'PENDING'
 	                 AND next_attempt_at <= CURRENT_TIMESTAMP
+	                 -- A LAPSED COMMAND IS NEVER HANDED OUT (024).
+	                 --
+	                 -- Every other job type describes STATE, so delivering it
+	                 -- late is merely late. WIFI_RECOVERY describes an ACT, and
+	                 -- performing it late is destructive: a command that sat
+	                 -- here while the customer recovered the terminal by hand
+	                 -- would arrive after they had re-provisioned it and wipe
+	                 -- the Wi-Fi they had just typed in. The predicate is here,
+	                 -- on the delivery path, rather than in a sweep, so the
+	                 -- guarantee does not depend on a background task having run.
+	                 AND (job_type <> 'WIFI_RECOVERY'
+	                      OR created_at > CURRENT_TIMESTAMP - ($4 || ' seconds')::interval)
 	               ORDER BY id ASC
 	               LIMIT $2
 	               FOR UPDATE SKIP LOCKED
@@ -390,7 +402,7 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	                 sj.payload, sj.attempts, sj.created_at`
 
 	lease := fmt.Sprintf("%d seconds", int(deliveryLease.Seconds()))
-	rows, err := DB.Query(query, deviceID, limit, lease)
+	rows, err := DB.Query(query, deviceID, limit, lease, models.WifiRecoveryValiditySeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -612,13 +624,22 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 	// Retire whatever was queued. These are superseded, not applied, so they
 	// are CANCELLED rather than COMPLETED -- acknowledged_at stays null and the
 	// "only acked jobs are complete" invariant holds.
+	//
+	// AN OPERATOR COMMAND IS NOT SUPERSEDED BY A SNAPSHOT (024). Everything else
+	// here describes state, and a snapshot of current state genuinely replaces
+	// it. WIFI_RECOVERY is an instruction somebody typed, and the snapshot says
+	// nothing about it -- cancelling it would make an operator's Change Wi-Fi
+	// vanish because the terminal happened to cross the compaction threshold, or
+	// because it was moved between sites, with the console still showing
+	// "waiting for terminal". It lapses on its own timer instead.
 	result, err := tx.Exec(`
 		UPDATE sync_jobs
 		   SET status = 'CANCELLED',
 		       error_message = $2
 		 WHERE device_id = $1
 		   AND acknowledged_at IS NULL
-		   AND status IN ('PENDING', 'FAILED')`, deviceID, reason)
+		   AND status IN ('PENDING', 'FAILED')
+		   AND job_type <> 'WIFI_RECOVERY'`, deviceID, reason)
 	if err != nil {
 		return 0, err
 	}

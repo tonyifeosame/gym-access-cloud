@@ -3,9 +3,11 @@ import { setCsrfToken } from './csrf'
 import type {
   AccessDecision,
   AccessEvaluationRequest,
+  AdoptTerminalRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  ApproveTerminalRequest,
   AuditPage,
   AuditQuery,
   ClaimCodeRequest,
@@ -27,6 +29,8 @@ import type {
   OperatorSitesResponse,
   OperatorsResponse,
   PasswordResetAcceptedResponse,
+  PendingTerminal,
+  PendingTerminalsResponse,
   PeoplePage,
   PeopleQuery,
   Permission,
@@ -34,6 +38,7 @@ import type {
   PermissionsResponse,
   Person,
   PersonRequest,
+  RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
   Schedule,
@@ -59,6 +64,7 @@ import type {
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
+  WifiRecoveryStatus,
 } from './types'
 
 /**
@@ -269,6 +275,73 @@ export function updateTerminalMode(
 }
 
 // ---------------------------------------------------------------------------
+// Adding a terminal: announce and approve
+// ---------------------------------------------------------------------------
+
+/**
+ * Claims a terminal that is displaying a pairing code. ADMIN.
+ *
+ * THE ONE FIELD A CUSTOMER FILLS IN. Until this succeeds the terminal belongs to
+ * nobody and is listed by no endpoint — there is no browsing of unclaimed
+ * hardware, which is what keeps one customer's units invisible to every other.
+ *
+ * Three refusals worth handling distinctly, and the server distinguishes them by
+ * `code`: `PAIRING_CODE_REFUSED` (404, deliberately uniform across unknown,
+ * expired and spent), `TERMINAL_OWNED_ELSEWHERE` (409) and `TERMINAL_DISABLED`
+ * (409).
+ *
+ * NOTHING IS MINTED HERE. Adoption records that a company has taken
+ * responsibility for a unit; the credential comes later, and only after approval.
+ */
+export function adoptTerminal(body: AdoptTerminalRequest): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>('/api/v1/console/terminal-announcements/adopt', body)
+}
+
+/** Terminals waiting to be set up. MANAGER — seeing one is operational. */
+export function fetchPendingTerminals(): Promise<PendingTerminalsResponse> {
+  return api.get<PendingTerminalsResponse>('/api/v1/console/terminal-announcements')
+}
+
+export function fetchPendingTerminal(id: string): Promise<PendingTerminal> {
+  return api.get<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}`,
+  )
+}
+
+/**
+ * Places an adopted terminal at a site and authorises it. ADMIN.
+ *
+ * AUTHORISES; MINTS NOTHING. The terminal collects its own credential
+ * afterwards, which is why the response carries no key and why there is nothing
+ * here for a caller to be careful with.
+ */
+export function approveTerminal(
+  id: string,
+  body: ApproveTerminalRequest,
+): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}/approve`,
+    body,
+  )
+}
+
+/**
+ * Refuses a terminal, and the UNDO for an approval.
+ *
+ * The second is the operationally useful one: it frees the serial, so a unit
+ * that was approved and then reset can be added again.
+ */
+export function rejectTerminal(
+  id: string,
+  body: RejectTerminalRequest = {},
+): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}/reject`,
+    body,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Terminal lifecycle
 // ---------------------------------------------------------------------------
 
@@ -341,6 +414,36 @@ export function moveTerminal(
 export function resyncTerminal(serial: string): Promise<TerminalResyncResponse> {
   return api.post<TerminalResyncResponse>(
     `/api/v1/console/terminals/${encodeURIComponent(serial)}/resync`,
+  )
+}
+
+/**
+ * Asks one terminal to return to Wi-Fi setup mode. ADMIN.
+ *
+ * NO BODY, AND THERE IS NOWHERE TO PUT ONE. The platform never learns the
+ * customer's Wi-Fi password: the command hands the terminal back to the same
+ * setup portal a new unit uses, and somebody standing next to it connects a
+ * phone and types the new password into the hardware. If a network name or a
+ * passphrase ever appears in this call, the feature has been misunderstood.
+ *
+ * 202, not 200: the command has been accepted for delivery and nothing has
+ * happened at the terminal yet. Poll `fetchWifiRecoveryStatus` for what did.
+ *
+ * SAFELY REPEATABLE. Sending it again while one is outstanding returns the same
+ * command with `already_queued`, rather than queueing a second — which the
+ * terminal would apply twice, the second time after the customer had already
+ * re-provisioned it.
+ */
+export function requestWifiRecovery(serial: string): Promise<WifiRecoveryStatus> {
+  return api.post<WifiRecoveryStatus>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/wifi-recovery`,
+  )
+}
+
+/** What became of this terminal's most recent Change Wi-Fi command. ADMIN. */
+export function fetchWifiRecoveryStatus(serial: string): Promise<WifiRecoveryStatus> {
+  return api.get<WifiRecoveryStatus>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/wifi-recovery`,
   )
 }
 

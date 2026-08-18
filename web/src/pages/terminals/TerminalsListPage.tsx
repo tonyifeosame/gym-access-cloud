@@ -7,8 +7,12 @@ import { DataTable, type Column } from '../../components/DataTable'
 import { SearchInput } from '../../components/Pagination'
 import { PageHeader, RefreshingIndicator } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
+import { can } from '../../auth/permissions'
 import { useSites, useTerminalSummary, useTerminals } from '../../data/console'
+import { useSession } from '../../session/useSession'
+import { AddTerminalDialog } from './AddTerminalDialog'
 import { filterTerminals, presentStatuses, type TerminalFilter } from './health'
+import { PendingTerminals } from './PendingTerminals'
 
 /**
  * The fleet.
@@ -30,6 +34,10 @@ export function TerminalsListPage() {
   const terminals = useTerminals()
   const summary = useTerminalSummary()
   const sites = useSites()
+  const { session } = useSession()
+
+  const mayAdd = can(session, 'addTerminals')
+  const [adding, setAdding] = useState(false)
 
   const [filter, setFilter] = useState<TerminalFilter>({
     search: '',
@@ -100,7 +108,29 @@ export function TerminalsListPage() {
       <PageHeader
         title="Terminals"
         lead="The devices installed across your sites."
+        // THE PRIMARY ACTION ON THE PAGE, because for a new customer it is the
+        // only thing on this screen worth doing: the fleet is empty until they
+        // do it. It used to live on the site detail page, one level down, which
+        // is where somebody looks after they already know how this works.
+        actions={
+          mayAdd ? (
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={() => setAdding(true)}
+            >
+              Add a terminal
+            </button>
+          ) : null
+        }
       />
+
+      {/* Above the fleet: somebody standing next to a unit that is not working
+          yet is more urgent than the health of the ones that are. Renders
+          nothing at all when nothing is waiting. */}
+      <PendingTerminals canApprove={mayAdd} />
+
+      {adding ? <AddTerminalDialog open onClose={() => setAdding(false)} /> : null}
 
       {/* Health first: the counts are what a fleet view is for. */}
       <section className="tiles" aria-label="Fleet health">
@@ -204,10 +234,24 @@ export function TerminalsListPage() {
         // Two genuinely different empties, and conflating them would tell a
         // company with hardware that it has none.
         emptyTitle={filtering ? 'No terminals match those filters' : 'No terminals yet'}
+        // THE OLD TEXT SENT PEOPLE TO THE SITE PROVISIONING KEY, which is the
+        // credential that registers every terminal at a site for ever and is
+        // exactly what a customer should never be handling. It also described a
+        // procedure needing a cable. Both are now wrong as well as unsafe.
+        //
+        // AND THE TEXT THAT REPLACED IT PROMISED SOMETHING NO BUILD DID. It
+        // described a terminal showing a pairing code at a point when no
+        // firmware anywhere implemented announce, so a new customer followed it
+        // to an empty list and waited for a code that was never coming. The
+        // firmware half now exists — but it is a FIRMWARE version, not a
+        // platform one, so a unit shipped or flashed before it still cannot do
+        // this. Saying which version, and what to do otherwise, is the whole of
+        // the fix: the instruction is right for the fleet it is right for, and
+        // it no longer strands the fleet it is wrong for.
         emptyDescription={
           filtering
             ? 'Try a different search, status or site.'
-            : 'Terminals appear here once they have been registered against one of your sites. Registration happens on the device, using the site’s provisioning key.'
+            : 'Power a terminal on and connect it to Wi-Fi from your phone. On firmware 1.2.0 or newer it then shows a code on its screen — add it here with that code. An older terminal needs a claim code from its site instead.'
         }
         emptyAction={
           filtering ? (
@@ -219,6 +263,20 @@ export function TerminalsListPage() {
               }
             >
               Clear filters
+            </button>
+          ) : mayAdd ? (
+            // NAMED DIFFERENTLY FROM THE HEADER BUTTON on purpose, and not only
+            // to avoid two controls with one accessible name on the same screen.
+            // This one is only ever seen by somebody who has no terminals at
+            // all, and "your first" is what the dashboard's onboarding item
+            // calls the same act — so the two places a new customer might start
+            // agree with each other.
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={() => setAdding(true)}
+            >
+              Add your first terminal
             </button>
           ) : null
         }

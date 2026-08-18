@@ -692,6 +692,7 @@ Provisions a device and issues its credential.
 | `firmware_version` | string | no |
 | `hardware_revision` | string | no |
 | `build_number` | string | no |
+| `capabilities` | string[] | no |
 | `release_channel` | string | no — `STABLE` (default), `BETA`, `CANARY` |
 | `ip_address` | string | no (defaults to the caller's IP) |
 
@@ -912,6 +913,7 @@ All fields optional; body may be omitted entirely.
 | `error` | string | recorded when `status` is `ERROR` |
 | `ip_address` | string | defaults to the caller's IP |
 | `member_capacity` | integer | how many people this terminal can hold (FW-01) |
+| `capabilities` | string[] | what this image can do (025) |
 
 **`member_capacity` is the terminal's own ceiling, and its absence is
 meaningful.** The server treats "not reported" as *unknown* and never
@@ -923,8 +925,41 @@ because the hardware has not changed.
 Values ≤ 0 are ignored and the heartbeat still succeeds; a garbage field must
 not take a door out of service.
 
-**No firmware sends this yet.** The contract it has to meet is in
-`docs/sync-protocol.md`.
+#### `capabilities` — what this terminal can actually do
+
+The list the platform gates commands on. Tokens are the firmware's own, matched
+**exactly** — no prefixes, no wildcards, and never derived from a version string:
+
+| Token | Means |
+|---|---|
+| `wifi_provisioning` | Wi-Fi setup from a phone, through the terminal's own captive portal |
+| `wifi_recovery` | it parses the `WIFI_RECOVERY` job and **acts** on it |
+| `terminal_announce` | it announces itself and displays a pairing code (§17.5) |
+
+**Absent, empty and populated are three different answers.** An absent field
+means *unchanged* and merges with what is stored — so a build that does not
+report cannot switch a gated feature off for that door. An empty array is a real
+answer: *this terminal reports its capabilities and has none of these*, which is
+what a downgrade looks like and is how a capability is taken away. A terminal
+that has never reported at all reads as `null`, and **nothing may be inferred
+from it**: a brand-new unit before its first heartbeat and an image predating
+capability reporting are both `null`.
+
+Unrecognised tokens are stored and ignored rather than refused — the vocabulary
+grows in the firmware first, and a server that refused an unknown token would
+make every new device capability wait for a platform release.
+
+A malformed list never fails the heartbeat. Blank and duplicate tokens are
+dropped; the beat still succeeds, because a terminal that cannot heartbeat reads
+on the console as one that has gone offline.
+
+**Why this exists rather than a version comparison.** `DEVICE_FIRMWARE_VERSION`
+defaulted to `1.0.0` and the build flag that would have overridden it was
+commented out, so every image ever produced reported the same string. The
+version is stamped from `platformio.ini` from firmware 1.2.0 onward, but the
+fleet already in the field will keep reporting `1.0.0` until it is reflashed —
+and no column can fix that after the fact. A capability is the fact itself
+rather than a proxy for it, and it needs version ordering on neither side.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices/heartbeat \
@@ -1316,6 +1351,8 @@ one. CSRF is required on every unsafe method.
 | `POST` | `/api/v1/console/terminals/{serial}/revoke` | session + CSRF | ADMIN |
 | `DELETE` | `/api/v1/console/terminals/{serial}` | session + CSRF | ADMIN |
 | `PUT` | `/api/v1/console/terminals/{serial}/site` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/wifi-recovery` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/terminals/{serial}/wifi-recovery` | session | ADMIN |
 | `GET` | `/api/v1/console/firmware` | session | ADMIN |
 | `POST` | `/api/v1/console/firmware` | session + CSRF | ADMIN |
 | `PUT` | `/api/v1/console/firmware/{id}/current` | session + CSRF | ADMIN |
@@ -1330,6 +1367,17 @@ one. CSRF is required on every unsafe method.
 | `DELETE` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
 | `POST` | `/api/v1/console/terminals/{serial}/evaluate` | session + CSRF | MANAGER |
 | `POST` | `/api/v1/console/sites/{site_id}/claim-codes` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/terminal-announcements` | session | MANAGER |
+| `GET` | `/api/v1/console/terminal-announcements/{id}` | session | MANAGER |
+| `POST` | `/api/v1/console/terminal-announcements/adopt` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/approve` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/reject` | session + CSRF | ADMIN |
+
+Adding a terminal splits by role on purpose: **seeing** that one is waiting is
+MANAGER, because the person who unpacked the box is often not an administrator
+and a pending terminal nobody can see is a support call. **Acting** on it mints a
+credential and is ADMIN, matching claim-code issue and site-key rotation. See
+section 17.5.
 
 ### Credential handover routes
 
@@ -1359,11 +1407,19 @@ a terminal or a site key.
 | `POST` | `/api/v1/platform/companies` | platform session + CSRF |
 | `PUT` | `/api/v1/platform/companies/{company_id}` | platform session + CSRF |
 | `POST` | `/api/v1/platform/companies/{company_id}/operators` | platform session + CSRF |
+| `POST` | `/api/v1/platform/terminals/{serial}/release` | platform session + CSRF |
 
 Issuing a first operator is refused into a company that already has one, by a
 query predicate rather than a check: a platform identity that could add accounts
 to a running tenant at any time would be a standing back door into every
 customer.
+
+**Release is the one exception to "nothing inside a tenant"**, and it is narrow
+by construction: it detaches a serial from the company holding it and does not
+give it to anybody. The next owner adopts it through the ordinary flow with their
+own administrator's approval, so reassigning a terminal always takes two people
+in two companies. Audited into the trail of the company that loses it. See
+section 17.5.
 
 ---
 
@@ -1714,6 +1770,8 @@ not touch it.
 | `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
 | `GET` | `/console/terminals/{serial}` | VIEWER | inventory row + application configuration |
 | `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | inventory row + application configuration |
+| `POST` | `/console/terminals/{serial}/wifi-recovery` | ADMIN | Change Wi-Fi command state (`202`) |
+| `GET` | `/console/terminals/{serial}/wifi-recovery` | ADMIN | Change Wi-Fi command state |
 
 `terminals` entries are the inventory objects from
 [section 7](#get-apiv1devicesoutdatedtrue). They carry **no credential material**
@@ -1834,6 +1892,145 @@ show it verbatim. The order in it is required and neither step can be skipped:
 credential is only ever produced by `POST /api/v1/devices/claim` or by
 `POST /api/v1/devices/register` behind the site API key, in each case exactly
 once, and never by a console read.
+
+#### Change Wi-Fi
+
+`POST /console/terminals/{serial}/wifi-recovery` (ADMIN) asks one terminal to
+return to the **same setup portal a brand-new unit uses**, so that somebody
+standing next to it can join it to a different Wi-Fi network from a phone.
+
+**No Wi-Fi credential crosses this API, in either direction.** The request takes
+**no body** — any body sent is ignored — and there is no SSID field, no
+passphrase field, and no column behind this route that one could be stored in.
+The platform does not learn the customer's Wi-Fi password and cannot leak one it
+never had. A client that wants to send a network name has misunderstood the
+feature.
+
+**It is not a factory reset.** The firmware's recovery path clears the SSID and
+the pre-shared key and nothing else; the device credential, the terminal's
+identity and serial, its company, site and name, the server URL, the offline
+policy, the member table and every fingerprint binding are untouched. The cloud
+side deletes nothing at all — it inserts one row.
+
+##### How it is delivered
+
+It is a `WIFI_RECOVERY` job in the **existing sync outbox**, delivered by
+`GET /api/v1/devices/jobs` and retired by `POST /api/v1/devices/jobs/{id}/complete`
+exactly as every other job is. The job carries **no payload** and names no
+entity: the id and the type are the whole message.
+
+Firmware that predates the command parses an unrecognised type as unknown and
+**acknowledges** it, so serving this type to a mixed fleet makes an older unit
+ignore the command rather than fail on it forever.
+
+##### 202, and why the state matters
+
+The response is `202 Accepted`: the command has been accepted **for delivery**,
+and nothing has happened at the terminal yet. `GET` on the same path returns the
+same shape and is what a client polls.
+
+```json
+{
+  "serial_number": "AT-0001",
+  "state": "QUEUED",
+  "request_id": "8f0c…",
+  "already_queued": false,
+  "terminal_status": "ONLINE",
+  "online": true,
+  "queued_at": "2026-08-18T09:00:00Z",
+  "expires_at": "2026-08-18T09:15:00Z"
+}
+```
+
+| `state` | Meaning |
+|---|---|
+| `NONE` | nothing has ever been sent to this terminal |
+| `QUEUED` | waiting for the terminal to collect it |
+| `DELIVERED` | the terminal has collected it. It has **not** said it acted on it |
+| `ACCEPTED` | the terminal **acknowledged** it. The only evidence anything happened at the door |
+| `EXPIRED` | never collected inside its window, so it will not be delivered |
+| `FAILED` | the terminal reported it could not apply it |
+| `CANCELLED` | superseded by something that retired the terminal's queue — a revocation or a retirement |
+
+**A client must not report the Wi-Fi as changed before `ACCEPTED`.** `QUEUED` is
+the console's own request read back; `DELIVERED` says the terminal holds the
+command and nothing more.
+
+##### `ACCEPTED` on a mixed fleet — a known limitation
+
+**`ACCEPTED` is not proof the terminal acted on the command**, and a client must
+not phrase it as though it were.
+
+Firmware that predates this feature parses an unrecognised job type as *unknown*
+and **acknowledges it as applied**. That is deliberate on the firmware's part —
+it is what stops a newer server's job types being redelivered forever — and it is
+precisely what makes this command safe to serve to a fleet running mixed builds:
+an old unit ignores it rather than failing on it. The cost is that an old unit's
+acknowledgement is byte-for-byte indistinguishable from a new one's.
+
+**This is now gated rather than inferred (025).** The command is refused, and
+nothing is queued, unless the terminal has reported the `wifi_recovery`
+capability on its heartbeat — see `POST /devices/heartbeat`. A terminal that has
+never reported is refused on the same terms: silence is not consent, and
+treating it as consent is exactly what produced a console reporting that a door
+had confirmed a command its firmware never recognised.
+
+The version is not the discriminator and never became one. `DEVICE_FIRMWARE_
+VERSION` defaulted to `1.0.0` and the build flag that would have overridden it
+was commented out, so every image ever produced reported the same string; it is
+stamped from firmware 1.2.0 onward, but the fleet in the field will keep
+reporting `1.0.0` until it is reflashed.
+
+A client should still say the terminal **acknowledged** the command and state
+the setup mode as an expectation rather than a fact. The terminal acknowledges
+*before* it drops the link — deliberately, so the acknowledgement is not
+stranded — and everything after that is past what the platform can observe. Tell
+the operator what "nothing happened" looks like: no setup network within a few
+minutes means the local recovery at the unit.
+
+##### Safely repeatable, and deliberately perishable
+
+Sending it again while one is outstanding returns **the same command** with
+`already_queued: true` and queues nothing new — enforced by a partial unique
+index, so a retried request whose response was never seen cannot produce a
+second. A completed command does not block a later one.
+
+A command that is not collected within **15 minutes** stops being deliverable and
+reads as `EXPIRED`. This is a safety property rather than tidiness: every other
+job type describes *state*, so arriving late is merely late, while this one
+describes an *act*. A command that sat in the queue while the customer recovered
+the terminal by hand would arrive after they had re-provisioned it and wipe the
+network they had just typed in.
+
+For the same reason a queued command is **not cancelled by a resync or a
+relocation** — those replace state, and a command is not state — but **is**
+cancelled by a revocation or a retirement, which take the terminal out of
+service.
+
+##### Refusals
+
+| Code | `code` | When |
+|---|---|---|
+| `404` | — | no such terminal in this company, or it has been retired |
+| `403` | — | the caller is below ADMIN, or is not scoped to the terminal's site |
+| `409` | `TERMINAL_OFFLINE` | the terminal is not currently reachable |
+| `409` | `TERMINAL_DISABLED` | administratively disabled, so it will not collect commands |
+| `409` | `TERMINAL_NOT_PROVISIONED` | holds no device credential, so it cannot poll |
+| `409` | `TERMINAL_CANNOT_CHANGE_WIFI` | has not reported the `wifi_recovery` capability (025) |
+
+**Nothing is queued on any refusal.** Branch on `code`, never on the message:
+`TERMINAL_OFFLINE` is the one that changes what the customer must be told, and
+what they must be told is that a terminal whose Wi-Fi is already broken has to be
+recovered **at the unit** — the firmware exposes a local path that needs no
+network at all.
+
+That case is not an edge case. A terminal with the wrong Wi-Fi credentials **is**
+offline, which is exactly why somebody reached for this endpoint, and refusing is
+the correct answer rather than an inconvenience.
+
+The operator's request is recorded in the audit trail as
+`TERMINAL_WIFI_RECOVERY_REQUESTED`, carrying the request id and whether a command
+was already waiting. A refusal writes no record: nothing happened.
 
 ### People
 
@@ -2566,7 +2763,192 @@ The code is returned **once** and no read endpoint gives it back.
 refused when minted rather than discovered at a door. `superseded_codes` lets the
 console warn that an installer's earlier printout has just stopped working.
 
-### 17.5 What is still outstanding for the firmware side
+**This is now the ADVANCED path.** It is minted *for* a serial, and the serial is
+derived from the factory MAC and printed only on the terminal's USB console — so
+issuing a code needs a cable to read the serial and redeeming one needs a cable
+to type the code. That is right for pre-authorising hardware that has not
+arrived, and unusable by a customer with a box. §17.5 is the customer path.
+Nothing about this endpoint changed.
+
+### 17.5 Announce and approve — `/api/v1/devices/announce`
+
+**The customer-facing way to add a terminal**, and the other end of the claim
+code: the secret travels *outward*, on the terminal's own screen.
+
+The terminal announces itself and displays an eight-character **pairing code**.
+An authenticated ADMIN types that code into the console, confirms the hardware,
+picks a site and approves. The terminal then collects its credential. The
+customer never sees a serial number, a URL, a provisioning key or a cable.
+
+**There are no open claim codes anywhere in this.** Nothing the server mints can
+be redeemed by arbitrary hardware; the pairing code binds one announcement from
+one serial from the moment it exists.
+
+#### `POST /api/v1/devices/announce` — unauthenticated
+
+```
+POST /api/v1/devices/announce
+X-Announce-Token: <previous token, if this unit holds one>
+{"serial_number": "AT-A1B2C3", "firmware_version": "1.4.0",
+ "hardware_revision": "rev-C",
+ "capabilities": ["wifi_provisioning", "wifi_recovery", "terminal_announce"]}
+
+201 {"announcement_id": "…uuid…",
+     "pairing_code": "K7M2-P4QX",
+     "announce_token": "…64 hex…",
+     "state": "PENDING", "serial_number": "AT-A1B2C3",
+     "expires_at": "…", "poll_after_seconds": 5}
+```
+
+`pairing_code` and `announce_token` are returned **only when this call created an
+announcement**, and the firmware must persist both — the code because it has to
+keep displaying it, the token because it is the only way to collect.
+
+Behaviour when a live announcement already exists for the serial — `200`, and
+each branch answers a real field situation:
+
+| Existing state | With a valid `X-Announce-Token` | Without one |
+|---|---|---|
+| `PENDING` | same announcement, **no new code**: a reboot must not rotate a code the customer is reading | superseded; fresh code and token. This is how a unit that lost its stored code recovers |
+| `ADOPTED` / `APPROVED` | state only | state only — **not superseded**, so a reboot cannot destroy an operator's work in flight |
+
+`400` for a serial that is absent, over 15 characters, or outside
+`[A-Za-z0-9_-]` — the firmware's own rule, checked here because this value
+eventually becomes a device identity.
+
+`capabilities` is optional and follows the same rules as on the heartbeat:
+absent means *unchanged* and merges, `[]` is the real answer *reports and has
+none*, and a stored `null` means *never said*. It is **shown to an operator
+before they approve and gates nothing** — the Change Wi-Fi gate reads
+`devices.capabilities`, which only an authenticated heartbeat writes. This
+arrives unauthenticated from hardware nobody has confirmed yet, so it is
+corroboration on the same footing as the firmware version and the calling IP.
+A value that is not an array is a `400`.
+
+#### `GET /api/v1/devices/announce` — authenticated by the announce token
+
+```
+GET /api/v1/devices/announce
+X-Announce-Token: …
+
+200 {"state": "ANNOUNCED", "expires_at": "…", "poll_after_seconds": 5}
+200 {"state": "ADOPTED",   "poll_after_seconds": 5}
+200 {"state": "APPROVED",  "api_key": "atd_…", "company_name": "…",
+     "site_name": "…", "device_name": "Front Door", "poll_after_seconds": 5}
+200 {"state": "REFUSED",   "poll_after_seconds": 5}
+401  unknown token
+```
+
+**Four device-facing states and no more**, because a terminal has four things it
+can do: keep showing its code, say somebody is dealing with it, store a
+credential, or start over. `REJECTED`, `EXPIRED`, `SUPERSEDED` and
+already-`COLLECTED` all arrive as `REFUSED`.
+
+`company_name`, `site_name` and `device_name` are what the panel shows once the
+unit is set up, so a customer can see on the hardware that it joined the right
+account.
+
+Security properties:
+
+- **Announcing grants nothing.** The row has no company, is listed by no
+  endpoint, and becomes a credential only when an ADMIN types a code displayed
+  on the physical unit. There is no route that enumerates un-adopted
+  announcements, so one customer's unclaimed hardware is invisible to every
+  other.
+- **The credential is minted at COLLECTION, not at approval.** Approval records
+  a decision; minting early would mean storing a plaintext key until the device
+  arrived.
+- **One-shot.** The same token never yields a second credential. A unit that
+  loses what it was given re-announces and is approved again.
+- **Both secrets hashed at rest.** SHA-256, like every other secret here.
+- **One live announcement per serial**, so two codes for one door cannot exist.
+- **15 minutes** for `PENDING`/`ADOPTED` (adoption resets the clock);
+  **24 hours** for an approval to be collected.
+- **Rate limited by two buckets, both of which must have a token.** Per client
+  address (300/min, `ANNOUNCE_RATE_LIMIT_PER_MINUTE`) and per terminal
+  (20/min, `ANNOUNCE_DEVICE_RATE_LIMIT_PER_MINUTE`) — keyed on the serial
+  announced or the token polled with. **A site is one address**: every terminal
+  in a building shares the customer's public IP and each polls twelve times a
+  minute, so an address-only limiter refuses a legitimate installation at about
+  five doors. The per-terminal bucket is what makes the address allowance safe
+  to raise: one unit in a loop is bounded by its own behaviour and cannot spend
+  its neighbours' budget. A `429` means *the announcement is fine, you asked too
+  often* — back off, and do **not** discard the stored code or token.
+  Adoption has a separate **per-session** limiter, which is the only place a
+  pairing code can be guessed.
+- **Audited** — `TERMINAL_ADOPTED`, `TERMINAL_APPROVED`,
+  `TERMINAL_SETUP_REJECTED`, `TERMINAL_CREDENTIAL_COLLECTED`, and
+  `TERMINAL_RELEASED` from the platform. There is no `TERMINAL_ANNOUNCED`:
+  `audit_events.company_id` is `NOT NULL` and an un-adopted announcement has no
+  company, so the announcement's own facts ride on the `TERMINAL_ADOPTED`
+  record. The announcement itself is in the operational log.
+- **Never logged** — not the pairing code, not the token, not the key.
+
+#### The ownership rule
+
+**A serial registered to another company is refused**, and it is checked three
+times — at adoption, again at approval, and a third time at collection by
+`registerDeviceTx`'s site-mismatch guard. Minutes pass between them and the
+consequence of missing the window is one customer's door silently becoming
+another's. The refusal names no company, no site and no operator.
+
+| Verdict | Meaning |
+|---|---|
+| `NEW` | no device row anywhere for this serial |
+| `RE_PROVISION` | a live terminal in **this** company. Allowed, and warned about: collection rotates the credential and the current one stops working |
+| `REFUSED_OTHER_COMPANY` | `409`, and nothing is written |
+| `REFUSED_DISABLED` | `409` — their own terminal, out of service. Re-enable first |
+
+#### Console routes
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/console/terminal-announcements/adopt` | session + CSRF, **ADMIN** |
+| `GET` | `/api/v1/console/terminal-announcements` | session, **MANAGER** |
+| `GET` | `/api/v1/console/terminal-announcements/{id}` | session, **MANAGER** |
+
+The pending-terminal shape carries `capabilities` when the unit reported them
+and **omits the field entirely when it did not** — which a console must render
+as *unknown*, never as *none*. A build predating capability reporting and a
+brand-new unit that has only just announced are both absent here.
+| `POST` | `/api/v1/console/terminal-announcements/{id}/approve` | session + CSRF, **ADMIN** |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/reject` | session + CSRF, **ADMIN** |
+
+Reading is MANAGER and acting is ADMIN: the person who unpacked the box is often
+not an administrator, and a terminal waiting where nobody can see it is a support
+call. Adopt answers `404` with `{"code": "PAIRING_CODE_REFUSED"}` for an unknown,
+expired or already-adopted code — one uniform answer, because distinguishing them
+is what makes guessing worth doing.
+
+Approve takes `{"site_id": "<site public id>", "device_name": "Front Door"}` and
+returns the pending terminal. **It carries no credential**, which is why nothing
+about this response needs the care a claim code's does.
+
+#### `POST /api/v1/platform/terminals/{serial}/release` — platform admin only
+
+The only route that detaches a serial from a company, and deliberately only half
+of a move: it releases, and the next owner adopts through the ordinary flow with
+their own administrator's approval. A single call that reassigned a terminal
+between companies would be a credential capable of taking over any door on the
+platform.
+
+Revokes the credential, soft-deletes the device row, cancels its queued work and
+voids any announcement in flight. Audited into the trail of the company that
+**loses** the terminal; the gaining company's half is its own `TERMINAL_ADOPTED`
+record.
+
+### 17.6 What the firmware now does, and what is still outstanding
+
+**Announce and approve is implemented on the device** as of firmware 1.2.0
+(`src/announce.cpp`). A terminal with no credential and a working link
+announces, persists the pairing code and the announce token across reboots,
+displays the code on its 16×2 panel, polls on the server's
+`poll_after_seconds`, collects its credential exactly once, and retires the
+announcement. The same build reports its capabilities on every heartbeat and
+carries a stamped `firmware_version` for the first time.
+
+Still outstanding:
+
 
 Recorded because the requirements document lists them as done on the device and
 they are not consumed today:
@@ -2649,7 +3031,7 @@ its return exists and passes.
     carries a `firmware_update` object when a newer current build exists for the
     device's company, type and channel, and the server withholds one that breaks
     any of the four hard rules. The firmware's heartbeat parser does not read the
-    field yet, so no fleet updates itself today — see section 17.5.
+    field yet, so no fleet updates itself today — see section 17.6.
 14. **A `REMOVING` placement has no delivery mechanism.** A credential withdrawn
     from a terminal stops appearing in that terminal's pending list, but nothing
     instructs it to erase the template it already holds. That is the third route

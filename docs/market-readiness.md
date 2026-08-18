@@ -867,16 +867,21 @@ not served by this platform, and must not be told otherwise.
 
 Measured at the start of remediation, so any regression is visible.
 
-| Suite | At baseline | 2026-08-15 pass | 2026-08-16 pass | Result |
-|---|---|---|---|---|
-| Go integration (real PostgreSQL) | 144 | 252 | **359** | Pass |
-| Frontend (vitest/jsdom + MSW) | 349 | 561 | not re-run (AI #3) | — |
-| Firmware native | 550 | not re-run | not re-run (AI #2) | — |
+| Suite | At baseline | 2026-08-15 pass | 2026-08-16 pass | 2026-08-17 pass | Result |
+|---|---|---|---|---|---|
+| Go integration (real PostgreSQL) | 144 | 252 | 359 | **395** | Pass |
+| Frontend (vitest/jsdom + MSW) | 349 | 561 | not re-run | **706** | Pass |
+| Firmware native | 550 | not re-run | not re-run | not re-run (AI #2) | — |
 
 The Go figure is top-level test functions, counted the same way each time: 324
-before the 2026-08-16 pass and 359 after it, so that pass added 36. The
-frontend and firmware suites are owned by AI #3 and AI #2; neither was run from
-this repository, so no claim is made about them here.
+before the 2026-08-16 pass and 359 after it, so that pass added 36; the
+2026-08-17 pass added 36 more, 27 of them in
+`terminal_announcement_test.go`.
+
+**The frontend figure moved for the first time since 2026-08-15** because this
+pass was the first to touch `web/` since then. 706 tests, lint, typecheck and
+build clean. The firmware suite is still AI #2's and was not run from here, so
+no claim is made about it.
 
 **The "550 firmware tests" figure is stale and is not this repository's to
 update.** AI #2 reports the current count; the CI job that runs them no longer
@@ -898,3 +903,92 @@ three were executed together.
 
 These are release gates, not caveats. They are listed in full at the end of the
 audit report.
+
+---
+
+## Remediation pass 2026-08-17 — customer terminal onboarding
+
+Backend and console. No firmware file was touched: the firmware half of this is
+owned by AI #2 and is specified in `API_SPEC.md` §17.5.
+
+### The finding this closes, which was not in the register
+
+**ONB-01 — a customer cannot provision a terminal.** Recorded here because the
+register's own rule is that an over-claim is the failure it exists to prevent,
+and "provisioning is solved" was one.
+
+Claim codes (019) removed the site key from an installer's laptop and were right
+to. What they could not remove is the SERIAL: a claim code is minted *for* one,
+and the serial is derived from the factory MAC and printed in exactly one place —
+the terminal's USB console at boot. So issuing a code needed a cable to read the
+serial, and redeeming one needed a cable to type the code. The console
+compounded it by telling operators the serial was "exactly as it is printed on
+the unit", which no manufacturing step produces.
+
+The consequence: a customer who had just signed up, been given a company, an
+owner and Main Site, could not bring up a single door without a serial cable, a
+terminal emulator and somebody who knew what a provisioning key was. Self-service
+signup shipped into a product whose first physical step was not self-service.
+
+**Severity: BLOCKER.** Not for a security reason — for the reason GP-01 was one.
+
+### Remediation — announce and approve
+
+The terminal announces itself and displays an eight-character pairing code. An
+authenticated ADMIN types it into the console, confirms the hardware, picks a
+site and approves. The terminal collects its own credential.
+
+**No open claim codes were introduced**, and that was the constraint the design
+was chosen under. The obvious fix — let an operator mint a code with no serial —
+takes the one property the unauthenticated redemption path rests on and throws it
+away. Reversing the direction of the secret keeps it: the pairing code is
+displayed by the hardware and binds one announcement from one serial from the
+moment it exists.
+
+| Status | Proof |
+|---|---|
+| FIXED | `terminal_announcement_test.go` — the full journey; announcing grants nothing and is invisible to every company; a serial owned by another tenant refused at adoption, at approval **and** at collection, with the victim's credential intact; one-shot delivery; reboot mid-adoption; both expiry windows; the per-session adopt limiter; platform release and re-adoption by a new owner; claim codes unchanged beside it |
+| FIXED | `web/src/pages/terminals/addTerminal.test.tsx` — the three-step flow, the three refusals with their remedies, the re-provision warning, the waiting list, MANAGER read versus ADMIN act, and the dashboard's first-terminal item |
+
+### Two related defects fixed on the way
+
+- **`PurgeExpiredClaimCodes` had never been scheduled.** It has existed since
+  019 with a comment explaining its retention window, and nothing called it — so
+  `device_claim_codes` grew by one row per issued code for ever and the window
+  it documents was never applied. Now wired into the provisioning sweep.
+- **The terminals empty state pointed customers at the site provisioning key.**
+  The credential that registers every terminal at a site for ever, cannot be
+  recovered, and locks out the fleet when rotated.
+
+### What this pass did NOT do
+
+- **~~No firmware.~~ LANDED (firmware 1.2.0).** The terminal announces,
+  persists the pairing code and the announce token across a reboot, displays the
+  code on its 16×2 panel, polls on the server's `poll_after_seconds`, and
+  collects its credential exactly once — `test/test_announce/` on the firmware
+  side, 50 cases. **It is inert on every terminal ALREADY DEPLOYED**, which is a
+  different sentence and a smaller one: those units keep the claim-code path
+  until they are reflashed, and the console's empty state now names the firmware
+  version rather than promising a code every unit will show.
+- **No `TERMINAL_ANNOUNCED` audit record.** `audit_events.company_id` is
+  `NOT NULL` and an un-adopted announcement has no company by construction. The
+  announcement's facts ride on `TERMINAL_ADOPTED`, which is the first moment any
+  company is entitled to them; the announcement itself is in the operational log.
+- **SEC-06 is still open**, and this adds a second path that reaches
+  `registerDeviceTx`. Announcement collection is bounded by an approval that an
+  administrator must perform, which the site-key registration path is not — but
+  the finding as written is unaddressed.
+- **SEC-09 still applies.** Both new limiters are in-process, so with more than
+  one instance the effective rate multiplies by the instance count.
+
+### Compatibility
+
+Additive. Two migrations (022, 023), no column dropped or narrowed, no existing
+route changed in shape or meaning, and `SyncProtocolVersion` untouched.
+`registerDeviceTx` gained a parameter recording which path issued the credential;
+all three call sites pass it and no behaviour changed.
+
+`POST /api/v1/devices/claim` and `POST /api/v1/console/sites/{id}/claim-codes`
+are **unchanged**. The claim code is now presented as the pre-authorised
+installer path rather than the default, which is a console change and not a
+contract one.

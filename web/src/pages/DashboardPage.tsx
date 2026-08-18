@@ -7,7 +7,13 @@ import { roleLabel } from '../auth/roles'
 import { Badge } from '../components/Badge'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../components/states'
 import { ALL_SITES, useSiteContext } from '../context/SiteContext'
-import { usePeople, useSites, useTerminalSummary, useTerminals } from '../data/console'
+import {
+  usePendingTerminals,
+  usePeople,
+  useSites,
+  useTerminalSummary,
+  useTerminals,
+} from '../data/console'
 import { useAuthenticatedSession, useSession } from '../session/useSession'
 
 /**
@@ -40,6 +46,7 @@ export function DashboardPage() {
   // limit=1 fetches ONE row to read `total` from the envelope. The count is the
   // server's, over the whole roster; the page itself is not used.
   const people = usePeople({ limit: 1 })
+  const pending = usePendingTerminals()
 
   const scopedToOneSite = selected !== ALL_SITES && selectedSite !== null
 
@@ -64,6 +71,11 @@ export function DashboardPage() {
     inactiveSites: (sites.data?.sites ?? []).filter((site) => !site.active).length,
     applicationCount: session.applications.length,
     peopleTotal: people.data?.total,
+    // COMPANY-WIDE rather than narrowed by the site selector, deliberately: an
+    // announcement has no site until it is approved, so there is no honest way
+    // to filter it by one. Showing it whatever the selector says is the correct
+    // reading — it genuinely is not "at" the selected site yet.
+    pendingTerminals: pending.data?.count ?? 0,
   })
 
   return (
@@ -373,14 +385,33 @@ export function collectAttention({
   inactiveSites,
   applicationCount,
   peopleTotal,
+  pendingTerminals = 0,
 }: {
   fleet: FleetSummary | undefined
   terminals: Terminal[]
   inactiveSites: number
   applicationCount: number
   peopleTotal: number | undefined
+  /** Terminals that have announced themselves and are waiting to be approved. */
+  pendingTerminals?: number
 }): AttentionItem[] {
   const items: AttentionItem[] = []
+
+  // HIGH, and above everything except an actual fault, because somebody is
+  // usually standing next to the hardware while this is true. A terminal
+  // waiting for approval is a person waiting, and the wait ends the moment
+  // anybody looks at this list.
+  if (pendingTerminals > 0) {
+    items.push({
+      id: 'terminals-waiting',
+      tone: 'warning',
+      title: `${pendingTerminals} terminal${pendingTerminals === 1 ? '' : 's'} waiting to be set up`,
+      detail:
+        'A terminal has connected and is showing a code on its screen. It will not open any doors until it is approved.',
+      href: '/terminals',
+      action: 'Set up',
+    })
+  }
 
   if (fleet && fleet.error > 0) {
     items.push({
@@ -439,6 +470,30 @@ export function collectAttention({
         'A deactivated site refuses its provisioning key and all of its terminals. Nothing is deleted.',
       href: '/sites',
       action: 'View sites',
+    })
+  }
+
+  // THE FIRST STEP FOR A NEW CUSTOMER, and the reason it comes before
+  // applications and people: signup creates a company, an owner and Main Site,
+  // and then there is nothing. Without a terminal there is no door, so enabling
+  // a capability and adding people are both preparation for something that does
+  // not exist yet.
+  //
+  // Suppressed while one is already waiting — the item above is the same job,
+  // further along, and showing both would read as two things to do.
+  if (fleet && fleet.total === 0 && pendingTerminals === 0) {
+    items.push({
+      id: 'no-terminals',
+      tone: 'info',
+      title: 'Add your first terminal',
+      // The version is named for the same reason it is named on the terminals
+      // page: this instruction is true of firmware 1.2.0 and newer and false of
+      // everything shipped before it, and a new customer following it on an
+      // older unit waits for a code that never appears.
+      detail:
+        'Power a terminal on and connect it to Wi-Fi from your phone. On firmware 1.2.0 or newer it shows a code on its screen — add it with that code, no serial number and no cable. An older terminal needs a claim code from its site.',
+      href: '/terminals',
+      action: 'Add a terminal',
     })
   }
 

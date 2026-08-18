@@ -64,14 +64,43 @@ beforeEach(() => setCsrfToken(null))
 // Getting to it
 // ---------------------------------------------------------------------------
 
-describe('the site offers provisioning as its own action', () => {
-  it('puts "Provision a terminal" on the site, ahead of rotating the key', async () => {
+describe('the site offers a claim code as the advanced path', () => {
+  /**
+   * WHAT CHANGED, AND WHY THE OLD ASSERTION WAS RIGHT TO FAIL.
+   *
+   * "Provision a terminal" used to be the site's PRIMARY action, because a
+   * claim code was the only way to bring hardware up without handing out the
+   * site key. It is no longer the only way: a terminal now announces itself and
+   * is added from the Terminals page with a code it displays on its own screen,
+   * which needs no serial number and no cable.
+   *
+   * So the claim code is demoted rather than removed. It is still exactly right
+   * for the case it was built for — pre-authorising a serial before the hardware
+   * arrives — and it is behind a disclosure so that a customer setting up their
+   * first door does not find it first and conclude they need a laptop.
+   */
+  it('keeps the claim code, behind Advanced, and not as the primary action', async () => {
+    const user = userEvent.setup()
     signIn()
     renderSite()
 
+    // NOT in the page header any more.
+    await screen.findByRole('heading', { name: SITE_A.site_name })
     expect(
-      await screen.findByRole('button', { name: 'Provision a terminal' }),
+      screen.queryByRole('button', { name: 'Provision a terminal' }),
+    ).not.toBeInTheDocument()
+
+    // Reachable, and honest about what it is for.
+    const advanced = await screen.findByText(/pre-authorise a terminal for an installer/i)
+    await user.click(advanced)
+
+    expect(screen.getByText(/before the hardware arrives/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Issue a claim code' }),
     ).toBeInTheDocument()
+
+    // And it points at the path a customer should use instead.
+    expect(screen.getByRole('link', { name: /the terminals page/i })).toBeInTheDocument()
   })
 
   it('does not offer it to somebody who could not use it', async () => {
@@ -82,7 +111,7 @@ describe('the site offers provisioning as its own action', () => {
 
     await screen.findByRole('heading', { name: SITE_A.site_name })
     expect(
-      screen.queryByRole('button', { name: 'Provision a terminal' }),
+      screen.queryByText(/pre-authorise a terminal for an installer/i),
     ).not.toBeInTheDocument()
   })
 })

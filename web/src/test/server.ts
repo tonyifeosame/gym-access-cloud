@@ -10,11 +10,14 @@ import type {
   Schedule,
   ScheduleWindow,
   OperatorAccount,
+  PendingTerminal,
   Person,
   Session,
   Site,
   Terminal,
   TerminalDetail,
+  WifiRecoveryState,
+  WifiRecoveryStatus,
 } from '../api/types'
 import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
@@ -67,6 +70,8 @@ interface ServerState {
   permissions: Permission[]
   schedules: Schedule[]
   events: FieldEvent[]
+  /** Terminals that have announced themselves and been adopted. */
+  pendingTerminals: PendingTerminal[]
   /**
    * Addresses that already belong to an account, for the signup conflict. Email
    * is unique GLOBALLY in the schema rather than per company, so a second
@@ -113,6 +118,7 @@ function initialState(): ServerState {
     permissions: [],
     schedules: [],
     events: [],
+    pendingTerminals: [],
     registeredEmails: [],
     platformSession: null,
     platformLoginStatus: 200,
@@ -131,6 +137,8 @@ export function resetServerState(session: Session | null = null): void {
   // Held outside `state` because no response carries it, but still cleared
   // between tests or a superseded-code count leaks from one test into the next.
   outstandingClaims.clear()
+  announceable.clear()
+  wifiRecovery.clear()
 }
 
 /** Seeds the tenant's data. Call after resetServerState. */
@@ -1127,6 +1135,122 @@ export const handlers = [
     })
   }),
 
+  // --- Change Wi-Fi ---------------------------------------------------------
+  //
+  // MODELLED AS THE REAL COMMAND IS, which for this feature is the whole value
+  // of the mock: a POST does not change any Wi-Fi, it queues something a
+  // terminal may or may not collect. So the handler tracks a state per serial
+  // and the console has to read it back — a mock that answered "done" to the
+  // POST would let a dialog ship that claimed a door had changed network on the
+  // strength of its own request.
+  //
+  // The refusals carry `code`, because the console branches on the code and not
+  // on the message. An offline terminal is refused rather than queued, exactly
+  // as the API does: a command that arrived after the customer had recovered the
+  // unit by hand would wipe the network they had just joined it to.
+
+  http.post('*/api/v1/console/terminals/:serial/wifi-recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-wifi-recovery')
+    if (failure) return json({ error: 'Failed to queue the Wi-Fi change' }, failure)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+
+    if (!terminal.active || terminal.status === 'DISABLED') {
+      return json(
+        {
+          error: 'This terminal is disabled, so it will not collect commands. Re-enable it first.',
+          code: 'TERMINAL_DISABLED',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+    // BEFORE THE OFFLINE CHECK, exactly as the API orders them. A terminal that
+    // also cannot carry the command out must not be told "offline" -- that
+    // sends somebody to the door, gets the unit back online, and leaves them
+    // where they started.
+    //
+    // An ABSENT list refuses on the same terms as an empty one. It is the whole
+    // fleet in the field today, and treating silence as consent is what
+    // produced a console reporting that a terminal had confirmed a command it
+    // never understood.
+    if (!(terminal.capabilities ?? []).includes('wifi_recovery')) {
+      return json(
+        {
+          error:
+            'This terminal has not reported that it can change Wi-Fi remotely, so nothing was sent.' +
+            (terminal.capabilities
+              ? ' This terminal reported what it can do, and changing Wi-Fi remotely is not among it.'
+              : ' This terminal has never reported what it can do, so the platform cannot tell whether it would carry this out.'),
+          code: 'TERMINAL_CANNOT_CHANGE_WIFI',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+
+    if (terminal.status !== 'ONLINE' && terminal.status !== 'UPDATING' && terminal.status !== 'ERROR') {
+      return json(
+        {
+          error: 'This terminal is offline and cannot be sent a command.',
+          code: 'TERMINAL_OFFLINE',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+
+    // IDEMPOTENT, like the API: a command already waiting is returned rather
+    // than a second one queued.
+    const waiting = wifiRecovery.get(serial)
+    if (waiting && (waiting.state === 'QUEUED' || waiting.state === 'DELIVERED')) {
+      const repeat: WifiRecoveryStatus = { ...waiting, already_queued: true }
+      wifiRecovery.set(serial, repeat)
+      return json(repeat, 202)
+    }
+
+    const queued: WifiRecoveryStatus = {
+      serial_number: serial,
+      state: 'QUEUED',
+      request_id: `wifi-job-${wifiRecovery.size + 1}`,
+      terminal_status: terminal.status,
+      online: terminal.status === 'ONLINE',
+      queued_at: '2026-08-18T09:00:00Z',
+      expires_at: '2026-08-18T09:15:00Z',
+      last_heartbeat_at: terminal.last_heartbeat_at,
+    }
+    wifiRecovery.set(serial, queued)
+    return json(queued, 202)
+  }),
+
+  http.get('*/api/v1/console/terminals/:serial/wifi-recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+
+    const command = wifiRecovery.get(serial)
+    if (command) return json(command)
+
+    return json({
+      serial_number: serial,
+      state: 'NONE',
+      terminal_status: terminal.status,
+      online: terminal.status === 'ONLINE',
+      last_heartbeat_at: terminal.last_heartbeat_at,
+    } satisfies WifiRecoveryStatus)
+  }),
+
   http.delete('*/api/v1/console/terminals/:serial', ({ request, params }) => {
     record(request)
     const refused = guardTerminal(request, String(params.serial), 'ADMIN')
@@ -1162,6 +1286,180 @@ export const handlers = [
       terminals = terminals.filter((terminal) => terminal.firmware_outdated)
     }
     return json({ count: terminals.length, terminals })
+  }),
+
+  // --- adding a terminal: announce and approve -----------------------------
+  //
+  // MODELLED ON THE SERVER'S OWN RULES, not on what the screens expect. The
+  // three things reproduced here are the three a screen can get wrong:
+  //
+  //   - the uniform 404 for an unknown, expired or already-adopted code, so a
+  //     test cannot come to depend on distinguishing them
+  //   - the 409 ownership refusals, which are what the danger panels render
+  //   - approval MINTING NOTHING: the pending row moves to APPROVED and no
+  //     terminal appears in the fleet, because the real terminal collects its
+  //     credential afterwards
+
+  http.post('*/api/v1/console/terminal-announcements/adopt', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('adopt-terminal')
+    if (failure) return json({ error: 'Failed to add the terminal' }, failure)
+
+    const body = (await request.json()) as { pairing_code?: string }
+    const code = (body.pairing_code ?? '').trim().toUpperCase()
+
+    const announced = announceable.get(code)
+    if (!announced) {
+      return json(
+        {
+          error:
+            'That code was not recognised. Codes expire after 15 minutes — check the terminal’s screen for the current one.',
+          code: 'PAIRING_CODE_REFUSED',
+        },
+        404,
+      )
+    }
+
+    // The two conflicts, refused BEFORE anything is written — a hijack attempt
+    // must not leave the announcement adopted.
+    if (announced.verdict === 'REFUSED_OTHER_COMPANY') {
+      return json(
+        {
+          error: 'that terminal is already registered to another AccessLink account',
+          code: 'TERMINAL_OWNED_ELSEWHERE',
+        },
+        409,
+      )
+    }
+    if (announced.verdict === 'REFUSED_DISABLED') {
+      return json(
+        {
+          error: 'that terminal is disabled; re-enable it before setting it up again',
+          code: 'TERMINAL_DISABLED',
+        },
+        409,
+      )
+    }
+
+    // Single use: the code is spent whether or not the caller goes on to
+    // approve, exactly as the server marks the row ADOPTED.
+    announceable.delete(code)
+    state.pendingTerminals = [...state.pendingTerminals, announced]
+    return json(announced)
+  }),
+
+  http.get('*/api/v1/console/terminal-announcements', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    // MANAGER, not ADMIN: seeing that a terminal is waiting is operational.
+    if (state.session.role === 'VIEWER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('pending-terminals')
+    if (failure) {
+      return json({ error: 'Failed to retrieve terminals waiting to be set up' }, failure)
+    }
+
+    return json({ count: state.pendingTerminals.length, pending: state.pendingTerminals })
+  }),
+
+  http.post(
+    '*/api/v1/console/terminal-announcements/:id/approve',
+    async ({ request, params }) => {
+      record(request)
+      const refused = guard(request)
+      if (refused) return refused
+      if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+        return json({ error: 'Insufficient permissions' }, 403)
+      }
+
+      const failure = takeFailure('approve-terminal')
+      if (failure) return json({ error: 'Failed to approve the terminal' }, failure)
+
+      const id = String(params.id)
+      const pending = state.pendingTerminals.find((entry) => entry.id === id)
+      if (!pending || pending.state !== 'ADOPTED') {
+        return json(
+          {
+            error: 'That terminal is no longer waiting to be set up.',
+            code: 'ANNOUNCEMENT_NOT_PENDING',
+          },
+          404,
+        )
+      }
+
+      const body = (await request.json()) as { site_id?: string; device_name?: string }
+      const site = state.sites.find((entry) => entry.id === body.site_id)
+      if (!site) return json({ error: 'Site not found' }, 404)
+
+      // RE-CHECKED at approval, as the server does — the serial can acquire an
+      // owner between adoption and this call.
+      if (pending.verdict === 'REFUSED_OTHER_COMPANY') {
+        return json(
+          {
+            error: 'that terminal is already registered to another AccessLink account',
+            code: 'TERMINAL_OWNED_ELSEWHERE',
+          },
+          409,
+        )
+      }
+
+      const approved: PendingTerminal = {
+        ...pending,
+        state: 'APPROVED',
+        site_id: site.id,
+        site_name: site.name,
+        device_name: body.device_name || pending.serial_number,
+        approved_by: state.session.operator.email,
+        approved_at: new Date().toISOString(),
+      }
+      state.pendingTerminals = state.pendingTerminals.map((entry) =>
+        entry.id === id ? approved : entry,
+      )
+
+      // NO TERMINAL IS CREATED. The unit collects its credential afterwards,
+      // and a mock that added a fleet row here would let a screen claim the
+      // terminal was working the instant it was approved.
+      return json(approved)
+    },
+  ),
+
+  http.post(
+    '*/api/v1/console/terminal-announcements/:id/reject',
+    async ({ request, params }) => {
+      record(request)
+      const refused = guard(request)
+      if (refused) return refused
+      if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+        return json({ error: 'Insufficient permissions' }, 403)
+      }
+
+      const id = String(params.id)
+      const pending = state.pendingTerminals.find((entry) => entry.id === id)
+      if (!pending) return json({ error: 'Terminal not found' }, 404)
+
+      state.pendingTerminals = state.pendingTerminals.filter((entry) => entry.id !== id)
+      return json({ ...pending, state: 'EXPIRED' })
+    },
+  ),
+
+  http.get('*/api/v1/console/terminal-announcements/:id', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (state.session.role === 'VIEWER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const pending = state.pendingTerminals.find((entry) => entry.id === String(params.id))
+    if (!pending) return json({ error: 'Terminal not found' }, 404)
+    return json(pending)
   }),
 
   // --- people -------------------------------------------------------------
@@ -1946,8 +2244,59 @@ const modes = new Map<string, string>()
 /** Serials whose device credential has been revoked. */
 const revoked = new Set<string>()
 
+/**
+ * The Change Wi-Fi command outstanding against each serial.
+ *
+ * HELD OUTSIDE `state` for the same reason `announceable` is: it models
+ * something happening at the hardware over time, not a row the console owns. A
+ * test seeds a state to say "the terminal has now acknowledged it", which is the
+ * only way a console can ever learn that.
+ */
+const wifiRecovery = new Map<string, WifiRecoveryStatus>()
+
+/**
+ * Moves a terminal's outstanding command on, the way the hardware would.
+ *
+ * A test calls this to say what the TERMINAL did — collected the command,
+ * acknowledged it, never picked it up — rather than to fake a response. The
+ * console has to poll to find out, which is the behaviour under test.
+ */
+export function advanceWifiRecovery(
+  serial: string,
+  state_: WifiRecoveryState,
+  extra: Partial<WifiRecoveryStatus> = {},
+): void {
+  const current = wifiRecovery.get(serial)
+  if (!current) return
+  wifiRecovery.set(serial, { ...current, ...extra, state: state_ })
+}
+
 /** Outstanding claim codes per site and serial, for the superseding count. */
 const outstandingClaims = new Map<string, number>()
+
+/**
+ * Terminals that are currently displaying a pairing code.
+ *
+ * HELD OUTSIDE `state` because no response carries it: a code exists on the
+ * hardware's screen, and the API's only way to learn one is to be told it. A
+ * test seeds this to say "there is a terminal in the room showing K7M2-P4QX",
+ * which is the only thing the console can act on.
+ *
+ * Cleared between tests, or one test's waiting hardware provisions another's.
+ */
+const announceable = new Map<string, PendingTerminal>()
+
+/**
+ * Puts a terminal in the room, showing `code`.
+ *
+ * The `verdict` on the seeded row is what the server would compute for that
+ * serial — NEW for hardware nobody has, RE_PROVISION for the company's own,
+ * and the two refusals — so a test names the SITUATION rather than the
+ * response, and the handler applies the same rules the API does to it.
+ */
+export function seedAnnouncedTerminal(code: string, pending: PendingTerminal): void {
+  announceable.set(code.toUpperCase(), pending)
+}
 
 /**
  * What the platform holds for a site's outage behaviour.
@@ -1979,6 +2328,7 @@ export function resetTerminalModes(): void {
   modes.clear()
   revoked.clear()
   outstandingClaims.clear()
+  announceable.clear()
 }
 
 export const server = setupServer(...handlers)

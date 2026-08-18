@@ -26,6 +26,7 @@ import {
   makeEvent,
   makeFirmwareVersion,
   makeOperatorAccount,
+  makePendingTerminal,
   makePermission,
   makePerson,
   makeSchedule,
@@ -37,7 +38,12 @@ import {
 } from '../test/fixtures'
 import { expectNoViolations } from '../test/axe'
 import { makeTestQueryClient, renderWithSession } from '../test/render'
-import { resetServerState, resetTerminalModes, seed } from '../test/server'
+import {
+  resetServerState,
+  resetTerminalModes,
+  seed,
+  seedAnnouncedTerminal,
+} from '../test/server'
 
 /**
  * The automated accessibility pass (FE-01).
@@ -234,7 +240,10 @@ describe('dialogs', () => {
     renderInShell(`/sites/${SITE_A.site_id}`)
 
     await screen.findByRole('heading', { name: 'Behaviour during an outage' })
-    await user.click(screen.getByRole('button', { name: 'Provision a terminal' }))
+    // Behind the Advanced disclosure now: the claim code is the pre-authorised
+    // installer path, and adding a terminal happens on the Terminals page.
+    await user.click(screen.getByText(/pre-authorise a terminal for an installer/i))
+    await user.click(screen.getByRole('button', { name: 'Issue a claim code' }))
     await screen.findByRole('dialog')
     await expectNoViolations()
 
@@ -242,6 +251,37 @@ describe('dialogs', () => {
     await user.click(screen.getByRole('button', { name: 'Issue claim code' }))
 
     await screen.findByLabelText('Claim code')
+    await expectNoViolations()
+  })
+
+  it('the add-a-terminal flow is free of violations at every step', async () => {
+    // THE SCREEN A CUSTOMER MEETS FIRST, so it is swept at every stage: an
+    // instruction list, a form, a confirmation panel with a programmatically
+    // focused heading, and two alert panels that appear without the focus
+    // moving. The last of those is the one worth a sweep — an alert nobody is
+    // told about is an alert that does not exist for a screen reader.
+    const user = userEvent.setup()
+    signIn()
+    seedAnnouncedTerminal('K7M2-P4QX', makePendingTerminal())
+    renderInShell('/terminals')
+
+    await screen.findByRole('button', { name: 'Add a terminal' })
+    await user.click(screen.getByRole('button', { name: 'Add a terminal' }))
+    await screen.findByRole('dialog')
+    await expectNoViolations()
+
+    await user.type(screen.getByLabelText(/code from the terminal/i), 'K7M2P4QX')
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+
+    await screen.findByText(/is this the terminal in front of you/i)
+    await expectNoViolations()
+
+    // Two sites in this fixture, so nothing is preselected and the site has to
+    // be chosen — which is the shape the select and its error are swept in.
+    const confirm = within(screen.getByRole('dialog'))
+    await user.selectOptions(confirm.getByLabelText(/^site/i), SITE_A.site_id)
+    await user.click(confirm.getByRole('button', { name: /approve and set up/i }))
+    await within(await screen.findByRole('dialog')).findByText(/is being set up/i)
     await expectNoViolations()
   })
 })

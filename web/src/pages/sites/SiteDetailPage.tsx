@@ -21,16 +21,18 @@ import { SiteSettingsPanel } from './SiteSettingsPanel'
 /**
  * One site: what it is, what state it is in, and what can be done to it.
  *
- * THE LIFECYCLE ACTIONS ARE ORDERED AND SEPARATED BY CONSEQUENCE — provision,
- * edit, rotate, deactivate, then retire — with the irreversible one last and
- * visually apart. A row of equal-looking buttons is how somebody retires a live
- * location while meaning to rename it.
+ * THE LIFECYCLE ACTIONS ARE ORDERED AND SEPARATED BY CONSEQUENCE — edit, rotate,
+ * deactivate, then retire — with the irreversible one last and visually apart. A
+ * row of equal-looking buttons is how somebody retires a live location while
+ * meaning to rename it.
  *
- * PROVISIONING COMES FIRST AND ROTATION IS NOT NEXT TO IT, deliberately.
- * "Register a terminal here" is the common, harmless act; "replace the secret
- * every terminal here may depend on" is neither, and the two used to be reachable
- * only through the same key. A claim code is now the answer to the first, so the
- * provisioning key never has to leave the platform to bring hardware up.
+ * PROVISIONING IS NO LONGER ONE OF THEM, and that is the change worth recording
+ * rather than a removal. "Register a terminal here" is the common, harmless act
+ * and it now happens on the Terminals page, from a code the unit displays on its
+ * own screen — no serial number, no cable, and nothing for a customer to
+ * mistake for the site key. What is left on this page is the pre-authorised
+ * claim code, in the Advanced panel at the bottom, for the case it was built
+ * for: authorising a serial before the hardware arrives.
  */
 export function SiteDetailPage() {
   const { siteId } = useParams<{ siteId: string }>()
@@ -96,13 +98,15 @@ export function SiteDetailPage() {
         actions={
           mayManage ? (
             <>
-              <button
-                type="button"
-                className="button button--primary"
-                onClick={() => setProvisioning(true)}
-              >
-                Provision a terminal
-              </button>
+              {/*
+                NO LONGER THE PRIMARY ACTION HERE. Adding a terminal is done from
+                Terminals now, with a code the unit displays on its own screen,
+                and that path needs no serial number and no cable. The claim code
+                stays for the case it was built for -- pre-authorising hardware
+                that has not arrived yet -- and has moved into the Advanced panel
+                below, where somebody who knows they need it will look and a
+                customer setting up their first door will not.
+              */}
               <button type="button" className="button" onClick={() => setEditing(true)}>
                 Edit
               </button>
@@ -209,6 +213,10 @@ export function SiteDetailPage() {
 
       <SiteSettingsPanel siteId={site.id} siteName={site.name} />
 
+      {mayManage ? (
+        <AdvancedProvisioningPanel onIssueClaimCode={() => setProvisioning(true)} />
+      ) : null}
+
       {editing ? (
         <SiteFormDialog open site={site} onClose={() => setEditing(false)} />
       ) : null}
@@ -236,5 +244,55 @@ export function SiteDetailPage() {
         />
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The installer's path, kept and demoted.
+ *
+ * A CLAIM CODE IS STILL THE RIGHT TOOL for one job: pre-authorising a serial
+ * that has not arrived yet, so an integrator can commission a unit the moment it
+ * is unboxed without an administrator being reachable. It is the wrong tool for
+ * a customer with a box, because it is minted FOR a serial and the serial is
+ * readable only over a USB cable — which is the whole reason the announce flow
+ * exists.
+ *
+ * SO IT IS BEHIND A DISCLOSURE RATHER THAN DELETED. Somebody who needs it knows
+ * they need it; a customer setting up their first door must not find it first
+ * and conclude that provisioning requires a laptop and a serial cable.
+ *
+ * WHAT IS DELIBERATELY NOT OFFERED HERE, and never should be: the site
+ * provisioning key as an alternative. It registers every terminal at this site
+ * for ever, it cannot be recovered, and rotating it locks out every unit
+ * depending on it.
+ */
+function AdvancedProvisioningPanel({ onIssueClaimCode }: { onIssueClaimCode: () => void }) {
+  return (
+    <section className="panel" aria-labelledby="advanced-provisioning-title">
+      <details>
+        <summary id="advanced-provisioning-title">
+          Advanced: pre-authorise a terminal for an installer
+        </summary>
+
+        <p className="card__detail">
+          Most terminals are added from{' '}
+          <Link to="/terminals">the Terminals page</Link>, using the code the unit
+          shows on its own screen. No serial number and no cable are needed, and it is
+          the path to use unless the hardware is not in front of you.
+        </p>
+
+        <p className="card__detail">
+          A <strong>claim code</strong> is for the other case: authorising a specific
+          serial before the hardware arrives, so whoever installs it can bring it up
+          without waiting for an administrator. It works once, for that one serial, and
+          expires. You need the serial number, and the installer needs a serial cable to
+          enter it at the unit.
+        </p>
+
+        <button type="button" className="button" onClick={onIssueClaimCode}>
+          Issue a claim code
+        </button>
+      </details>
+    </section>
   )
 }

@@ -250,7 +250,20 @@ describe('terminal inventory', () => {
     renderTerminals()
 
     expect(await screen.findByText('No terminals yet')).toBeInTheDocument()
-    expect(screen.getByText(/registered against one of your sites/)).toBeInTheDocument()
+
+    // THE COPY CHANGED WITH THE FLOW, and the old sentence is the interesting
+    // half. It said registration "happens on the device, using the site's
+    // provisioning key" — a credential that registers every terminal at a site
+    // for ever, cannot be recovered, and is exactly what a customer must never
+    // be handling. It also described a procedure that needs a serial cable.
+    //
+    // Both are now wrong as well as unsafe: a terminal announces itself and is
+    // added with a code it displays on its own screen.
+    expect(screen.getByText(/connect it to Wi-Fi from your phone/i)).toBeInTheDocument()
+    expect(screen.queryByText(/provisioning key/i)).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /add your first terminal/i }),
+    ).toBeInTheDocument()
   })
 
   it('reports a failed load as an error, not as an empty fleet', async () => {

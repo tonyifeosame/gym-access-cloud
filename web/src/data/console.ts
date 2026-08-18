@@ -11,9 +11,11 @@ import * as endpoints from '../api/endpoints'
 import type {
   AccessDecision,
   AccessEvaluationRequest,
+  AdoptTerminalRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  ApproveTerminalRequest,
   AuditPage,
   AuditQuery,
   ClaimCodeRequest,
@@ -34,6 +36,8 @@ import type {
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
+  PendingTerminal,
+  PendingTerminalsResponse,
   PeoplePage,
   PeopleQuery,
   Permission,
@@ -41,6 +45,7 @@ import type {
   PermissionsResponse,
   Person,
   PersonRequest,
+  RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
   RotateSiteKeyResponse,
@@ -64,6 +69,7 @@ import type {
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
+  WifiRecoveryStatus,
 } from '../api/types'
 import { keys } from './keys'
 
@@ -477,6 +483,169 @@ export function useResyncTerminal(
     mutationFn: () => endpoints.resyncTerminal(serial),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Change Wi-Fi
+// ---------------------------------------------------------------------------
+
+/**
+ * How often the dialog asks whether the terminal has taken the command.
+ *
+ * Three seconds, which is the fastest interval that is honest about what is
+ * happening: a terminal polls for work on its own schedule, so nothing here
+ * makes it arrive sooner. What the interval buys is that the screen stops saying
+ * "Waiting for terminal…" promptly once it does — and somebody who has just
+ * pressed this button is standing in front of the hardware waiting to see it
+ * change.
+ */
+const WIFI_RECOVERY_POLL_MS = 3_000
+
+/**
+ * The progress of a terminal's Change Wi-Fi command.
+ *
+ * POLLED ONLY WHILE IT COULD STILL MOVE. React Query stops the interval when the
+ * dialog unmounts, and `refetchInterval` returns false once the command has
+ * reached a state nothing will change — accepted, expired, failed, cancelled, or
+ * never sent. A screen left open on a finished command must not keep a request
+ * every three seconds running for the life of the session.
+ */
+export function useWifiRecoveryStatus(
+  serial: string,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<WifiRecoveryStatus> {
+  return useQuery({
+    queryKey: keys.terminals.wifiRecovery(serial),
+    queryFn: () => endpoints.fetchWifiRecoveryStatus(serial),
+    enabled: options.enabled ?? true,
+    // Always refetched on mount: the previous command's outcome is not an
+    // answer to the command just sent.
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const state = query.state.data?.state
+      return state === 'QUEUED' || state === 'DELIVERED' ? WIFI_RECOVERY_POLL_MS : false
+    },
+  })
+}
+
+/**
+ * Asks a terminal to return to Wi-Fi setup mode. ADMIN.
+ *
+ * The answer is SEEDED INTO THE STATUS QUERY rather than merely invalidating it,
+ * so the dialog goes straight from the confirmation to "Waiting for terminal…"
+ * with no gap in which it would have nothing to show. The two shapes are the
+ * same shape precisely so this is possible.
+ *
+ * The terminal row is invalidated too: a command in flight is worth seeing on
+ * the terminal page, not only inside the dialog that sent it.
+ */
+export function useRequestWifiRecovery(
+  serial: string,
+): UseMutationResult<WifiRecoveryStatus, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.requestWifiRecovery(serial),
+    onSuccess: (result) => {
+      queryClient.setQueryData(keys.terminals.wifiRecovery(serial), result)
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Adding a terminal: announce and approve
+// ---------------------------------------------------------------------------
+
+/**
+ * Terminals waiting to be set up.
+ *
+ * POLLED WHILE THE LIST IS ON SCREEN, which almost nothing else here does. The
+ * rows change without the browser doing anything: a terminal collects its
+ * credential seconds after approval and leaves the list, and an adopted row
+ * times out fifteen minutes after it appeared. An operator watching a screen
+ * that says "Approved — collecting" needs it to stop saying that on its own.
+ *
+ * Ten seconds, and only while the query has an observer — React Query stops the
+ * interval when the screen unmounts, so this is not a background poll running
+ * for the life of the session.
+ */
+export function usePendingTerminals(
+  options: { enabled?: boolean } = {},
+): UseQueryResult<PendingTerminalsResponse> {
+  return useQuery({
+    queryKey: keys.pendingTerminals.list(),
+    queryFn: () => endpoints.fetchPendingTerminals(),
+    enabled: options.enabled ?? true,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+}
+
+/**
+ * Claims a terminal that is displaying a pairing code.
+ *
+ * NOTHING IN THE RESPONSE IS A SECRET, which is what makes this hook ordinary
+ * where `useIssueClaimCode` has to be careful: a claim code is a credential and
+ * must never reach the query cache, and an adopted announcement is a record of a
+ * decision that the console is free to hold, refetch and display.
+ *
+ * The pending list is invalidated because the terminal has just joined it, and
+ * the audit trail because the adoption is recorded there.
+ */
+export function useAdoptTerminal(): UseMutationResult<
+  PendingTerminal,
+  Error,
+  AdoptTerminalRequest
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AdoptTerminalRequest) => endpoints.adoptTerminal(body),
+    onSuccess: (pending) => {
+      queryClient.setQueryData(keys.pendingTerminals.detail(pending.id), pending)
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Approves a terminal into a site.
+ *
+ * INVALIDATES THE FLEET AS WELL AS THE PENDING LIST, and the reason is a timing
+ * one worth stating: approval does not create the terminal — the unit collects
+ * its credential a few seconds later, and only then does a row appear in
+ * `/terminals`. Refreshing the fleet here is what makes it show up without the
+ * operator reloading, together with the pending list's own polling.
+ */
+export function useApproveTerminal(
+  id: string,
+): UseMutationResult<PendingTerminal, Error, ApproveTerminalRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ApproveTerminalRequest) => endpoints.approveTerminal(id, body),
+    onSuccess: (pending) => {
+      queryClient.setQueryData(keys.pendingTerminals.detail(id), pending)
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/** Refuses a terminal, or undoes an approval. */
+export function useRejectTerminal(
+  id: string,
+): UseMutationResult<PendingTerminal, Error, RejectTerminalRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: RejectTerminalRequest) => endpoints.rejectTerminal(id, body),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: keys.pendingTerminals.detail(id) })
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
   })
