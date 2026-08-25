@@ -305,6 +305,17 @@ func NewRouter() *gin.Engine {
 			read.GET("/people", handlers.ConsoleListPeople)
 			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
 
+			// The setup facts the overview cannot derive for itself.
+			//
+			// Today that is one: how many active people have no access rule.
+			// Absence of permission is not permission, so a customer who adds a
+			// terminal and a roster and stops has a deployment that admits
+			// nobody -- and the console could not tell them, because rules are
+			// readable only one person at a time.
+			//
+			// VIEWER, matching the per-person permissions read it aggregates.
+			read.GET("/onboarding", handlers.ConsoleOnboardingState)
+
 			// Who may go where, and when (APP-02). Readable by any operator:
 			// "why was she refused" is a question a viewer at a front desk has
 			// to be able to answer, and the rules are not secret from the
