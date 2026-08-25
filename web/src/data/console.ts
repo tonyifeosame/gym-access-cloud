@@ -33,6 +33,7 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
@@ -671,6 +672,25 @@ export function usePeople(query: PeopleQuery = {}): UseQueryResult<PeoplePage> {
   })
 }
 
+/**
+ * What this company still has to do before anybody gets in.
+ *
+ * READ BY THE OVERVIEW ONLY, to raise the one setup step it could not otherwise
+ * see: a person with no access rule reaches nothing, and a customer who adds a
+ * terminal and a roster and stops has a deployment that admits nobody.
+ *
+ * A SEPARATE QUERY RATHER THAN A FIELD ON THE PEOPLE PAGE, so it is invalidated
+ * by what actually changes it — granting or revoking access — instead of by
+ * every edit to a person's name.
+ */
+export function useOnboardingState(): UseQueryResult<OnboardingState> {
+  return useQuery({
+    queryKey: keys.onboarding.state(),
+    queryFn: () => endpoints.fetchOnboardingState(),
+    staleTime: 30_000,
+  })
+}
+
 export function usePerson(externalId: string | undefined): UseQueryResult<Person> {
   return useQuery({
     queryKey: keys.people.detail(externalId ?? ''),
@@ -688,6 +708,7 @@ export function useCreatePerson(): UseMutationResult<Person, Error, PersonReques
       // Every page and search is now potentially wrong -- the new person may
       // belong on any of them, and every total is off by one.
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -701,6 +722,7 @@ export function useUpdatePerson(
     onSuccess: (person) => {
       queryClient.setQueryData(keys.people.detail(externalId), person)
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -723,6 +745,7 @@ export function useDeletePerson(): UseMutationResult<void, Error, string> {
     onSuccess: (_result, externalId) => {
       queryClient.removeQueries({ queryKey: keys.people.detail(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -944,6 +967,7 @@ export function useGrantPermission(
       // A schedule's permission_count has just changed.
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -958,6 +982,7 @@ export function useRevokePermission(
       void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }

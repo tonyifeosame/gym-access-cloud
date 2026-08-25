@@ -19,6 +19,7 @@ import type {
   WifiRecoveryState,
   WifiRecoveryStatus,
 } from '../api/types'
+import { standingOf } from '../pages/access/accessVocabulary'
 import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
   makeAuditRecord,
@@ -625,6 +626,42 @@ export const handlers = [
       active: true,
       created_at: '2026-01-01T00:00:00Z',
     })
+  }),
+
+  /*
+    What this company still has to set up.
+
+    THE COUNT IS DERIVED FROM THE SAME SEEDED STATE the person pages read, on the
+    same rule the server uses: an ACTIVE person with no rule IN FORCE. Computing
+    it here rather than letting a test set a number means a test cannot seed a
+    roster and a contradictory count -- the overview and the person page are
+    drawn from one source, which is the property the real aggregate exists to
+    guarantee.
+
+    IN FORCE IS `standingOf`, THE CONSOLE'S OWN GRADING, imported rather than
+    reimplemented. The server counts a rule that is active and inside its
+    validity window (database/console_onboarding.go); the person's Access panel
+    badges anything else NOT_YET, EXPIRED or INACTIVE. A mock that applied a
+    third reading of "has access" would let the suite pass while the two real
+    surfaces disagreed, which is the exact failure this figure exists to prevent.
+  */
+  http.get('*/api/v1/console/onboarding', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const failure = takeFailure('onboarding')
+    if (failure) return json({ error: 'Failed to retrieve setup state' }, failure)
+
+    const withAccess = new Set(
+      state.permissions
+        .filter((permission) => standingOf(permission) === 'IN_FORCE')
+        .map((permission) => permission.person_id),
+    )
+    const withoutAccess = state.people.filter(
+      (person) => person.active && !withAccess.has(person.external_id),
+    ).length
+
+    return json({ people_without_access: withoutAccess })
   }),
 
   // --- sites --------------------------------------------------------------

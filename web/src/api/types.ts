@@ -877,6 +877,30 @@ export interface Person {
  * Both are needed: "showing 50 of 1,284" needs the pair, and `has_more` is what
  * says whether to offer a next page.
  */
+/**
+ * The setup facts the overview cannot derive for itself.
+ *
+ * Everything else the onboarding guidance needs is a count the console already
+ * holds. This is not: access rules are readable one person at a time, so
+ * "has anybody been granted anything" would cost one request per person and
+ * would be a sample rather than a count past the first page.
+ *
+ * `people_without_access` counts ACTIVE people with no rule IN FORCE: no rule
+ * that is switched on and inside its validity window right now. Not "no rule at
+ * all" — somebody whose only rule expired last month, or has not started yet, or
+ * was switched off, reaches nothing, and a figure rendered to a customer as
+ * "nobody can get in yet" has to mean what it says.
+ *
+ * That is the same reading as `standingOf()` in pages/access/accessVocabulary,
+ * which grades every rule IN_FORCE, NOT_YET, EXPIRED or INACTIVE and is what
+ * badges them on the person's own Access panel — and the same reading the
+ * authorization engine applies per rule. Schedules are not evaluated by any of
+ * the three: a rule that is in force but out of hours has still been granted.
+ */
+export interface OnboardingState {
+  people_without_access: number
+}
+
 export interface PeoplePage {
   count: number
   total: number

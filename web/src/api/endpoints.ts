@@ -25,6 +25,7 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
@@ -464,6 +465,18 @@ export function fetchPeople(query: PeopleQuery = {}): Promise<PeoplePage> {
   if (query.offset) params.set('offset', String(query.offset))
   const suffix = params.size > 0 ? `?${params}` : ''
   return api.get<PeoplePage>(`/api/v1/console/people${suffix}`)
+}
+
+/**
+ * What this company still has to do before anybody gets in.
+ *
+ * A SEPARATE READ FROM THE PEOPLE LIST, deliberately. Every number on that page
+ * describes the match the caller asked for — a company-wide figure riding along
+ * on it would be the one value that ignored the search and the filters, and
+ * would eventually be read as though it did not.
+ */
+export function fetchOnboardingState(): Promise<OnboardingState> {
+  return api.get<OnboardingState>('/api/v1/console/onboarding')
 }
 
 export function fetchPerson(externalId: string): Promise<Person> {

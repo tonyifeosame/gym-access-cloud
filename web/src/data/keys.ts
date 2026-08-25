@@ -88,6 +88,20 @@ export const keys = {
     detail: (id: string) => [ROOT, 'pending-terminals', 'detail', id] as const,
   },
 
+  /**
+   * What this company still has to set up.
+   *
+   * ITS OWN ROOT rather than a member of `people`, even though the one figure it
+   * carries is about people. Anything under `people` is invalidated whenever a
+   * person is created, edited or removed — which is correct for a roster page
+   * and wrong here, since granting access changes this number without touching a
+   * person at all. Kept apart so each is invalidated by what actually moves it.
+   */
+  onboarding: {
+    all: [ROOT, 'onboarding'] as const,
+    state: () => [ROOT, 'onboarding', 'state'] as const,
+  },
+
   people: {
     all: [ROOT, 'people'] as const,
     // The query is part of the key, so a search and a page are separate cache
