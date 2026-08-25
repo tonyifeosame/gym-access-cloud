@@ -31,6 +31,53 @@
   border: 0;
 }
 
+/*
+  The way past the navigation, for anybody who cannot skip it by looking.
+
+  OFF-SCREEN RATHER THAN `display: none`, because a hidden element is not
+  focusable and an unfocusable skip link is decoration. Moving it out of view
+  with a transform keeps it in the tab order, in the accessibility tree, and
+  first in the document -- so the first Tab of every page reveals it and nothing
+  else changes for a pointer user, who never sees it at all.
+
+  `position: fixed`, so it lands in the same place whatever the shell is doing
+  underneath and at whatever width: there is no separate mobile treatment to get
+  wrong. The z-index clears the top bar, which is the only thing it could
+  otherwise appear behind.
+
+  The transition is on `transform` alone. Fading opacity would leave a
+  half-visible control during the animation, and a control that is announced
+  before it can be seen is worse than one that simply appears.
+*/
+.skip-link {
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 100;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  transform: translateY(calc(-100% - var(--space-3) - 4px));
+  transition: transform 120ms ease-out;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* Nobody should watch it slide. */
+@media (prefers-reduced-motion: reduce) {
+  .skip-link {
+    transition: none;
+  }
+}
+
 /* A visible focus ring on everything interactive. Stated once here because
  * resets remove the browser default often enough that assuming it is present
  * is how keyboard users end up unable to see where they are. */

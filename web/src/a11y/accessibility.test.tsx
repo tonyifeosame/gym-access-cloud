@@ -291,6 +291,77 @@ describe('dialogs', () => {
 // ---------------------------------------------------------------------------
 
 describe('the console works without a mouse', () => {
+  /*
+    THE WAY PAST THE NAVIGATION.
+
+    The sidebar is the same eleven-or-so links on every screen, so without this
+    a keyboard or screen-reader user paid thirteen tab stops to reach the page
+    content -- on every navigation, all session. axe never flagged it: its
+    `bypass` rule is satisfied by the landmarks this console already has, which
+    is why a green sweep sat on top of it for so long.
+
+    Asserted here rather than in the browser pass because the property is about
+    ORDER AND FOCUS, which is exactly what a DOM test can pin: first in the tab
+    order, and focus genuinely lands in the main landmark afterwards. Whether it
+    is VISIBLE when focused is a CSS question, and the one part of this that has
+    to be checked in a real browser.
+  */
+  it('offers a skip link as the FIRST thing a keyboard reaches', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+
+    // Nothing before it. The first Tab from the document lands here, which is
+    // the whole point -- a skip link buried behind the sign-out button is not a
+    // skip link.
+    await user.tab()
+    const skip = screen.getByRole('link', { name: 'Skip to main content' })
+    expect(document.activeElement).toBe(skip)
+    expect(skip).toHaveAttribute('href', '#main')
+  })
+
+  it('MOVES FOCUS to the main landmark, not merely the scroll position', async () => {
+    // The half that silently does not happen if the target cannot hold focus:
+    // the viewport moves, the next Tab carries on from the header, and the user
+    // is back in the navigation they just asked to skip.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+    await user.tab()
+    await user.keyboard('{Enter}')
+
+    const main = document.getElementById('main')
+    expect(main).not.toBeNull()
+    expect(document.activeElement).toBe(main)
+
+    // And it is reachable only that way: -1 keeps the landmark out of the tab
+    // order, so nobody arrives on a focusable region by accident.
+    expect(main).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('leaves no fragment behind in the address bar', async () => {
+    // A `#main` that survives into the next route is litter, and it would be
+    // copied into any URL an operator shared from that point on. Following the
+    // link normally would set it, so this is what proves the handler ran.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+    const before = window.location.hash
+
+    await user.tab()
+    await user.keyboard('{Enter}')
+
+    expect(window.location.hash).toBe(before)
+    // Still on the page it started on: this moves focus, it does not navigate.
+    expect(screen.getByRole('heading', { name: 'People', level: 1 })).toBeInTheDocument()
+  })
+
   it('MOVES FOCUS INTO a dialog when it opens', async () => {
     // A modal that leaves focus behind it is invisible to anyone not using a
     // pointer: they tab through the page underneath and never reach it.

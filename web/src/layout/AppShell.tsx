@@ -21,10 +21,20 @@ export function AppShell() {
   return (
     <SiteProvider>
       <div className="shell">
+        <SkipToContent />
         <TopBar />
         <div className="shell__body">
           <SideNav />
-          <main className="shell__main" id="main">
+          {/*
+            `tabIndex={-1}` EXISTS FOR THE SKIP LINK. A fragment link moves the
+            viewport to its target in every browser, but only moves FOCUS if the
+            target can hold it -- otherwise the next Tab carries on from the link
+            in the header, which is the half of the journey that matters and the
+            half that silently does not happen. Making the landmark
+            programmatically focusable is the standard fix and costs nothing: -1
+            keeps it out of the tab order, so nobody reaches it by tabbing.
+          */}
+          <main className="shell__main" id="main" tabIndex={-1}>
             {/*
               THE BOUNDARY GOES INSIDE THE SHELL, not around it. A rendering
               failure on one screen then leaves the navigation, the site
@@ -44,6 +54,67 @@ export function AppShell() {
         </div>
       </div>
     </SiteProvider>
+  )
+}
+
+/**
+ * The way past the navigation, for anybody who cannot skip it by looking.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT IT COSTS NOT TO HAVE ONE
+ * ---------------------------------------------------------------------------
+ *
+ * The sidebar is the same eleven-or-so links on every screen. Without this, a
+ * keyboard or screen-reader user pays THIRTEEN TAB STOPS to reach the page
+ * content, on every navigation, for the whole session -- measured in Chrome at
+ * 1280px against /people. The `id="main"` on the landmark below was already
+ * here, waiting for a link that was never written.
+ *
+ * axe does not flag the absence: its `bypass` rule is satisfied by the presence
+ * of landmarks, which this console has. That is a reasonable rule and it is why
+ * a green accessibility pass was still hiding this.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY IT MANAGES FOCUS ITSELF
+ * ---------------------------------------------------------------------------
+ *
+ * `preventDefault` and an explicit `focus()`, rather than letting the browser
+ * follow the fragment. Two reasons, and the first is the one that matters:
+ *
+ *   FOCUS, NOT JUST SCROLL. Browsers differ on whether following a fragment
+ *   moves focus to a `tabindex="-1"` target or merely sets the sequential
+ *   navigation starting point. Doing it here means the next Tab lands inside
+ *   the page on every engine, which is the entire purpose of the control.
+ *
+ *   NO `#main` LEFT IN THE ADDRESS BAR. This is a single-page app; a fragment
+ *   that survives into the next route is litter, and it would be copied into
+ *   any URL an operator shared from that point on.
+ *
+ * The `href` stays `#main` regardless, because that is what makes it announce
+ * as a link to the main content rather than as a button of unknown purpose.
+ *
+ * IT IS THE FIRST FOCUSABLE ELEMENT IN THE DOM, which is what makes it the
+ * first Tab stop -- no positive `tabIndex` anywhere in this console, so document
+ * order is tab order. It is visually hidden until it takes focus, so a pointer
+ * user never sees it; `.skip-link` in primitives.css is the whole of that.
+ */
+function SkipToContent() {
+  return (
+    <a
+      className="skip-link"
+      href="#main"
+      onClick={(event) => {
+        const main = document.getElementById('main')
+        if (!main) return
+        event.preventDefault()
+        // focus() scrolls the element into view on its own. An explicit
+        // scrollIntoView() beside it is not belt-and-braces, it is a second
+        // scroll that can fight the first.
+        main.focus()
+      }}
+    >
+      Skip to main content
+    </a>
   )
 }
 
