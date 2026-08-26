@@ -282,9 +282,23 @@ permission grant changed, a person reactivated. A daily reconcile sweep catches
 drift. Convergent by construction — the placement table *is* the state, and
 re-running fan-out is idempotent.
 
-Revocation reuses what exists: `credentials.status = REVOKED` drives live
-placements to `REMOVING`; the terminal erases the slot and reports `REMOVED`.
-`database/terminals.go` already writes both transitions.
+Withdrawal works today **through the roster, not through the credential**. Take
+a person's access away or deactivate them and they leave the roster; the
+`FULL_SYNC` reconcile removes them and the firmware erases the template from the
+sensor. That path exists, is used by terminal relocation and retirement, and
+`database/terminals.go` writes the `PLACED -> REMOVING` transition it depends on.
+
+**Credential-level revocation does NOT exist**, and an earlier draft of this
+section said it did. `credentials.status = REVOKED` would drive live placements
+to `REMOVING`, but nothing on the platform ever sets that status: there is no
+route, no handler and no statement that writes it, and the only write to
+`credentials.status` anywhere is `PENDING -> ACTIVE`. `models.CredentialRevokeRequest`
+is declared and unused.
+
+The consequence is in §11: material cannot be replaced once stored, so
+re-enrolment has no path. Nothing is broken today because no firmware uploads
+material yet — but this has to be built before the first real enrolment, not
+after.
 
 ---
 
@@ -431,9 +445,14 @@ specify, all recorded where the code makes them:
   refused (409), not overwritten.** Overwriting would leave terminals that
   already placed the first template holding one finger and every terminal placed
   afterwards holding another — silently, and presenting as the exact "works at
-  some doors and not others" complaint this feature exists to end. Re-enrolling
-  somebody is revoking the credential and creating a new one. A retry of the
+  some doors and not others" complaint this feature exists to end. A retry of the
   *same* material is idempotent and returns 200.
+
+  **This leaves no path to re-enrol anybody.** Replacing a template would mean
+  revoking the credential and creating a new one, and §7 records that credential
+  revocation is not implemented — so a poor, wrong-finger or injured-finger
+  enrolment currently has no remedy. Unreachable while no firmware uploads
+  material; a blocker for M2 rather than for this release.
 * **Two capabilities rather than one** — `biometric_export` and
   `biometric_import`. They are separate driver features that fail separately and
   are verified separately, and the fitted driver has neither half working, so a

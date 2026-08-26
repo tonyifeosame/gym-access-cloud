@@ -76,8 +76,19 @@ var (
 	// finger. That divergence is silent, and it presents as the exact complaint
 	// this feature exists to end.
 	//
-	// Re-enrolling somebody is revoking the credential and creating a new one,
-	// which the console already does.
+	// THERE IS NO WAY BACK FROM THIS YET, and it is recorded here rather than
+	// left for somebody to discover from a support ticket. Re-enrolling somebody
+	// would mean revoking the credential and creating a new one -- and NOTHING ON
+	// THIS PLATFORM REVOKES A CREDENTIAL. No route, no handler, no statement:
+	// the only write to `credentials.status` anywhere is PENDING -> ACTIVE in
+	// database/device_credentials.go. So once material is stored against a
+	// credential it cannot be replaced, and a poor or wrong-finger enrolment has
+	// no remedy short of deleting the person.
+	//
+	// It is not reachable today: no firmware produces VENDOR_TEMPLATE, so nothing
+	// uploads material at all (docs/biometric-replication.md, M2). It becomes
+	// reachable the moment one does, which is when revocation has to exist --
+	// before the first real enrolment, not after.
 	ErrMaterialAlreadyPresent = errors.New(
 		"this credential already holds different sealed material")
 

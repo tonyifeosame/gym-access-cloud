@@ -2275,6 +2275,12 @@ is computed from the live-credential rule rather than from the length of this
 array, so a person whose only credential is revoked reads as `NONE` while that
 row stays visible.
 
+**No route currently revokes a credential.** The response contract above is what
+this endpoint returns *if* a credential is ever in that state; nothing on the
+platform puts one there today, and withdrawal is done through the roster instead
+— removing a person's access or deactivating them takes them off it, and the
+terminal erases the template. See `docs/biometric-replication.md` §7.
+
 **Read `enrolment_source`, not `credentials.length`, to decide whether somebody
 is enrolled.** `LEGACY_ONLY` is exactly the case where the array is **empty** and
 the person is nonetheless enrolled — a caller that counted the array would report
