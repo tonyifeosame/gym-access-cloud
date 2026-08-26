@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 
 	"access-terminal-cloud-api/models"
 
@@ -331,4 +332,109 @@ func SetCurrentFirmware(companyID, firmwareID int64) (*models.FirmwareVersion, e
 		return nil, err
 	}
 	return &f, nil
+}
+
+// ---------------------------------------------------------------------------
+// Console fleet paging (D2)
+// ---------------------------------------------------------------------------
+
+// DeviceQuery is one page of the console's fleet list.
+type DeviceQuery struct {
+	// Search matches the serial, the terminal's name or its site's name,
+	// case-insensitively and anywhere in the value.
+	Search string
+
+	// OutdatedOnly keeps the existing `outdated=true` filter, which composes
+	// with everything else here.
+	OutdatedOnly bool
+
+	Limit  int
+	Offset int
+}
+
+// DevicePage is a page of the fleet plus the size of the whole match.
+type DevicePage struct {
+	Devices []models.DeviceInventory
+	Total   int
+}
+
+// ListConsoleDevicesPage returns one page of the company's fleet.
+//
+// ---------------------------------------------------------------------------
+// A SEPARATE FUNCTION FROM ListDevices, ON PURPOSE
+// ---------------------------------------------------------------------------
+//
+// ListDevices also serves the SITE-KEY api (`GET /api/v1/devices`, via
+// handlers/firmware.go), which deployed tooling reads as a complete inventory.
+// Bounding that would silently truncate a fleet somebody depends on being whole
+// -- the identical reasoning that keeps `GET /api/v1/members` unpaginated, and
+// that TestSiteKeyMemberListIsNotPaginated exists to hold in place. So the
+// console gets paging and the site-key contract does not change by a byte.
+//
+// ---------------------------------------------------------------------------
+// PLACEHOLDER NUMBERING IS BUILT POSITIONALLY, NOT ASSUMED
+// ---------------------------------------------------------------------------
+//
+// siteScopeClause returns a clause hardcoded to $2 and returns NOTHING when the
+// scope is nil, so every parameter after it shifts depending on whether the
+// caller is a scoped operator. Writing $3/$4/$5 literally here would work for an
+// ADMIN and silently mis-bind for an operator with site grants -- the worst kind
+// of bug, because it passes every test written with an unscoped fixture. The
+// indices are therefore derived from the argument slice as it is built.
+func ListConsoleDevicesPage(companyID int64, siteIDs []int64, query DeviceQuery) (*DevicePage, error) {
+	scope, scopeArgs := siteScopeClause(siteIDs)
+
+	args := append([]any{companyID}, scopeArgs...)
+
+	where := deviceInventoryFrom + scope
+	if query.OutdatedOnly {
+		where += `
+	  AND fv.version IS NOT NULL
+	  AND (d.firmware_version IS NULL OR d.firmware_version <> fv.version)`
+	}
+
+	// The search term binds once and is compared three times. ESCAPE is not
+	// optional: without it a term of "100%" matches every serial beginning 100,
+	// and a lone "_" matches the entire fleet.
+	if query.Search != "" {
+		args = append(args, "%"+escapeLikePattern(query.Search)+"%")
+		term := fmt.Sprintf("$%d", len(args))
+		where += fmt.Sprintf(`
+	  AND (d.serial_number ILIKE %s ESCAPE '\'
+	    OR d.device_name   ILIKE %s ESCAPE '\'
+	    OR s.site_name     ILIKE %s ESCAPE '\')`, term, term, term)
+	}
+
+	// THE COUNT AND THE PAGE SHARE `where`. Two hand-written predicates would
+	// eventually disagree, and the symptom is a next-page button that leads to
+	// an empty list or a page that stops before the end of the match.
+	var page DevicePage
+	if err := DB.QueryRow(`SELECT count(*) `+where, args...).Scan(&page.Total); err != nil {
+		return nil, err
+	}
+
+	// ORDERED BY SITE, SERIAL, THEN ID. The id tiebreak is not cosmetic: two
+	// terminals can share a site name and a serial ordering position, and
+	// without a unique final key the same row can appear on two consecutive
+	// pages while another is skipped entirely. ListConsolePeople guards the same
+	// hazard for the same reason.
+	args = append(args, query.Limit, query.Offset)
+	rows, err := DB.Query(fmt.Sprintf(`SELECT %s %s
+	 ORDER BY s.site_name, d.serial_number, d.id
+	 LIMIT $%d OFFSET $%d`,
+		deviceInventoryColumns, where, len(args)-1, len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+
+	devices, err := scanDeviceInventory(rows)
+	if err != nil {
+		return nil, err
+	}
+	if devices == nil {
+		devices = []models.DeviceInventory{}
+	}
+	page.Devices = devices
+
+	return &page, nil
 }

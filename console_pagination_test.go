@@ -376,3 +376,401 @@ func TestSiteKeyMemberListIsNotPaginated(t *testing.T) {
 		t.Fatalf("console query: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// D2: terminal paging and search
+// ---------------------------------------------------------------------------
+
+// seedTerminals registers `count` terminals at site A.
+func seedTerminals(t *testing.T, env *testEnv, count int) {
+	t.Helper()
+	for i := 1; i <= count; i++ {
+		env.registerDevice(env.siteAKey, fmt.Sprintf("AT-%03d", i))
+	}
+}
+
+func TestConsoleTerminalsPagination(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "fleet@example.com", models.RoleOwner)
+	seedTerminals(t, env, 120)
+
+	// The default is a bounded page, not the whole fleet. A list with no upper
+	// bound degrades quietly as a customer grows, which is what this closes.
+	code, body := consoleCall(t, env.router, "GET", "/api/v1/console/terminals", "", token, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET terminals = %d (%v)", code, body)
+	}
+	if got := len(listOf(t, body, "terminals")); got != 50 {
+		t.Errorf("default page = %d terminals, want 50", got)
+	}
+
+	// THE SAME ENVELOPE PEOPLE USES, field for field.
+	if body["count"] != float64(50) || body["total"] != float64(120) ||
+		body["limit"] != float64(50) || body["offset"] != float64(0) ||
+		body["has_more"] != true {
+		t.Errorf("envelope = %v", body)
+	}
+
+	_, last := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals?limit=50&offset=100", "", token, "")
+	if got := len(listOf(t, last, "terminals")); got != 20 {
+		t.Errorf("final page = %d terminals, want 20", got)
+	}
+	if last["has_more"] != false {
+		t.Errorf("has_more = %v on the last page", last["has_more"])
+	}
+	if last["total"] != float64(120) {
+		t.Errorf("total = %v, want the whole match on every page", last["total"])
+	}
+}
+
+// TestConsoleTerminalsPagingIsStableAcrossPages.
+//
+// Two terminals sharing a site can order identically without a unique final sort
+// key, and the symptom is a row appearing on two consecutive pages while another
+// is skipped -- silently, and only once a customer has enough hardware to page.
+func TestConsoleTerminalsPagingIsStableAcrossPages(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "stable@example.com", models.RoleOwner)
+	seedTerminals(t, env, 30)
+
+	seen := map[string]int{}
+	for offset := 0; offset < 30; offset += 10 {
+		_, body := consoleCall(t, env.router, "GET",
+			fmt.Sprintf("/api/v1/console/terminals?limit=10&offset=%d", offset), "", token, "")
+		for _, row := range listOf(t, body, "terminals") {
+			seen[row.(map[string]any)["serial_number"].(string)]++
+		}
+	}
+	if len(seen) != 30 {
+		t.Errorf("paged over 30 terminals and saw %d distinct", len(seen))
+	}
+	for serial, times := range seen {
+		if times != 1 {
+			t.Errorf("%s appeared %d times across the pages", serial, times)
+		}
+	}
+}
+
+func TestConsoleTerminalsSearch(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "search@example.com", models.RoleOwner)
+
+	env.registerDevice(env.siteAKey, "AT-LOADING-BAY")
+	env.registerDevice(env.siteAKey, "AT-RECEPTION")
+	env.registerDevice(env.siteBKey, "AT-STOREROOM")
+	mustExec(t, `UPDATE devices SET device_name = 'Front Desk' WHERE serial_number = 'AT-RECEPTION'`)
+
+	cases := []struct {
+		name, query string
+		want        []string
+	}{
+		{"by serial", "LOADING", []string{"AT-LOADING-BAY"}},
+		{"by terminal name", "Front Desk", []string{"AT-RECEPTION"}},
+		{"by site name", "Site B", []string{"AT-STOREROOM"}},
+		{"case insensitive", "loading", []string{"AT-LOADING-BAY"}},
+		{"matches nothing", "nowhere", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, body := consoleCall(t, env.router, "GET",
+				"/api/v1/console/terminals?q="+url.QueryEscape(tc.query), "", token, "")
+			rows := listOf(t, body, "terminals")
+			if len(rows) != len(tc.want) {
+				t.Fatalf("%q matched %d, want %d (%v)", tc.query, len(rows), len(tc.want), body)
+			}
+			for i, serial := range tc.want {
+				if got := rows[i].(map[string]any)["serial_number"]; got != serial {
+					t.Errorf("match %d = %v, want %v", i, got, serial)
+				}
+			}
+			// `total` describes the MATCH, not the fleet.
+			if body["total"] != float64(len(tc.want)) {
+				t.Errorf("total = %v, want %d", body["total"], len(tc.want))
+			}
+		})
+	}
+}
+
+// TestConsoleTerminalSearchWildcardsAreLiteral.
+//
+// Without ESCAPE a term of "%" matches the whole fleet, so a search box becomes
+// a way to page through everything while appearing to filter.
+func TestConsoleTerminalSearchWildcardsAreLiteral(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "wild@example.com", models.RoleOwner)
+	seedTerminals(t, env, 5)
+
+	_, body := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals?q="+url.QueryEscape("%"), "", token, "")
+	if body["total"] != float64(0) {
+		t.Errorf("a literal percent sign matched %v terminals, want 0", body["total"])
+	}
+}
+
+func TestConsoleTerminalSearchComposesWithOutdated(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "compose@example.com", models.RoleOwner)
+
+	env.registerDevice(env.siteAKey, "AT-OLD-ONE")
+	env.registerDevice(env.siteAKey, "AT-OLD-TWO")
+	// TERMINAL / STABLE are what RegisterDevice defaults a new unit to, and the
+	// schema constrains both -- the outdated join matches on device_type and
+	// release_channel, so a catalogue row that does not agree matches nothing.
+	mustExec(t, `INSERT INTO firmware_versions
+	                 (company_id, version, device_type, release_channel, is_current)
+	             VALUES ($1, '9.9.9', 'TERMINAL', 'STABLE', TRUE)`, one)
+	mustExec(t, `UPDATE devices SET firmware_version = '1.0.0'`)
+
+	_, body := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals?outdated=true&q=OLD-ONE", "", token, "")
+	if body["total"] != float64(1) {
+		t.Errorf("outdated + search matched %v, want 1 (%v)", body["total"], body)
+	}
+}
+
+// TestConsoleTerminalsRespectSiteGrants.
+//
+// A scoped operator's `total` must describe THEIR scope. A company-wide count
+// above a narrowed list both reads as a bug and discloses how much hardware
+// exists at sites they were deliberately not given.
+func TestConsoleTerminalsRespectSiteGrants(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+
+	env.registerDevice(env.siteAKey, "AT-SITE-A-1")
+	env.registerDevice(env.siteAKey, "AT-SITE-A-2")
+	env.registerDevice(env.siteBKey, "AT-SITE-B-1")
+
+	operator, token, _ := consoleOperatorSession(t, env.router, one,
+		"scoped@example.com", models.RoleViewer)
+	mustExec(t, `INSERT INTO user_site_grants (user_id, site_id)
+	             VALUES ($1, (SELECT id FROM sites WHERE site_name = 'Site A'))`, operator.ID)
+
+	_, body := consoleCall(t, env.router, "GET", "/api/v1/console/terminals", "", token, "")
+	if body["total"] != float64(2) {
+		t.Errorf("scoped total = %v, want 2 -- the caller's own scope", body["total"])
+	}
+	for _, row := range listOf(t, body, "terminals") {
+		if serial := row.(map[string]any)["serial_number"]; serial == "AT-SITE-B-1" {
+			t.Errorf("a scoped operator was shown %v", serial)
+		}
+	}
+
+	// AND THE PLACEHOLDER NUMBERING HELD. siteScopeClause injects an argument
+	// only when a scope is present, so search and paging shift position for a
+	// scoped caller and not for an unscoped one. This is the case a literal
+	// $3/$4/$5 would have mis-bound while every unscoped test passed.
+	_, searched := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals?q=SITE-A-1&limit=10", "", token, "")
+	if searched["total"] != float64(1) {
+		t.Errorf("scoped search total = %v, want 1 (%v)", searched["total"], searched)
+	}
+}
+
+// TestFleetSummaryIsNotNarrowedByPagingOrSearch.
+//
+// The summary sits ABOVE the list and answers a different question. If paging
+// narrowed it, an operator would read "1 online" over a page of one while eleven
+// doors were up.
+func TestFleetSummaryIsNotNarrowedByPagingOrSearch(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, _ := consoleOperatorSession(t, env.router, one, "summary@example.com", models.RoleOwner)
+	seedTerminals(t, env, 12)
+
+	_, page := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals?limit=1&q=AT-001", "", token, "")
+	if page["count"] != float64(1) {
+		t.Fatalf("expected a single-row page, got %v", page)
+	}
+
+	_, summary := consoleCall(t, env.router, "GET",
+		"/api/v1/console/terminals/summary", "", token, "")
+	if summary["total"] != float64(12) {
+		t.Errorf("summary total = %v, want 12 -- the whole scope", summary["total"])
+	}
+}
+
+// TestSiteKeyTerminalListIsNotPaginated.
+//
+// The sibling of TestSiteKeyMemberListIsNotPaginated, for the same reason:
+// deployed tooling reads GET /api/v1/devices as a COMPLETE inventory, and
+// quietly bounding it would truncate a fleet somebody depends on being whole. The
+// console got its own paged store function instead.
+func TestSiteKeyTerminalListIsNotPaginated(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	seedTerminals(t, env, 60)
+
+	res := env.do("GET", "/api/v1/devices", nil, siteAuth(env.siteAKey))
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/devices = %d", res.Code)
+	}
+	devices, ok := res.Body["devices"].([]any)
+	if !ok {
+		t.Fatalf("site-key device list shape changed: %v", res.Body)
+	}
+	if len(devices) != 60 {
+		t.Errorf("site-key device list returned %d, want all 60", len(devices))
+	}
+	if _, bounded := res.Body["has_more"]; bounded {
+		t.Error("the site-key device list grew a pagination envelope")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// D3: people filtered by enrolment and activity
+// ---------------------------------------------------------------------------
+
+// enrolPerson gives somebody a credential the way the placement endpoint does:
+// a row in `credentials`, and NOTHING in the legacy column.
+func enrolPerson(t *testing.T, companyID int64, externalID string) {
+	t.Helper()
+	mustExec(t, `
+		INSERT INTO credentials (company_id, person_id, credential_type,
+		                         template_format, status)
+		VALUES ($1, (SELECT id FROM people WHERE company_id = $1 AND external_id = $2),
+		        'FINGERPRINT', 'SENSOR_LOCAL', 'ACTIVE')`, companyID, externalID)
+}
+
+func TestConsolePeopleEnrolledFilter(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "enrolled@example.com", models.RoleOwner)
+
+	// 120 people so the filter has to run in SQL: filtering a fetched page would
+	// filter the page rather than the roster, which is silently wrong past the
+	// first one and silently right in every test with three fixtures.
+	seedPeople(t, env.router, token, csrf, 120)
+	enrolPerson(t, one, "P-001")
+	enrolPerson(t, one, "P-060")
+	// And one enrolled only the legacy way, which must still count as enrolled.
+	mustExec(t, `UPDATE people SET fingerprint_template = 'terminal:AT-OLD:slot:2'
+	              WHERE company_id = $1 AND external_id = 'P-119'`, one)
+
+	_, enrolled := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?enrolled=true", "", token, "")
+	if enrolled["total"] != float64(3) {
+		t.Errorf("enrolled=true total = %v, want 3", enrolled["total"])
+	}
+
+	_, unenrolled := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?enrolled=false", "", token, "")
+	if unenrolled["total"] != float64(117) {
+		t.Errorf("enrolled=false total = %v, want 117", unenrolled["total"])
+	}
+
+	// THE FILTER AND THE BADGE AGREE. A row the filter calls unenrolled must not
+	// carry biometric_enrolled: true, or the list contradicts itself.
+	for _, row := range listOf(t, unenrolled, "people") {
+		person := row.(map[string]any)
+		if person["biometric_enrolled"] != false {
+			t.Errorf("%v is in the unenrolled list and reads as enrolled",
+				person["external_id"])
+		}
+	}
+
+	// P-060 is on the second page unfiltered, so finding it proves the filter
+	// ran in SQL rather than over the first fifty rows.
+	_, second := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?enrolled=true&q=P-060", "", token, "")
+	if second["total"] != float64(1) {
+		t.Errorf("a filter that only saw page one would miss P-060 (%v)", second)
+	}
+}
+
+// TestConsolePeopleAbsentFilterIsNotFalse.
+//
+// Tri-state. Absent means "everybody"; collapsing it to false would hide every
+// enrolled person from an unfiltered list.
+func TestConsolePeopleAbsentFilterIsNotFalse(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "tri@example.com", models.RoleOwner)
+	seedPeople(t, env.router, token, csrf, 4)
+	enrolPerson(t, one, "P-001")
+
+	for _, query := range []string{"", "?enrolled=", "?enrolled=maybe"} {
+		_, body := consoleCall(t, env.router, "GET",
+			"/api/v1/console/people"+query, "", token, "")
+		if body["total"] != float64(4) {
+			t.Errorf("%q total = %v, want everybody (4)", query, body["total"])
+		}
+	}
+}
+
+func TestConsolePeopleActiveFilter(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "active@example.com", models.RoleOwner)
+	seedPeople(t, env.router, token, csrf, 10)
+	mustExec(t, `UPDATE people SET active = FALSE
+	              WHERE company_id = $1 AND external_id IN ('P-001','P-002')`, one)
+
+	_, inactive := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?active=false", "", token, "")
+	if inactive["total"] != float64(2) {
+		t.Errorf("active=false total = %v, want 2", inactive["total"])
+	}
+
+	_, live := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?active=true", "", token, "")
+	if live["total"] != float64(8) {
+		t.Errorf("active=true total = %v, want 8", live["total"])
+	}
+
+	// The filters compose with each other.
+	enrolPerson(t, one, "P-003")
+	_, both := consoleCall(t, env.router, "GET",
+		"/api/v1/console/people?active=true&enrolled=true", "", token, "")
+	if both["total"] != float64(1) {
+		t.Errorf("active+enrolled total = %v, want 1", both["total"])
+	}
+}
+
+// TestConsolePersonEditPreservesEnrolment.
+//
+// Correcting somebody's name must never unenrol them. The update path looks the
+// credential up rather than assuming; defaulting to false there would have
+// reported every edited person as newly unenrolled.
+func TestConsolePersonEditPreservesEnrolment(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "edit@example.com", models.RoleOwner)
+
+	if code, _ := consoleCall(t, env.router, "POST", "/api/v1/console/people",
+		`{"external_id":"P-EDIT","full_name":"Before"}`, token, csrf); code != http.StatusCreated {
+		t.Fatal("creating a person failed")
+	}
+	enrolPerson(t, one, "P-EDIT")
+
+	code, body := consoleCall(t, env.router, "PUT", "/api/v1/console/people/P-EDIT",
+		`{"full_name":"After"}`, token, csrf)
+	if code != http.StatusOK {
+		t.Fatalf("PUT person = %d (%v)", code, body)
+	}
+	if body["biometric_enrolled"] != true {
+		t.Error("editing a name unenrolled the person")
+	}
+	if body["enrolment_source"] != models.EnrolmentSourceCredential {
+		t.Errorf("enrolment_source = %v after an edit", body["enrolment_source"])
+	}
+}

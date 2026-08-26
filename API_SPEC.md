@@ -1318,7 +1318,7 @@ one. CSRF is required on every unsafe method.
 | `POST` | `/api/v1/auth/logout` | session + CSRF | any |
 | `POST` | `/api/v1/auth/password` | session + CSRF | any |
 | `GET` | `/api/v1/console/company` | session | VIEWER |
-| `GET` | `/api/v1/console/sites` | session | VIEWER |
+| `GET` | `/api/v1/console/sites?q=` | session | VIEWER |
 | `GET` | `/api/v1/console/sites/{site_id}` | session | VIEWER |
 | `GET` | `/api/v1/console/sites/{site_id}/settings` | session | VIEWER |
 | `PUT` | `/api/v1/console/sites/{site_id}/settings` | session + CSRF | MANAGER |
@@ -1330,6 +1330,7 @@ one. CSRF is required on every unsafe method.
 | `PUT` | `/api/v1/console/terminals/{serial}/application-mode` | session + CSRF | MANAGER |
 | `GET` | `/api/v1/console/people` | session | VIEWER |
 | `GET` | `/api/v1/console/people/{external_id}` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}/credentials` | session | VIEWER |
 | `POST` | `/api/v1/console/people` | session + CSRF | MANAGER |
 | `PUT` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
 | `DELETE` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
@@ -1681,7 +1682,7 @@ tenant is `404`.
 | Method | Path | Role | Returns |
 |---|---|---|---|
 | `GET` | `/console/company` | VIEWER | `{id, name, slug, contact_email, active, created_at}` |
-| `GET` | `/console/sites` | VIEWER | `{count, sites: [...]}` |
+| `GET` | `/console/sites?q=` | VIEWER | `{count, sites: [...]}` |
 | `GET` | `/console/sites/{site_id}` | VIEWER | one site |
 | `GET` | `/console/sites/{site_id}/settings` | VIEWER | `{settings, settings_version}` |
 | `PUT` | `/console/sites/{site_id}/settings` | MANAGER | updated settings |
@@ -1689,6 +1690,20 @@ tenant is `404`.
 | `PUT` | `/console/sites/{site_id}` | **ADMIN** | updated site |
 | `DELETE` | `/console/sites/{site_id}` | **ADMIN** | `{retired, terminals_retired}` |
 | `POST` | `/console/sites/{site_id}/api-key` | **ADMIN** | **new key, once** |
+
+The list is **searchable**, with the same `q` semantics as `/console/people`:
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `q` | — | ≤ 100 chars | matches `site_name` **or** `address`, anywhere, case-insensitively |
+
+`%`, `_` and `\` are matched literally, and `q` is trimmed and truncated to 100
+characters. The search **narrows within the caller's grants and never widens
+them**: the scope predicate and the search predicate are applied in the same
+statement, so a term cannot surface a site the operator is not entitled to.
+
+The list is **not paginated**. A company's locations are counted in tens, not
+thousands, and `count` is the whole match rather than a page of it.
 
 A site:
 
@@ -1803,7 +1818,7 @@ not touch it.
 
 | Method | Path | Role | Returns |
 |---|---|---|---|
-| `GET` | `/console/terminals` | VIEWER | `{count, terminals: [...]}` |
+| `GET` | `/console/terminals?limit=&offset=&q=` | VIEWER | paged `{count, total, limit, offset, has_more, terminals: [...]}` |
 | `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
 | `GET` | `/console/terminals/{serial}` | VIEWER | inventory row + application configuration |
 | `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | inventory row + application configuration |
@@ -1823,6 +1838,44 @@ terminal's own site — `403` for an ungranted site in your company, `404` for
 another tenant's serial or one that does not exist. The gate runs **before** the
 handler, so a malformed body against a terminal you may not reach is still `403`
 rather than a `400` that would confirm the serial exists.
+
+The list is **paginated and searchable**, in the same envelope and with the same
+bounds as [people](#people):
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `limit` | 50 | 1–200 | page size |
+| `offset` | 0 | ≥ 0 | rows to skip |
+| `q` | — | ≤ 100 chars | matches `serial_number`, `device_name` **or** the terminal's `site_name`, anywhere, case-insensitively |
+
+```json
+{
+  "count": 50, "total": 128, "limit": 50, "offset": 0, "has_more": true,
+  "terminals": [ … ]
+}
+```
+
+`count` and `terminals` keep the meaning and the position they had before paging
+existed, so a client that reads only those two still parses — but it now sees at
+most `limit` rows. **A console that does not page stops at 50 terminals.**
+`total` is the size of the whole match, so it reflects `q` and `?outdated=true`
+rather than the fleet.
+
+Clamping, and the literal handling of `%`, `_` and `\` in `q`, work exactly as
+they do for [people](#people). `q` composes with `?outdated=true` and with site
+grants. Ordering is by site, then serial, with an id tiebreak — without a unique
+final key the same terminal can appear on two consecutive pages while another is
+skipped, so paging visits every terminal exactly once.
+
+**`GET /console/terminals/summary` is deliberately not narrowed by `limit`,
+`offset` or `q`.** It is the rollup *above* the list, and counts that shrank as
+somebody typed into a search box would misreport the fleet. It remains narrowed
+by site grants.
+
+**`GET /api/v1/devices` (site key) is unchanged** and still returns the complete
+inventory — deployed tooling reads it as one, and bounding it would silently
+truncate a fleet somebody depends on being whole. Same reasoning as
+`GET /api/v1/members`.
 
 `GET /console/terminals/{serial}` returns the **same inventory row as the list**,
 plus the application assignment:
@@ -2073,8 +2126,9 @@ was already waiting. A refusal writes no record: nothing happened.
 
 | Method | Path | Role |
 |---|---|---|
-| `GET` | `/console/people?limit=&offset=&q=` | VIEWER |
+| `GET` | `/console/people?limit=&offset=&q=&enrolled=&active=` | VIEWER |
 | `GET` | `/console/people/{external_id}` | VIEWER |
+| `GET` | `/console/people/{external_id}/credentials` | VIEWER |
 | `POST` | `/console/people` | MANAGER |
 | `PUT` | `/console/people/{external_id}` | MANAGER |
 | `DELETE` | `/console/people/{external_id}` | MANAGER |
@@ -2086,6 +2140,8 @@ The list is **paginated and searchable**:
 | `limit` | 50 | 1–200 | page size |
 | `offset` | 0 | ≥ 0 | rows to skip |
 | `q` | — | ≤ 100 chars | matches `external_id` **or** `full_name`, anywhere, case-insensitively |
+| `enrolled` | — | `true` / `false` | narrows by whether the person is enrolled **at all** |
+| `active` | — | `true` / `false` | narrows by `active` |
 
 Out-of-range and unparseable values are **clamped, not rejected** — a `limit` of
 5000 is a caller asking for as much as it can have, and `limit=abc` falls back to
@@ -2096,6 +2152,24 @@ the whole roster, `_` would match any single character, and a trailing `\` would
 produce a malformed pattern; a search box can pass any of them safely. `q` is
 trimmed and truncated to 100 characters — a term longer than any stored value
 cannot match anything.
+
+**`enrolled` and `active` are tri-state, and absent is not `false`.** Omitting a
+filter means "everybody"; `enrolled=false` means "everybody with no enrolment",
+which is the question asked before a rollout. Collapsing the two would hide every
+enrolled person from an unfiltered list. `true`/`false`, `1`/`0`, `t`/`f` and
+`TRUE`/`FALSE` all parse; a value that will not parse as a boolean is treated as
+**absent**, consistent with the clamping rule above.
+
+Both filters are applied **in SQL, against the whole roster** — not to the
+fetched page. Narrowing a fetched page would narrow the page rather than the
+roster: silently right on the first page and silently wrong on every one after
+it. `total` and the rows therefore describe the same filtered set, so paging
+through a filter visits every match and stops at the end of it.
+
+`enrolled` uses the **same rule** as `biometric_enrolled` on each row — the union
+of a live `credentials` record and the legacy column — so the filter and the
+badge beside each person cannot disagree. A `SUSPENDED` or `REVOKED` credential
+is not enrolment.
 
 ```json
 {
@@ -2116,7 +2190,7 @@ bounding it would silently truncate a roster somebody depends on being complete.
 {
   "id": "7ac1…", "external_id": "P-100", "full_name": "Sam Taylor",
   "category": "STANDARD", "active": true,
-  "biometric_enrolled": true,
+  "biometric_enrolled": true, "enrolment_source": "CREDENTIAL",
   "created_at": "…", "updated_at": "…"
 }
 ```
@@ -2126,11 +2200,20 @@ bounding it would silently truncate a roster somebody depends on being complete.
 - `category` is **optional** and free text, defaulting to `STANDARD`. It maps to a
   legacy column; the platform has no opinion about what class of person a company
   records.
-- **`biometric_enrolled` is the entire biometric surface.** No template, locator
-  or credential detail is ever returned. Biometrics are an abstraction the backend
-  owns — do not model a person as *having a fingerprint*, model them as having
-  zero or more credentials whose details the API will describe when that resource
-  exists.
+- **`biometric_enrolled` is the entire biometric surface on this object.** No
+  template, locator or credential detail is ever returned here. Biometrics are an
+  abstraction the backend owns — do not model a person as *having a fingerprint*,
+  model them as having zero or more credentials. That resource now exists:
+  [credential visibility](#credential-visibility) describes them.
+- **`enrolment_source` says which record backs `biometric_enrolled`**, because
+  there are two stores and they do not keep each other in step. `CREDENTIAL` is a
+  row in `credentials`, and the credentials endpoint can say what type it is, when
+  it was taken, where, and at how many doors. `LEGACY_ONLY` is
+  `people.fingerprint_template` with no credential row: the person **is** enrolled
+  and the platform can say nothing further — no terminal, no date, no count.
+  `NONE` is neither store. A console must not render `LEGACY_ONLY` as "not
+  enrolled", and must not render it as though the detail is merely missing from
+  the response; it was never recorded.
 - An update **never** alters a person's biometric enrolment. Enrolment happens at
   a terminal, through the enrolment flow.
 
@@ -2140,6 +2223,75 @@ sync jobs that keep terminals in step.
 
 People are company-wide in this schema, so **site grants do not narrow the people
 list** — see the known limitations.
+
+#### Credential visibility
+
+`GET /console/people/{external_id}/credentials` (VIEWER) answers **"is this
+person enrolled, where, and at how many doors"**. It reads `credentials` and
+`credential_placements` — the structured record — and **not** the legacy
+`people.fingerprint_template` column.
+
+```json
+{
+  "count": 1,
+  "enrolment_source": "CREDENTIAL",
+  "credentials": [
+    {
+      "id": "c4f2…",
+      "type": "FINGERPRINT",
+      "state": "ACTIVE",
+      "enrolled_at": "2026-08-14T09:31:02Z",
+      "enrolled_at_terminal": {
+        "serial_number": "TERM-1", "device_name": "Front Desk",
+        "site_name": "Lagos Depot", "retired": false
+      },
+      "usable_at_terminal_count": 1
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | `FINGERPRINT`, `CARD`, `PIN`, `MOBILE`, `FACE` or `QR` |
+| `state` | `PENDING`, `ACTIVE`, `SUSPENDED` or `REVOKED` — reported, never filtered out |
+| `enrolled_at` | When it was captured. **Omitted** when the row does not record it — render that as "not recorded", not as "never" |
+| `enrolled_at_terminal` | The terminal that captured it. **Omitted** when that terminal was hard-deleted or was never recorded. `device_name` and `site_name` are omitted when unknown |
+| `enrolled_at_terminal.retired` | `true` when that terminal has been retired. The row is still reported: an enrolment outlives the hardware that took it, and "enrolled at a terminal that no longer exists" is usually the explanation for why somebody stopped being recognised |
+| `usable_at_terminal_count` | How many terminals **currently hold** this credential |
+
+**`usable_at_terminal_count` is the field that makes the product's real
+limitation legible.** An enrolment binds to the sensor that captured it, so this
+is normally `1` — "enrolled" means "recognised at one door", and an operator
+otherwise has no way to discover it. It counts `PLACED` placements on terminals
+that still exist. `PENDING` and `FAILED` placements are **not** counted: those
+are doors that *should* hold the credential and do not, and counting them would
+tell an operator somebody works at a door where they will be refused.
+
+**Revoked and suspended credentials are listed, but do not count as enrolment.**
+"She had a credential and it was revoked on Tuesday" is the answer to why access
+stopped everywhere at once, so the row is shown with its state. `enrolment_source`
+is computed from the live-credential rule rather than from the length of this
+array, so a person whose only credential is revoked reads as `NONE` while that
+row stays visible.
+
+**Read `enrolment_source`, not `credentials.length`, to decide whether somebody
+is enrolled.** `LEGACY_ONLY` is exactly the case where the array is **empty** and
+the person is nonetheless enrolled — a caller that counted the array would report
+them as unenrolled.
+
+**No biometric material crosses this boundary.** No template; no sealed material,
+key id, algorithm or digest; no sensor slot, locator, vendor, template format or
+sensor profile. The store's `SELECT` list and the response types are both written
+so that this is checkable by reading them, and a test scans the raw response body
+for every one of those terms.
+
+Company-scoped, matching
+[`…/permissions`](#get-apiv1consolepeopleexternal_idpermissions): people are
+company-wide in this schema, so site grants do not narrow it. `404` for a person
+who does not exist in your company. An existing person who has never been
+enrolled is `200` with `"count": 0`, `"credentials": []` and
+`"enrolment_source": "NONE"` — a different and honest answer from `404`.
 
 ### Operators
 

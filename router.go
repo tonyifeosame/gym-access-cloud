@@ -340,6 +340,19 @@ func NewRouter() *gin.Engine {
 			// people administering the deployment.
 			read.GET("/people/:external_id/permissions",
 				handlers.ConsoleListPersonPermissions)
+
+			// Is this person enrolled, where, and at how many doors (D1).
+			//
+			// VIEWER and company-scoped, on exactly the reasoning above: the
+			// person who has to answer "why is she not recognised at the east
+			// gate" is often the one at the front desk, and the answer is
+			// usually that the enrolment binds to the sensor that took it.
+			//
+			// NO BIOMETRIC MATERIAL. The store's SELECT list is the boundary and
+			// the response types cannot carry material -- no template, no sealed
+			// bytes, no digest, no key id, no sensor slot, no locator, no vendor.
+			read.GET("/people/:external_id/credentials",
+				handlers.ConsoleListPersonCredentials)
 			read.GET("/schedules", handlers.ConsoleListSchedules)
 
 			// The event trail (SEC-08). Grant-scoped inside the handler, the
