@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
 import { roleLabel } from '../auth/roles'
@@ -177,25 +178,59 @@ function TopBar() {
 
 function SideNav() {
   const session = useAuthenticatedSession()
+  const location = useLocation()
   const { platform, modules } = navigationFor(session)
+  const [open, setOpen] = useState(false)
+
+  /*
+    COLLAPSED ON SMALL SCREENS, AND THIS IS WHY.
+
+    The side column becomes a flat strip below 900px, which put all eleven
+    links above the page. On a phone that meant scrolling the entire menu
+    before reaching the heading of the screen you had just opened -- on the
+    overview, roughly a fifth of a very long page spent on navigation you had
+    already used.
+
+    THE BUTTON AND THE LINKS ARE BOTH ALWAYS IN THE DOM. Only CSS hides the
+    panel, and only below the breakpoint, so the desktop column is untouched,
+    assistive technology sees one tree, and no test has to open a menu to find
+    a link. `aria-expanded` carries the state for anyone who cannot see it.
+  */
+  useEffect(() => {
+    // Following a link on a phone must not leave the menu covering what you
+    // navigated to.
+    setOpen(false)
+  }, [location.pathname])
 
   return (
-    <nav className="sidenav" aria-label="Console">
-      <NavSection title="Platform" items={platform} />
+    <nav className={open ? 'sidenav sidenav--open' : 'sidenav'} aria-label="Console">
+      <button
+        type="button"
+        className="sidenav__toggle"
+        aria-expanded={open}
+        aria-controls="sidenav-panel"
+        onClick={() => setOpen((wasOpen) => !wasOpen)}
+      >
+        Menu
+      </button>
 
-      {modules.length > 0 ? (
-        <NavSection title="Applications" items={modules} />
-      ) : (
-        // Not an error and not an empty-looking bug: a company that has enabled
-        // no capabilities is using the platform correctly. Saying so is better
-        // than a blank space that reads as something failing to load.
-        <section className="sidenav__section">
-          <h2 className="sidenav__title">Applications</h2>
-          <p className="sidenav__note">
-            No applications are enabled for this company yet.
-          </p>
-        </section>
-      )}
+      <div className="sidenav__panel" id="sidenav-panel">
+        <NavSection title="Platform" items={platform} />
+
+        {modules.length > 0 ? (
+          <NavSection title="Applications" items={modules} />
+        ) : (
+          // Not an error and not an empty-looking bug: a company that has enabled
+          // no capabilities is using the platform correctly. Saying so is better
+          // than a blank space that reads as something failing to load.
+          <section className="sidenav__section">
+            <h2 className="sidenav__title">Applications</h2>
+            <p className="sidenav__note">
+              No applications are enabled for this company yet.
+            </p>
+          </section>
+        )}
+      </div>
     </nav>
   )
 }

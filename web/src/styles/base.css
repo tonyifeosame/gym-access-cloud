@@ -118,6 +118,28 @@ code {
   gap: var(--space-4);
 }
 
+/*
+ * The collapsible half of the navigation.
+ *
+ * On the desktop column this is simply the list, laid out as it always was. It
+ * exists as an element so that the small-screen rule has something to hide
+ * WITHOUT removing anything from the DOM -- see .sidenav__toggle below.
+ */
+.sidenav__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/*
+ * The menu button. NOT RENDERED ON THE DESKTOP COLUMN, where the links are
+ * always visible and a button to reveal them would be a control that does
+ * nothing. It is shown only below the breakpoint that flattens the column.
+ */
+.sidenav__toggle {
+  display: none;
+}
+
 .sidenav__section {
   display: flex;
   flex-direction: column;

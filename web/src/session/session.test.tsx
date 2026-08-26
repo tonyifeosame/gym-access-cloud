@@ -130,6 +130,34 @@ describe('operator session', () => {
 })
 
 describe('the console the session describes', () => {
+  it('offers a menu control that reports whether it is open', async () => {
+    const user = userEvent.setup()
+    resetServerState(makeSession())
+    renderApp()
+
+    await screen.findByRole('heading', { name: 'Overview' })
+    const menu = screen.getByRole('button', { name: 'Menu' })
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    expect(menu).toHaveAttribute('aria-controls', 'sidenav-panel')
+
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('keeps every navigation link reachable whatever the menu is doing', async () => {
+    resetServerState(makeSession())
+    renderApp()
+
+    await screen.findByRole('heading', { name: 'Overview' })
+    const nav = screen.getByRole('navigation', { name: 'Console' })
+    // Collapsed is a CSS state, not a removal.
+    expect(within(nav).getByRole('link', { name: 'People' })).toBeInTheDocument()
+    expect(within(nav).getByRole('link', { name: 'Terminals' })).toBeInTheDocument()
+    expect(within(nav).getByRole('link', { name: 'Overview' })).toBeInTheDocument()
+  })
+
   it('renders no application navigation for a company with none enabled', async () => {
     resetServerState(makeSession({ applications: [] }))
     renderApp()
