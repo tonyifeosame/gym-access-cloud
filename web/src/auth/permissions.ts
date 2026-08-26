@@ -135,14 +135,30 @@ export const ACTION_ROLES = {
   changeTerminalWifi: 'ADMIN',
 
   /**
+   * SEEING the list of terminals waiting to be set up.
+   *
+   * MANAGER, and the number is the server's rather than this console's opinion:
+   * `GET /console/terminal-announcements` sits in its own group behind
+   * `RequireRole(models.RoleManager)` (router.go). The split from `addTerminals`
+   * below is deliberate on the server's part — the person who unpacked the box
+   * is often not an administrator, and a terminal waiting where nobody can see
+   * it is a support call — but the floor is MANAGER, not VIEWER.
+   *
+   * THIS EXISTS BECAUSE THE CONSOLE PREVIOUSLY GUESSED VIEWER. The overview
+   * called the endpoint unconditionally, so every VIEWER session took a 403 on
+   * load and then again every ten seconds for as long as the tab stayed open —
+   * the hook polls. A named action is the fix rather than an inline role
+   * comparison, for the reason stated at the top of this map.
+   */
+  viewPendingTerminals: 'MANAGER',
+
+  /**
    * Adopting and approving a terminal that has announced itself.
    *
    * ADMIN, matching the server, and for the reason claim-code issue is ADMIN:
    * approving authorises hardware to join a site and be handed a credential.
    *
-   * SEEING the waiting list is NOT gated on this — it is `viewTerminals`.
-   * The person who unpacked the box is often not an administrator, and a
-   * terminal waiting where nobody can see it is a support call.
+   * Seeing the waiting list is a lower bar and has its own action above.
    */
   addTerminals: 'ADMIN',
 
