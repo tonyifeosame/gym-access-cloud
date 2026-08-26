@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -78,7 +78,65 @@ describe('requesting a password reset', () => {
     await user.click(screen.getByRole('button', { name: /request a reset/i }))
 
     expect(await screen.findByText(/does not send email/i)).toBeInTheDocument()
-    expect(screen.getByText(/ask them to issue you a reset link/i)).toBeInTheDocument()
+    expect(screen.getByText(/ask an owner or administrator/i)).toBeInTheDocument()
+  })
+
+  /*
+    P0-1. THE REGRESSION THAT MATTERS MOST ON THIS SCREEN.
+
+    Self-service signup creates a company with exactly ONE account — its owner.
+    This page used to answer every visitor with "ask an administrator or owner in
+    your own company", which for that reader names nobody: they ARE the
+    administrator and the owner, and there was no other route. A locked-out sole
+    owner had nothing to do next.
+
+    So the page must name the case and give it somewhere to go. If this
+    assertion is ever deleted because the copy was tidied, the dead end comes
+    back and nothing else in the suite would notice.
+  */
+  it('gives a SOLE owner — who has nobody to ask — a route of their own', async () => {
+    const user = userEvent.setup()
+    renderAt('/forgot-password')
+
+    await user.type(screen.getByLabelText('Email'), 'owner@example.com')
+    await user.click(screen.getByRole('button', { name: /request a reset/i }))
+
+    // The case is named, so somebody can recognise themselves in it...
+    expect(
+      await screen.findByText(/you are the only owner or administrator/i),
+    ).toBeInTheDocument()
+
+    // ...and it leads somewhere that exists.
+    expect(screen.getByText(/contact accesslink support/i)).toBeInTheDocument()
+    expect(screen.getByText(/nobody else can do it for you/i)).toBeInTheDocument()
+  })
+
+  // Both routes are always rendered, whatever the address. Showing one of them
+  // conditionally would mean the page knew something about the account — which
+  // is exactly the oracle the identical-answer rule exists to prevent.
+  it('shows both routes regardless of the address, disclosing nothing', async () => {
+    const user = userEvent.setup()
+    renderAt('/forgot-password')
+
+    await user.type(screen.getByLabelText('Email'), 'nobody-at-all@example.com')
+    await user.click(screen.getByRole('button', { name: /request a reset/i }))
+
+    const routes = await screen.findByRole('list')
+    expect(within(routes).getAllByRole('listitem')).toHaveLength(2)
+  })
+
+  // The advice that stops it happening twice. One line, and it is the difference
+  // between needing support once and needing them every time.
+  it('tells them how to avoid needing support next time', async () => {
+    const user = userEvent.setup()
+    renderAt('/forgot-password')
+
+    await user.type(screen.getByLabelText('Email'), 'ops@example.com')
+    await user.click(screen.getByRole('button', { name: /request a reset/i }))
+
+    expect(
+      await screen.findByText(/adding a second owner or administrator/i),
+    ).toBeInTheDocument()
   })
 })
 
@@ -229,6 +287,28 @@ describe('a password somebody else chose', () => {
     // No way past it except changing the password or leaving.
     expect(screen.queryByRole('button', { name: /later|skip|dismiss/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /sign out instead/i })).toBeInTheDocument()
+  })
+
+  it('PUTS ITS CONTENT INSIDE A LANDMARK, because it replaces the whole shell', async () => {
+    /*
+      This screen is returned by RequireAuth IN PLACE OF the console, so the
+      shell's <main> is not on the page and there is nothing else to supply one.
+      It was the only card in its family rendering into a bare <div>: login,
+      register, forgot-password, redeem and the platform sign-in all use <main>.
+
+      The cost is the whole document. With no landmark, every word on the page
+      sits outside one — a screen-reader user gets no "main" to jump to and
+      their landmark list is empty. The real-browser pass reports it as two
+      separate axe failures, `landmark-one-main` and `region`; this is the fast
+      guard, so the next screen written in this family fails here first.
+    */
+    signInNeedingChange()
+    renderGuarded()
+
+    await screen.findByRole('heading', { name: /choose your own password/i })
+    const main = screen.getByRole('main')
+    expect(within(main).getByRole('heading', { name: /choose your own password/i })).toBeInTheDocument()
+    expect(within(main).getByRole('button', { name: /sign out instead/i })).toBeInTheDocument()
   })
 
   it('says WHY, rather than presenting it as a policy', async () => {

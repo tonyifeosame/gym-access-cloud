@@ -537,6 +537,63 @@ code {
   line-height: var(--leading-snug);
 }
 
+/*
+ * THE SMALL LINKS OFF THESE CARDS ARE STILL TARGETS.
+ *
+ * WCAG 2.2 SC 2.5.8 (AA) puts the floor at 24x24 CSS pixels. These anchors --
+ * "Forgotten your password?", "Have an invitation code?", "Back to sign in" --
+ * are inline text at the xs size, which measured 150x17 and 83x17 on a phone.
+ * Seventeen pixels of height, on a touch screen.
+ *
+ * WHO MISSES THEM IS THE POINT. Every one of these is the route out for
+ * somebody who cannot use the form above it: a person who has forgotten their
+ * password, a person holding an invitation whose link a chat client mangled, a
+ * person who opened the wrong screen. There is no second way to any of those
+ * places. A target that is hard to hit on a phone is, for exactly those
+ * readers, a dead end.
+ *
+ * PADDING RATHER THAN A BIGGER FONT. The type scale is deliberate and these are
+ * secondary to the card's primary action; enlarging the text would make them
+ * compete with it. `inline-flex` with a minimum height grows the BOX and leaves
+ * the words the size they were meant to be.
+ *
+ * SCOPED TO `.login__note`, so it cannot reach `.login__secondary` -- the
+ * full-width <a> styled as a button, which is `display: block` on purpose and
+ * is already far above the floor.
+ */
+.login__note a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+/* The two routes back into a locked-out account.
+ *
+ * A LIST BECAUSE THEY ARE ALTERNATIVES, not a sequence: exactly one of them
+ * applies to any given reader, and running them together as prose made somebody
+ * read the half that was not about them first. The markers are kept — they are
+ * what says "these are two separate cases" without a word doing it.
+ *
+ * Inherits the note's muted colour and size so the card keeps one voice; only
+ * the structure differs. */
+.login__routes {
+  margin: 0;
+  padding-inline-start: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+}
+
+.login__routes strong {
+  /* The case-identifying half of each item, so somebody can find their own
+     situation without reading both in full. */
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* A hint under a field on these cards sits closer to its input than the card
  * gap allows, for the same reason the subtitle does: it belongs to the control
  * above it rather than being the next thing on the card. */

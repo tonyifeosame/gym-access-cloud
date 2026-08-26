@@ -60,22 +60,68 @@ export function ForgotPasswordPage() {
     return (
       <main className="login">
         <div className="login__card">
-          <h1 className="login__title">Check with your administrator</h1>
+          {/*
+            THE HEADING NAMES A NEXT STEP RATHER THAN A PERSON.
 
+            It read "Check with your administrator", which is the one thing that
+            is not true for the reader most likely to be here. Self-service
+            signup creates a company with exactly ONE account — its owner — so
+            for a great many people on this screen "your administrator" is
+            themselves, and the page sent them to nobody.
+          */}
+          <h1 className="login__title">How to get back in</h1>
+
+          {/*
+            UNCHANGED, AND IT MUST STAY UNCHANGED. This sentence is rendered on
+            success and on failure alike and does not depend on the response, so
+            that a stranger typing addresses learns nothing about which of them
+            exist. Everything below is generic advice for the same reason: none
+            of it varies with who the address belongs to.
+          */}
           <p className="login__subtitle">
             If that address belongs to an operator account, a reset has been issued.
           </p>
 
           {/*
-            The uncomfortable sentence, and the reason it is here rather than in
-            a release note: an operator told "check your email" would wait
-            indefinitely for a message this platform has no way to send.
+            The uncomfortable sentence, kept because it is true and because an
+            operator told "check your email" would wait indefinitely for a
+            message this platform has no way to send. What follows it is now two
+            real routes rather than one that assumes a colleague.
           */}
           <p className="login__note">
-            <strong>AccessLink does not send email.</strong> The reset link is recorded
-            for your platform administrator, who has to pass it to you. If you have an
-            administrator or owner in your own company, the fastest route is to ask
-            them to issue you a reset link directly.
+            <strong>AccessLink does not send email</strong>, so the link has to reach
+            you another way. There are two, depending on your company:
+          </p>
+
+          <ul className="login__routes">
+            <li>
+              <strong>Somebody else runs your account with you.</strong> Ask an owner
+              or administrator in your company to issue you a reset link — they can do
+              it from Operators in their console, and it is the fastest route.
+            </li>
+            <li>
+              {/*
+                THE ROUTE THAT DID NOT EXIST. A sole owner has nobody to ask, and
+                before the platform gained a recovery route the honest answer was
+                that they were locked out for good. Support can now issue this
+                link for a company that has only one owner or administrator.
+              */}
+              <strong>You are the only owner or administrator.</strong> Contact
+              AccessLink support. They can issue a single-use link for the one account
+              that administers your company, which is exactly this case — nobody else
+              can do it for you.
+            </li>
+          </ul>
+
+          {/*
+            THE ADVICE THAT PREVENTS A SECOND OCCURRENCE, and the only sentence
+            here aimed at the reader's future rather than their present. It costs
+            one line and it is the difference between needing support once and
+            needing them every time.
+          */}
+          <p className="login__note">
+            Once you are back in, adding a second owner or administrator means you can
+            always reset each other without waiting for anybody.
           </p>
 
           <p className="login__note">

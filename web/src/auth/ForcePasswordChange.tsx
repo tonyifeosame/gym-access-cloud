@@ -75,7 +75,23 @@ export function ForcePasswordChange() {
   }
 
   return (
-    <div className="login">
+    /*
+      <main>, NOT A BARE DIV — matching every other card in this family.
+
+      This screen renders IN PLACE OF THE WHOLE CONSOLE: RequireAuth returns it
+      instead of the shell, so the shell's <main> is not on the page and there
+      is nothing else to supply one. The five siblings that render alone —
+      login, register, forgot-password, redeem and the platform sign-in — all
+      use <main> already; this one did not, and it was the one screen of the
+      six that nothing had ever drawn in a browser.
+
+      The cost of the omission is concrete: with no landmark, every word on the
+      page sits outside one, so a screen-reader user gets no "main" to jump to
+      and their landmark navigation lists nothing. axe reports it as two
+      separate failures, `landmark-one-main` and `region`, which is a fair
+      measure of how much of the document it affects — all of it.
+    */
+    <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">Choose your own password</h1>
         <p className="login__subtitle">
@@ -170,7 +186,7 @@ export function ForcePasswordChange() {
           Sign out instead
         </button>
       </form>
-    </div>
+    </main>
   )
 }
 
