@@ -52,7 +52,7 @@ export function PlatformLoginPage() {
         <p className="login__note">
           This is the surface that creates and administers <strong>customer
           companies</strong>. It is not the operator console — if you sign in to
-          run a company&apos;s doors, people or terminals, you want{' '}
+          run a company&apos;s access points, people or terminals, you want{' '}
           <Link to="/login">the console</Link> instead.
         </p>
 
