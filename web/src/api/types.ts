@@ -385,6 +385,20 @@ export interface SitesResponse {
 }
 
 /**
+ * A sites search.
+ *
+ * SERVER-SIDE, like people's and unlike the terminal list's. `count` is the
+ * whole match rather than a page of it — the endpoint is not paginated, because
+ * a company's locations are counted in tens — but the MATCHING still happens in
+ * SQL, so a term narrows the estate rather than whatever one response happened
+ * to carry.
+ */
+export interface SitesQuery {
+  /** Matches the site name or its address, anywhere, case-insensitively. */
+  search?: string
+}
+
+/**
  * A site's device configuration.
  *
  * `settings` is an OPEN JSON object, deliberately. The platform does not fix the
@@ -523,8 +537,28 @@ export interface TerminalDetail extends Terminal {
   effective_applications: ApplicationCode[]
 }
 
+/**
+ * One response from `GET /console/terminals`.
+ *
+ * THE ENDPOINT IS PAGED SINCE D2, and this type describes ONE PAGE of it.
+ * `count` is the rows in this response; `total` is the size of the whole match.
+ * A caller that reads `terminals` and ignores the rest is reading at most
+ * `limit` rows -- fifty, by default -- and must not present that as the fleet.
+ *
+ * `fetchTerminals` in api/endpoints.ts returns a COMPLETED one: it follows
+ * `has_more` to the end and hands back every terminal in the caller's scope,
+ * which is what every consumer in this console actually wants.
+ *
+ * The paging fields are OPTIONAL because a server that predates D2 does not
+ * send them, and this console is not always deployed in lockstep with the API.
+ * An absent `has_more` means the response was never paged and is already whole.
+ */
 export interface TerminalsResponse {
   count: number
+  total?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
   terminals: Terminal[]
 }
 

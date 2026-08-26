@@ -51,6 +51,7 @@ import type {
   SiteGrantsRequest,
   SiteSettings,
   SiteSettingsRequest,
+  SitesQuery,
   SitesResponse,
   SignupRequest,
   TerminalDetail,
@@ -58,6 +59,7 @@ import type {
   TerminalModeRequest,
   TerminalMoveRequest,
   TerminalResyncResponse,
+  Terminal,
   TerminalRetireRequest,
   TerminalRetiredResponse,
   TerminalRevokeRequest,
@@ -153,8 +155,11 @@ export function fetchCompany(): Promise<CompanyDetail> {
 // Sites
 // ---------------------------------------------------------------------------
 
-export function fetchSites(): Promise<SitesResponse> {
-  return api.get<SitesResponse>('/api/v1/console/sites')
+export function fetchSites(query: SitesQuery = {}): Promise<SitesResponse> {
+  const params = new URLSearchParams()
+  if (query.search) params.set('q', query.search)
+  const suffix = params.size > 0 ? `?${params}` : ''
+  return api.get<SitesResponse>(`/api/v1/console/sites${suffix}`)
 }
 
 export function fetchSite(siteId: string): Promise<Site> {
@@ -246,9 +251,84 @@ export function updateSiteSettings(
 // Terminals
 // ---------------------------------------------------------------------------
 
-export function fetchTerminals(options: { outdated?: boolean } = {}): Promise<TerminalsResponse> {
-  const query = options.outdated ? '?outdated=true' : ''
-  return api.get<TerminalsResponse>(`/api/v1/console/terminals${query}`)
+/**
+ * The page size this console asks for, which is the endpoint's maximum.
+ *
+ * THE MAXIMUM RATHER THAN THE DEFAULT, to make the loop below cheap: a fleet of
+ * 180 is one request at 200 and four at 50. It is not a limit on what is
+ * returned -- `fetchTerminals` follows `has_more` however many pages there are.
+ * Clamped server-side by `maxTerminalLimit`, so asking for more would be
+ * silently reduced to this anyway.
+ */
+const TERMINAL_PAGE_LIMIT = 200
+
+/**
+ * Every terminal in the caller's scope, across as many pages as that takes.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS PAGES RATHER THAN ASKING ONCE
+ * ---------------------------------------------------------------------------
+ *
+ * `GET /console/terminals` gained `limit`/`offset`/`q` in D2 and DEFAULTS TO
+ * FIFTY ROWS. Every consumer of this function wants the whole fleet and none of
+ * them wants a page:
+ *
+ *   DashboardPage      groups and counts it into a fleet rollup
+ *   terminals/health   filters it in the browser, which is only honest on a
+ *                      complete set
+ *   FirmwarePage       counts how much hardware is behind
+ *   PersonAccessPanel  offers the terminals a permission can name
+ *
+ * A single unbounded request is not available and should not be: bounding the
+ * endpoint is what stops one company's fleet from being an unbounded response.
+ * So completeness is assembled HERE, in the one place all four go through,
+ * rather than by weakening the endpoint or by teaching four screens to page.
+ *
+ * ---------------------------------------------------------------------------
+ * TERMINATION
+ * ---------------------------------------------------------------------------
+ *
+ * The loop stops on `has_more === false`, which is the server's own answer. Two
+ * further guards exist because a loop that talks to a network must not be able
+ * to spin for ever:
+ *
+ *   - a page that comes back EMPTY ends it, whatever `has_more` says. Without
+ *     this, a server that always reported more would loop until the tab died.
+ *   - an ABSENT `has_more` ends it. That is a server predating D2, whose single
+ *     response is already the whole fleet.
+ *
+ * The returned envelope describes the ASSEMBLED result, not the last page:
+ * `count` and `total` are the whole fleet and `has_more` is false, so a caller
+ * that checks it is told the truth about what it is holding.
+ */
+export async function fetchTerminals(
+  options: { outdated?: boolean } = {},
+): Promise<TerminalsResponse> {
+  const terminals: Terminal[] = []
+  let total: number | undefined
+
+  for (;;) {
+    const params = new URLSearchParams()
+    if (options.outdated) params.set('outdated', 'true')
+    params.set('limit', String(TERMINAL_PAGE_LIMIT))
+    params.set('offset', String(terminals.length))
+
+    const page = await api.get<TerminalsResponse>(`/api/v1/console/terminals?${params}`)
+    terminals.push(...page.terminals)
+    total = page.total
+
+    if (!page.has_more) break
+    if (page.terminals.length === 0) break
+  }
+
+  return {
+    count: terminals.length,
+    total: total ?? terminals.length,
+    limit: TERMINAL_PAGE_LIMIT,
+    offset: 0,
+    has_more: false,
+    terminals,
+  }
 }
 
 export function fetchTerminalSummary(): Promise<FleetSummary> {
