@@ -350,6 +350,26 @@ textarea.field__input {
 }
 
 /*
+ * A checkbox field's hint and error, lined up with the LABEL rather than with
+ * the box.
+ *
+ * `.field` stacks its children flush left, which is right for a text field —
+ * label, input and hint all share one left edge. A checkbox does not: its label
+ * starts one 24px box plus a gap in, so a hint left at the field's edge sits
+ * under the box, pointing at nothing, and reads as a caption for the tick
+ * instead of an explanation of the setting. Every CheckboxField in the console
+ * passes a hint, so this is what an operator actually sees on the person, site
+ * and firmware forms.
+ *
+ * The offset repeats .checkbox's own geometry (the 24px input plus its gap)
+ * because that is the column the label text begins at; the two move together.
+ */
+.field--checkbox .field__hint,
+.field--checkbox .field__error {
+  padding-inline-start: calc(24px + var(--space-2));
+}
+
+/*
  * A radio group where each option carries its consequence.
  *
  * SEPARATE FROM .fieldset__options RATHER THAN REUSING IT, because that one caps
@@ -1565,6 +1585,63 @@ textarea.field__input {
  * The distinction is carried by the words and by the button tone, not by
  * hiding anything.
  * ======================================================================== */
+
+/*
+  The terminals waiting to be approved.
+
+  IT HAD MARKUP AND NO RULES. The panel a customer meets when hardware they
+  have just powered on announces itself rendered as a default bulleted list
+  with the approve and remove buttons stacked under each row -- on the one
+  screen where somebody is standing next to the hardware waiting.
+
+  Shaped like `.lifecycle`, which is the same idea one screen over: a list of
+  rows, each an identity and a sentence with its actions on the right, and a
+  rule between them rather than a card each.
+*/
+.pending-terminals__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pending-terminals__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-3) 0;
+  border-block-end: 1px solid var(--border);
+}
+
+.pending-terminals__item:last-child {
+  border-block-end: none;
+}
+
+.pending-terminals__item > .card__detail {
+  flex-basis: 100%;
+  margin: 0;
+  order: 3;
+}
+
+.pending-terminals__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* The actions keep to one line beside the identity at any width the console
+   supports; the sentence below them wraps under both. */
+.pending-terminals__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
 
 .lifecycle {
   list-style: none;
