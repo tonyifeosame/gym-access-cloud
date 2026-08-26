@@ -251,6 +251,24 @@ func NewRouter() *gin.Engine {
 			admin.POST("/companies/:company_id/operators",
 				middleware.RequirePlatformCSRF(), handlers.PlatformCreateFirstOperator)
 
+			// Recovery of last resort, and bounded by the same kind of query
+			// predicate as the route above.
+			//
+			// Self-service signup creates a company of ONE, and a company of one
+			// had no way back into its own account: forgot-password mints a
+			// token this platform cannot deliver, the console's own reset needs
+			// a SECOND administrator, and the onboarding route above is refused
+			// once a company has any operator at all.
+			//
+			// So this issues a reset link for a company's SOLE owner-or-admin,
+			// and refuses the moment there are two -- at which point the customer
+			// can recover themselves and this surface has no business reaching
+			// in. The link is returned once, to the authenticated administrator
+			// making the call, and the action is written into the TENANT'S trail
+			// so a customer can see their vendor did it.
+			admin.POST("/companies/:company_id/recovery",
+				middleware.RequirePlatformCSRF(), handlers.PlatformIssueOwnerRecovery)
+
 			// Releasing a terminal from the company that holds it.
 			//
 			// THE ONLY ROUTE ON THE PLATFORM THAT MOVES HARDWARE BETWEEN

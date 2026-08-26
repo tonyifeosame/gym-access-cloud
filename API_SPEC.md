@@ -1407,12 +1407,49 @@ a terminal or a site key.
 | `POST` | `/api/v1/platform/companies` | platform session + CSRF |
 | `PUT` | `/api/v1/platform/companies/{company_id}` | platform session + CSRF |
 | `POST` | `/api/v1/platform/companies/{company_id}/operators` | platform session + CSRF |
+| `POST` | `/api/v1/platform/companies/{company_id}/recovery` | platform session + CSRF |
 | `POST` | `/api/v1/platform/terminals/{serial}/release` | platform session + CSRF |
 
 Issuing a first operator is refused into a company that already has one, by a
 query predicate rather than a check: a platform identity that could add accounts
 to a running tenant at any time would be a standing back door into every
 customer.
+
+**Recovery is bounded by the same kind of predicate**, and it exists because
+self-service signup creates a company of **one**. That customer had no route back
+into their own account: `POST /auth/forgot-password` mints a token this platform
+has no way to deliver, `POST /console/operators/{id}/reset` needs a **second**
+administrator, and the first-operator route above is refused once a company has
+any operator at all.
+
+`POST /api/v1/platform/companies/{company_id}/recovery` issues a single-use reset
+link for a company's **sole** `OWNER`-or-`ADMIN`, and refuses with `409` the
+moment there are two — at which point the customer can recover from their own
+console and this surface has no business reaching in. `409` as well when there is
+none, because resetting a `MANAGER` or a `VIEWER` hands back an account that
+still cannot administer anything. `MANAGER` and `VIEWER` are deliberately not
+counted as administrators: an owner whose only colleague is a viewer is exactly
+as stranded as one with no colleague at all.
+
+It mints through the same token mechanism as the console's own administrative
+reset — single-use, short-lived, stored as a hash, superseding any outstanding
+token for that account. There is no second token path. The link is returned
+**once**, to the authenticated platform administrator, and the customer's own
+forgot-password screen still answers `202` and learns nothing.
+
+**Audited into the tenant's own trail** as `COMPANY_OWNER_RECOVERY_ISSUED` — a
+distinct action from the `OPERATOR_RESET_ISSUED` an administrator inside the
+company produces, so "did our vendor reset our owner account" is a question the
+customer can answer without asking the vendor. A recovery mechanism whose use is
+visible only to the party using it is one nobody can hold to account.
+
+```json
+{"operator": {"id": "…", "email": "owner@example.com", "full_name": "…",
+              "role": "OWNER"},
+ "reset": {"token": "…", "purpose": "RESET", "expires_at": "…",
+           "shown_once": true},
+ "delivery": "…"}
+```
 
 **Release is the one exception to "nothing inside a tenant"**, and it is narrow
 by construction: it detaches a serial from the company holding it and does not
