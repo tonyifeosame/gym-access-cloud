@@ -127,7 +127,15 @@ describe('adding a terminal', () => {
     // WHAT IT CAN DO, at the moment somebody is deciding whether to bolt it to
     // a door. "This one cannot be recovered over the network" costs nothing to
     // learn here and a site visit to learn afterwards.
-    expect(confirm.getByText(/Wi-Fi can be changed from here/i)).toBeInTheDocument()
+    //
+    // THE ROW SAYS WHAT IT MEANS NOW. Its label read "Can be set up remotely",
+    // which promises the whole of setup; `wifi_recovery` means only that the
+    // unit can be sent back to Wi-Fi setup mode over the network. A customer
+    // who read the old label would have found out otherwise on the day their
+    // router changed.
+    expect(confirm.getByText('Wi-Fi can be changed remotely')).toBeInTheDocument()
+    expect(confirm.getByText(/from this console/i)).toBeInTheDocument()
+    expect(confirm.queryByText(/can be set up remotely/i)).not.toBeInTheDocument()
 
     // The only site is chosen for them — every new customer has exactly one.
     const site = confirm.getByLabelText(/^site/i) as HTMLSelectElement
@@ -167,7 +175,7 @@ describe('adding a terminal', () => {
 
     await screen.findByText(/is this the terminal in front of you/i)
     expect(
-      within(screen.getByRole('dialog')).getByText(/need somebody at the terminal/i),
+      within(screen.getByRole('dialog')).getByText(/somebody has to be at the terminal/i),
     ).toBeInTheDocument()
   })
 
@@ -191,7 +199,9 @@ describe('adding a terminal', () => {
     // "Not reported" — not "No". The unit may well be able to; nobody has asked
     // it yet, and it has no credential to heartbeat with.
     expect(confirm.getAllByText(/not reported/i).length).toBeGreaterThan(0)
-    expect(confirm.queryByText(/need somebody at the terminal/i)).not.toBeInTheDocument()
+    expect(
+      confirm.queryByText(/somebody has to be at the terminal/i),
+    ).not.toBeInTheDocument()
   })
 
   it('never shows a credential, because the terminal fetches its own', async () => {
@@ -419,7 +429,7 @@ describe('the dashboard first step', () => {
 
     const ids = items.map((item) => item.id)
     expect(ids).toContain('no-terminals')
-    // Before applications and people: both are preparation for a door that does
+    // Before features and people: both are preparation for a door that does
     // not exist yet.
     expect(ids.indexOf('no-terminals')).toBeLessThan(ids.indexOf('no-features'))
     expect(ids.indexOf('no-terminals')).toBeLessThan(ids.indexOf('no-people'))

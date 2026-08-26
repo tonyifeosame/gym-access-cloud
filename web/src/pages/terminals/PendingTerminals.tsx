@@ -6,7 +6,9 @@ import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { Dialog } from '../../components/Dialog'
 import { useNotifications } from '../../components/Notifications'
 import { Timestamp } from '../../components/Timestamp'
+import { can } from '../../auth/permissions'
 import { usePendingTerminals, useRejectTerminal } from '../../data/console'
+import { useSession } from '../../session/useSession'
 import { ConfirmTerminalStep } from './AddTerminalDialog'
 
 /**
@@ -25,14 +27,37 @@ import { ConfirmTerminalStep } from './AddTerminalDialog'
  * MANAGER CAN SEE THIS; ADMIN CAN ACT ON IT. The person who unpacked the box is
  * often not an administrator, and a pending terminal nobody can see is a support
  * call — so the list is not gated on being able to approve. The buttons are.
+ *
+ * AND A VIEWER CANNOT SEE IT AT ALL, WHICH IS WHY THE QUERY IS GATED.
+ *
+ * `GET /console/terminal-announcements` is MANAGER on the server, and this hook
+ * polls every ten seconds. Calling it unconditionally meant every VIEWER who
+ * opened the fleet page took a 403 on load and another six times a minute for as
+ * long as the tab stayed open — for a list they were never going to be shown.
+ * Nothing appeared on screen, so nothing reported it either.
+ *
+ * The overview had already hit this and gated the same hook on the same named
+ * action; the fleet page did not inherit the fix. `viewPendingTerminals` is the
+ * one place the server's rule is written down, so if the server ever moves it,
+ * one line moves with it.
  */
 export function PendingTerminals({ canApprove }: { canApprove: boolean }) {
-  const pending = usePendingTerminals()
+  const { session } = useSession()
+  // NOT `canApprove`. Approving is ADMIN and seeing the list is MANAGER, and the
+  // server splits them deliberately: the person who unpacked the box is often
+  // not an administrator. Gating the read on the write would hide the list from
+  // exactly the manager the split exists for.
+  const mayView = can(session, 'viewPendingTerminals')
+  const pending = usePendingTerminals({ enabled: mayView })
   const [approving, setApproving] = useState<PendingTerminal | null>(null)
   const [rejecting, setRejecting] = useState<PendingTerminal | null>(null)
 
   const rows = pending.data?.pending ?? []
-  if (rows.length === 0) return null
+  // Nothing to show, and for a viewer nothing was ever asked for. Either way the
+  // panel is absent rather than empty: a permanent empty box trains people to
+  // stop seeing it, and one that says "you may not see this" would be telling a
+  // viewer about a surface they have no use for.
+  if (!mayView || rows.length === 0) return null
 
   return (
     <section className="panel pending-terminals" aria-labelledby="pending-terminals-title">

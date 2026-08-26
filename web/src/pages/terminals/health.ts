@@ -16,9 +16,19 @@ import { secondsSince } from '../../format/datetime'
  * minutes ago" answer different questions and a fleet view needs both.
  *
  * The one thing worth flagging is the CONTRADICTION: a terminal reported ONLINE
- * that has never sent a heartbeat. That is not a stale device — it is a sign
- * that the device registered and then never called home, or that the sweep is
- * not running. Naming it is useful; guessing a cutoff is not.
+ * that has never checked in. That is not a stale device — it is a sign that the
+ * device registered and then never called home, or that the sweep is not
+ * running. Naming it is useful; guessing a cutoff is not.
+ *
+ * WHAT THIS FILE ADDED, AND WHY IT IS NOT SECOND-GUESSING THE SERVER. Every
+ * state except ONLINE used to be described to the operator as "the terminal is
+ * offline", which is false for four of them: an ERROR unit is checking in and
+ * reporting a fault, an UPDATING one is mid-download, a DISABLED one is in
+ * contact and refusing people on purpose, and a PROVISIONING one may never have
+ * connected at all. `reachable` names the ONE question those screens were
+ * actually asking — can the platform get a message to this terminal right now —
+ * and it is derived from the server's own status and heartbeat, not from a
+ * locally invented cutoff.
  */
 
 export type HealthTone = 'positive' | 'warning' | 'danger' | 'neutral' | 'info'
@@ -33,6 +43,17 @@ export interface TerminalHealth {
   neverReported: boolean
   /** True when the device is behind the current build for its channel. */
   firmwareOutdated: boolean
+  /**
+   * True when the platform has a live path to this terminal.
+   *
+   * FALSE MEANS EXACTLY ONE THING: the platform cannot get a message to it, so
+   * anything queued for it waits. That is OFFLINE — the server's own sweep
+   * decided it — or a terminal that has never checked in at all. It is NOT
+   * "anything other than ONLINE": a terminal reporting a fault, installing an
+   * update or deliberately disabled is still in contact, and telling an operator
+   * otherwise sends them to the site for nothing.
+   */
+  reachable: boolean
   /** Short sentence for a detail view. Empty when there is nothing to say. */
   note: string
 }
@@ -59,18 +80,41 @@ export function readHealth(terminal: Terminal, now: Date = new Date()): Terminal
   const heartbeatAgeSeconds = secondsSince(terminal.last_heartbeat_at, now)
   const neverReported = terminal.last_heartbeat_at === undefined || terminal.last_heartbeat_at === null
 
+  /*
+    ORDER MATTERS, and "has it ever checked in" comes first for every state but
+    two. A terminal that has never been in contact is described by that fact
+    rather than by a status it has not earned yet — except for PROVISIONING,
+    where never having checked in is the NORMAL state seconds after approval and
+    saying so plainly stops a customer thinking their new unit is broken.
+  */
   let note = ''
   if (neverReported && terminal.status === 'ONLINE') {
     note =
-      'Reported online but has never sent a heartbeat. It may have registered without ever connecting.'
+      'Reported online, but it has never checked in. It may have been set up without ever reaching the network.'
+  } else if (neverReported && terminal.status === 'PROVISIONING') {
+    note =
+      'Set up, but it has not checked in yet. It finishes on its own the first time it reaches the network.'
   } else if (neverReported) {
-    note = 'This terminal has never sent a heartbeat.'
+    note = 'This terminal has never checked in.'
   } else if (terminal.status === 'ERROR') {
-    note = 'The terminal is reporting a fault and needs attention on site.'
+    // STILL IN CONTACT, and saying so is the point: this used to be presented
+    // as an unreachable terminal, which sent people to the site to look at
+    // something that was telling them what was wrong from where it stood.
+    note =
+      'The terminal is reporting a fault and needs attention on site. It is still checking in.'
+  } else if (terminal.status === 'OFFLINE') {
+    // WHAT IT DOES AT THE DOOR IS NOT ASSERTED HERE. That is the site's offline
+    // policy, which is on this page in its own card; a terminal at a DENY_ALL
+    // site refuses everybody the moment it drops, and promising otherwise would
+    // describe a door wrongly.
+    note =
+      'The platform has not heard from this terminal recently, so changes will not reach it until it is back. What it does meanwhile is set by its site.'
+  } else if (terminal.status === 'UPDATING') {
+    note = 'It is installing a firmware update and restarts on its own when it finishes.'
   } else if (terminal.status === 'DISABLED') {
-    note = 'Disabled. It will not authenticate until it is re-enabled.'
+    note = 'Disabled. It will not let anybody in until it is re-enabled.'
   } else if (terminal.status === 'PROVISIONING') {
-    note = 'Registered but not yet reporting as a working terminal.'
+    note = 'Checking in, but not yet reporting as a working terminal.'
   }
 
   return {
@@ -79,6 +123,7 @@ export function readHealth(terminal: Terminal, now: Date = new Date()): Terminal
     heartbeatAgeSeconds,
     neverReported,
     firmwareOutdated: terminal.firmware_outdated,
+    reachable: !neverReported && terminal.status !== 'OFFLINE',
     note,
   }
 }
@@ -102,15 +147,22 @@ export interface TerminalFilter {
  * Narrows a terminal list in the browser.
  *
  * CLIENT-SIDE IS CORRECT HERE, AND IT IS THE OPPOSITE OF THE RULE FOR PEOPLE.
- * `GET /console/terminals` returns the caller's WHOLE scoped fleet in one
- * response — there is no limit, offset or `q` — so filtering here narrows the
- * complete set rather than one page of it. Doing the same thing to the people
- * list would search a page and call it a search, which is why that one is done
- * in SQL.
+ * It narrows the COMPLETE scoped fleet rather than one page of it. Doing the
+ * same thing to the people list would search a page and call it a search, which
+ * is why that one is done in SQL.
  *
- * That is a property of the current API, not a principle. It stops being true
- * the moment the endpoint is paginated, and it does not scale to a very large
- * fleet — both recorded as market-readiness items rather than papered over here.
+ * THE ENDPOINT IS PAGED AND THAT IS NOT A CONTRADICTION. This comment used to
+ * say `GET /console/terminals` had no limit, offset or `q`, and warned that it
+ * would stop being true the moment the endpoint was paginated. D2 paginated it,
+ * with a default of fifty. What keeps this function honest is not the endpoint
+ * any more but `fetchTerminals` in api/endpoints.ts, which follows `has_more` to
+ * the end and hands back every terminal in scope. **Do not call this on the
+ * `terminals` array of a raw page response** -- that is fifty rows, and
+ * filtering it would report a fleet from a sample.
+ *
+ * It still does not scale to a very large fleet: the whole set crosses the wire
+ * and is filtered in the browser. Recorded as a market-readiness item rather
+ * than papered over here.
  *
  * SITE MATCHING IS BY PUBLIC ID, never by name: names are editable and not
  * unique, so a name match would quietly include another site's hardware.

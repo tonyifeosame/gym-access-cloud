@@ -324,16 +324,24 @@ export function ConfirmTerminalStep({
             that reports and has none. An administrator deciding whether to bolt
             this to a door wants to know whether it can be recovered over the
             network before they do, not after.
+
+            THE LABEL NOW SAYS WHAT THE ROW IS ABOUT. It read "Can be set up
+            remotely", which promises the whole of setup and is not what this
+            answers: `wifi_recovery` means the unit can be sent back to Wi-Fi
+            setup mode over the network, and nothing else. A customer reading
+            "Can be set up remotely: Yes" would reasonably expect never to have
+            to walk to the terminal again -- and would find out otherwise on the
+            day their router changed. The three-way answer is unchanged.
           */}
           <div className="detail-list__row">
-            <dt>Can be set up remotely</dt>
+            <dt>Wi-Fi can be changed remotely</dt>
             <dd>
               {pending.capabilities === undefined ? (
                 <span className="muted">Not reported</span>
               ) : pending.capabilities.includes('wifi_recovery') ? (
-                'Yes — Wi-Fi can be changed from here'
+                'Yes — from this console'
               ) : (
-                'No — Wi-Fi changes need somebody at the terminal'
+                'No — somebody has to be at the terminal'
               )}
             </dd>
           </div>

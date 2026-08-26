@@ -6,9 +6,24 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { setCsrfToken } from '../../api/csrf'
 import type { Role, Session } from '../../api/types'
 import { keys } from '../../data/keys'
-import { makeSession, makeSite, makeTerminal, SITE_A, SITE_B } from '../../test/fixtures'
+import {
+  makePendingTerminal,
+  makeSession,
+  makeSite,
+  makeTerminal,
+  SITE_A,
+  SITE_B,
+} from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
-import { failNext, resetServerState, resetTerminalModes, seed, state } from '../../test/server'
+import { expectNoDoorWording } from '../../test/vocabulary'
+import {
+  failNext,
+  resetServerState,
+  resetTerminalModes,
+  seed,
+  setTerminalMode,
+  state,
+} from '../../test/server'
 import { TerminalDetailPage } from './TerminalDetailPage'
 import { TerminalsListPage } from './TerminalsListPage'
 import { filterTerminals, presentStatuses, readHealth } from './health'
@@ -111,7 +126,76 @@ describe('health reading', () => {
       makeTerminal({ status: 'ONLINE', last_heartbeat_at: undefined }),
     )
     expect(health.neverReported).toBe(true)
-    expect(health.note).toMatch(/never sent a heartbeat/)
+    expect(health.note).toMatch(/never checked in/)
+  })
+
+  /*
+    WHAT "REACHABLE" IS FOR, AND WHY IT IS NOT `status !== 'ONLINE'`.
+
+    Every screen that needed "can the platform get a message to this terminal"
+    was asking it that way, and it is false for four of the six states: a
+    terminal reporting a fault, one installing an update, one deliberately
+    disabled and one still provisioning are all in contact. The console told
+    every one of their operators the terminal was offline.
+
+    This is still the server's answer, not a locally invented one: it is read
+    off the status the sweep sets and the heartbeat the device sends.
+  */
+  describe('reachability', () => {
+    it('is false only for OFFLINE and for a terminal that never checked in', () => {
+      expect(readHealth(makeTerminal({ status: 'OFFLINE' })).reachable).toBe(false)
+      expect(
+        readHealth(makeTerminal({ status: 'ONLINE', last_heartbeat_at: undefined }))
+          .reachable,
+      ).toBe(false)
+    })
+
+    it('is true for a terminal that is in contact and unwell', () => {
+      // The four states the old test called offline. Each of them has checked
+      // in; an operator sent to the site for any of them has been sent for
+      // nothing.
+      for (const status of ['ERROR', 'UPDATING', 'DISABLED', 'PROVISIONING'] as const) {
+        expect(readHealth(makeTerminal({ status })).reachable).toBe(true)
+      }
+    })
+
+    it('describes each state as what it is, never as "offline"', () => {
+      expect(readHealth(makeTerminal({ status: 'ERROR' })).note).toMatch(
+        /still checking in/,
+      )
+      expect(readHealth(makeTerminal({ status: 'UPDATING' })).note).toMatch(
+        /installing a firmware update/,
+      )
+      expect(readHealth(makeTerminal({ status: 'DISABLED' })).note).toMatch(
+        /will not let anybody in/,
+      )
+      expect(readHealth(makeTerminal({ status: 'OFFLINE' })).note).toMatch(
+        /has not heard from this terminal/,
+      )
+
+      for (const status of ['ERROR', 'UPDATING', 'DISABLED', 'PROVISIONING'] as const) {
+        expect(readHealth(makeTerminal({ status })).note).not.toMatch(/offline/i)
+      }
+    })
+
+    it('tells a newly approved terminal apart from one that is stuck', () => {
+      // PROVISIONING and no heartbeat is the NORMAL state seconds after
+      // approval, and it is the one a customer watches. It must not read like a
+      // fault.
+      const fresh = readHealth(
+        makeTerminal({ status: 'PROVISIONING', last_heartbeat_at: undefined }),
+      )
+      expect(fresh.note).toMatch(/finishes on its own/)
+      expect(fresh.note).not.toMatch(/offline/i)
+    })
+
+    it('does not assert what an offline terminal does at the door', () => {
+      // That is the site's offline policy, and it has its own card. A terminal
+      // at a DENY_ALL site refuses everybody the moment it drops.
+      const note = readHealth(makeTerminal({ status: 'OFFLINE' })).note
+      expect(note).toMatch(/set by its site/)
+      expect(note).not.toMatch(/keeps working/i)
+    })
   })
 
   it('renders an unknown status rather than hiding it', () => {
@@ -192,6 +276,48 @@ describe('terminal inventory', () => {
     await waitFor(() => expect(within(tiles).getAllByText('3').length).toBeGreaterThan(0))
   })
 
+  /*
+    THE ONLY WAY IN THAT IS NOT A MOUSE.
+
+    DataTable's `onRowClick` is documented as a pointer convenience that must
+    not be the only route to a row's destination, and the reason it carries no
+    role or tabindex is that "every table using this renders a real link in its
+    primary column". This one rendered a bare <code>, so tabbing through the
+    fleet went from the toolbar back to the top of the page and a terminal could
+    not be opened from a keyboard at all.
+
+    Nothing automated caught it: axe has no rule for a keyboard path that was
+    never built, and there is no ARIA here for it to contradict. So this is the
+    check.
+  */
+  it('gives every row a real link, so a terminal can be opened without a mouse', async () => {
+    signIn()
+    renderTerminals()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    const link = within(row).getByRole('link', { name: 'AT-0001' })
+    expect(link).toHaveAttribute('href', '/terminals/AT-0001')
+
+    // Every row, not just the first: a fleet with one reachable terminal and
+    // two unreachable ones would pass a spot check and strand the rest.
+    const table = screen.getByRole('table')
+    expect(within(table).getAllByRole('link')).toHaveLength(FLEET.length)
+  })
+
+  it('links a terminal by its serial even when it has no name yet', async () => {
+    // The link is on the serial rather than the name because the name is
+    // optional -- an unnamed terminal renders an em dash, and a link with no
+    // accessible name is worse than no link.
+    signIn()
+    seed({ sites: SITES, terminals: [makeTerminal({ serial_number: 'AT-9', device_name: '' })] })
+    renderTerminals()
+
+    expect(await screen.findByRole('link', { name: 'AT-9' })).toHaveAttribute(
+      'href',
+      '/terminals/AT-9',
+    )
+  })
+
   it('says "Never" rather than inventing a time for a terminal that never reported', async () => {
     signIn()
     renderTerminals()
@@ -266,6 +392,40 @@ describe('terminal inventory', () => {
     ).toBeInTheDocument()
   })
 
+  /*
+    WHAT A NEW CUSTOMER MEETS, AND WHAT THEY USED TO.
+
+    This screen opened with five tiles reading zero, a search box that can match
+    nothing, two filters over an empty set and the line "0 terminals" -- and the
+    one paragraph telling them what to do underneath all of it. Statistics about
+    a fleet that does not exist are not information, and filters over nothing
+    are not controls.
+
+    Both come back the moment there is one terminal, which the test below this
+    one holds.
+  */
+  it('puts onboarding first on an empty fleet, with no statistics or filters over nothing', async () => {
+    signIn()
+    seed({ sites: SITES, terminals: [] })
+    renderTerminals()
+
+    expect(await screen.findByText('No terminals yet')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Fleet health' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Search terminals')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Status')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Site')).not.toBeInTheDocument()
+    expect(screen.queryByText('0 terminals')).not.toBeInTheDocument()
+  })
+
+  it('brings the statistics and filters back as soon as there is a fleet', async () => {
+    signIn()
+    renderTerminals()
+
+    await screen.findByText('AT-0001')
+    expect(screen.getByRole('region', { name: 'Fleet health' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Search terminals')).toBeInTheDocument()
+  })
+
   it('reports a failed load as an error, not as an empty fleet', async () => {
     signIn()
     failNext('terminals-list', 500)
@@ -273,6 +433,9 @@ describe('terminal inventory', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/Failed to retrieve terminals/)
     expect(screen.queryByText('No terminals yet')).not.toBeInTheDocument()
+    // A failed read is not an empty fleet, so the filters must NOT be
+    // suppressed: the operator's own narrowing is still on screen to undo.
+    expect(screen.getByLabelText('Search terminals')).toBeInTheDocument()
   })
 })
 
@@ -368,7 +531,109 @@ describe('terminal detail', () => {
     signIn()
     renderTerminals('/terminals/AT-0003')
 
-    expect(await screen.findByText(/never sent a heartbeat/)).toBeInTheDocument()
+    expect(await screen.findByText(/never checked in/)).toBeInTheDocument()
+  })
+
+  /*
+    THE THIRD ANSWER ABOUT FIRMWARE.
+
+    The badge was a two-way branch on `firmware_outdated`, so a terminal that
+    has never reported a version -- no heartbeat yet, or a build that predates
+    version reporting -- rendered an em dash next to a green "Current". The
+    console asserted a terminal was up to date while showing it had no idea what
+    it was running. The fleet list was always honest about the same terminal,
+    which is how the two screens came to disagree.
+  */
+  it('says firmware is "Not reported" rather than calling an unknown version current', async () => {
+    signIn()
+    seed({
+      sites: SITES,
+      terminals: [
+        makeTerminal({
+          serial_number: 'AT-NEW',
+          device_name: 'Just approved',
+          firmware_version: '',
+          firmware_outdated: false,
+          last_heartbeat_at: undefined,
+          status: 'PROVISIONING',
+        }),
+      ],
+    })
+    renderTerminals('/terminals/AT-NEW')
+
+    await screen.findByRole('heading', { name: 'Just approved', level: 1 })
+    expect(screen.getByText('Not reported')).toBeInTheDocument()
+    expect(screen.queryByText('Current')).not.toBeInTheDocument()
+  })
+
+  it('still says "Current" for a terminal that has reported an up-to-date build', async () => {
+    signIn()
+    renderTerminals('/terminals/AT-0001')
+
+    await screen.findByRole('heading', { name: 'North Gate', level: 1 })
+    expect(screen.getByText('Current')).toBeInTheDocument()
+  })
+
+  /*
+    NOT OFFLINE, AND THE CONSOLE MUST STOP SAYING SO.
+
+    The Network panel's warning was gated on `status !== 'ONLINE'`, so it
+    appeared over four states it is false for. The worst of them is an ERROR
+    terminal that checked in minutes ago: the page showed the check-in on a card
+    and then, two hundred pixels below, told the operator the unit was
+    unreachable. One of those sends somebody to the site for nothing.
+  */
+  it('does not call a terminal offline when it is in contact and reporting a fault', async () => {
+    signIn()
+    seed({
+      sites: SITES,
+      terminals: [
+        makeTerminal({
+          serial_number: 'AT-ERR',
+          device_name: 'Side Door',
+          status: 'ERROR',
+          last_heartbeat_at: '2026-08-15T09:00:00Z',
+        }),
+      ],
+    })
+    renderTerminals('/terminals/AT-ERR')
+
+    const network = await screen.findByRole('region', { name: 'Network' })
+    expect(within(network).queryByText(/The terminal is offline/i)).not.toBeInTheDocument()
+    expect(
+      within(network).queryByText(/cannot be reached right now/i),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/still checking in/)).toBeInTheDocument()
+  })
+
+  it('says a terminal mid-update is installing, not that it is unreachable', async () => {
+    signIn()
+    seed({
+      sites: SITES,
+      terminals: [
+        makeTerminal({
+          serial_number: 'AT-UPD',
+          device_name: 'Back Door',
+          status: 'UPDATING',
+          last_heartbeat_at: '2026-08-15T09:00:00Z',
+        }),
+      ],
+    })
+    renderTerminals('/terminals/AT-UPD')
+
+    const network = await screen.findByRole('region', { name: 'Network' })
+    expect(within(network).queryByText(/The terminal is offline/i)).not.toBeInTheDocument()
+    expect(within(network).getByText(/writing a new build to itself/i)).toBeInTheDocument()
+  })
+
+  it('still warns, in the same words, for a terminal that really is offline', async () => {
+    // The correction narrows the claim; it does not withdraw it. OFFLINE is the
+    // state the warning was written for and it reads exactly as it did.
+    signIn()
+    renderTerminals('/terminals/AT-0002')
+
+    const network = await screen.findByRole('region', { name: 'Network' })
+    expect(within(network).getByText(/The terminal is offline/i)).toBeInTheDocument()
   })
 
   it('still names the one thing the console cannot do: first registration', async () => {
@@ -404,28 +669,193 @@ describe('terminal detail', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Terminals waiting to be set up
+// ---------------------------------------------------------------------------
+
+/*
+  P0-4. THE 403 LOOP NOBODY COULD SEE.
+
+  `GET /console/terminal-announcements` is MANAGER on the server. This panel
+  called it with no gate and the hook polls every ten seconds, so a VIEWER
+  opening the fleet page took a 403 on load and another six times a minute for as
+  long as the tab stayed open — for a list they were never going to be shown.
+  The panel renders null when the list is empty, so nothing appeared on screen
+  and nothing reported it.
+
+  The overview had already hit this and gated the same hook on the same named
+  action. This page did not inherit the fix.
+*/
+describe('the waiting-to-be-set-up panel', () => {
+  it('makes NO request to the manager-only endpoint as a VIEWER', async () => {
+    signIn('VIEWER')
+    seed({ pendingTerminals: [makePendingTerminal()] })
+    renderTerminals('/terminals')
+
+    // Wait for the page itself to have settled, so this is "the viewer's whole
+    // page load" rather than "we looked before anything happened".
+    await screen.findByRole('heading', { name: 'Terminals', level: 1 })
+    await screen.findByText('AT-0001')
+
+    const asked = state.requests.filter((request) =>
+      request.url.includes('/console/terminal-announcements'),
+    )
+    expect(asked).toHaveLength(0)
+  })
+
+  it('shows a viewer no broken or empty panel where it would have been', async () => {
+    signIn('VIEWER')
+    seed({ pendingTerminals: [makePendingTerminal()] })
+    renderTerminals('/terminals')
+
+    await screen.findByRole('heading', { name: 'Terminals', level: 1 })
+    expect(
+      screen.queryByRole('heading', { name: 'Waiting to be set up' }),
+    ).not.toBeInTheDocument()
+    // And no error surfaced in its place either.
+    expect(screen.queryByText(/forbidden/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument()
+  })
+
+  /*
+    THE OTHER HALF OF THE GATE, and the reason it is `viewPendingTerminals`
+    rather than `addTerminals`: the server splits seeing from approving on
+    purpose, because the person who unpacked the box is often not an
+    administrator. A manager must still see the list — and be told who can act
+    on it.
+  */
+  it('still shows a MANAGER the list, without the buttons', async () => {
+    signIn('MANAGER')
+    seed({ pendingTerminals: [makePendingTerminal()] })
+    renderTerminals('/terminals')
+
+    await screen.findByRole('heading', { name: 'Waiting to be set up' })
+    expect(screen.getByText(/waiting for an administrator to approve/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+
+    // The request WAS made, which is the point of the split.
+    expect(
+      state.requests.filter((request) =>
+        request.url.includes('/console/terminal-announcements'),
+      ).length,
+    ).toBeGreaterThan(0)
+  })
+
+  it('gives an ADMIN the list and the actions, unchanged', async () => {
+    signIn('ADMIN')
+    seed({ pendingTerminals: [makePendingTerminal()] })
+    renderTerminals('/terminals')
+
+    await screen.findByRole('heading', { name: 'Waiting to be set up' })
+    expect(screen.getByText(/waiting to be approved/i)).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Application mode
 // ---------------------------------------------------------------------------
 
 describe('application mode', () => {
-  it('shows the assignment and what it resolves to', async () => {
+  it('shows the assignment and what it is currently serving', async () => {
     signIn('ADMIN', { applications: [{ code: 'ATTENDANCE', settings: {} }] })
     renderTerminals('/terminals/AT-0001')
 
     await screen.findByRole('heading', { name: 'North Gate', level: 1 })
-    expect(screen.getByText('Assigned mode')).toBeInTheDocument()
+    expect(screen.getByText('Assigned to')).toBeInTheDocument()
+    expect(screen.getByText('Currently serving')).toBeInTheDocument()
     expect(screen.getByText('Multi-purpose')).toBeInTheDocument()
     expect(screen.getByText('Attendance')).toBeInTheDocument()
   })
 
-  it('says plainly when a terminal resolves to nothing', async () => {
-    // A company with no applications enabled is a legitimate state, and a
-    // multi-purpose terminal in it genuinely serves nothing.
+  /*
+    P0-2. THE FIRST TERMINAL OF EVERY NEW CUSTOMER LANDS HERE.
+
+    Signup enables no features and every terminal defaults to multi-purpose, so
+    this combination — multi-purpose, nothing enabled — is what a customer meets
+    the moment they finish pairing their first unit.
+
+    IT WORKS. `database/authorization.go` clears the application for a
+    multi-purpose terminal and SKIPS the capability gate entirely, so people are
+    admitted normally. The page used to say "This terminal resolves to nothing"
+    in warning styling, which told a customer standing at working hardware that
+    it was inert.
+
+    The old test asserted that wording and its comment asserted the false claim
+    behind it ("genuinely serves nothing"). Both are replaced rather than
+    deleted: the state still has to be explained, it just has to be explained
+    truthfully.
+  */
+  it('does NOT tell a new customer their multi-purpose terminal is broken', async () => {
     signIn('ADMIN', { applications: [] })
     renderTerminals('/terminals/AT-0001')
 
-    expect(await screen.findByText('This terminal resolves to nothing')).toBeInTheDocument()
-    expect(screen.getByText(/no applications enabled/)).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'North Gate', level: 1 })
+
+    // The claim that was false.
+    expect(screen.queryByText(/resolves to nothing/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/nothing for it to serve/i)).not.toBeInTheDocument()
+    // And no warning styling anywhere in this section.
+    const section = screen.getByRole('region', { name: 'What this terminal does' })
+    expect(section.querySelector('.notice--warning')).toBeNull()
+  })
+
+  it('explains multi-purpose in plain language instead', async () => {
+    signIn('ADMIN', { applications: [] })
+    renderTerminals('/terminals/AT-0001')
+
+    expect(await screen.findByText('Multi-purpose, which is ready to use')).toBeInTheDocument()
+    expect(screen.getByText(/serves whatever your company turns on/i)).toBeInTheDocument()
+    // The reassurance that matters: having no features on is not a fault.
+    expect(screen.getByText(/does not stop this terminal working/i)).toBeInTheDocument()
+    // "Currently serving" must not read as "nothing".
+    expect(screen.getByText('Anything your company turns on')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing')).not.toBeInTheDocument()
+  })
+
+  /*
+    THE OTHER WAY `effective_applications` GOES EMPTY, and the one that IS a
+    fault. A terminal assigned to a feature the company has since turned off
+    meets the capability gate and is refused with APPLICATION_NOT_ENABLED —
+    nobody gets in. Collapsing this with multi-purpose is what produced the bug
+    in the first place, so the two are asserted apart.
+  */
+  it('STILL WARNS when a terminal is assigned to a feature that is now off', async () => {
+    signIn('ADMIN', { applications: [] })
+    setTerminalMode('AT-0001', 'ATTENDANCE')
+    renderTerminals('/terminals/AT-0001')
+
+    expect(
+      await screen.findByText('This terminal is not letting anyone in'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/people are refused at it/i)).toBeInTheDocument()
+    // And it says what to do about it, both ways round.
+    expect(screen.getByText(/switched back on/i)).toBeInTheDocument()
+  })
+
+  it('shows a feature-specific terminal as serving that feature', async () => {
+    signIn('ADMIN', { applications: [{ code: 'ATTENDANCE', settings: {} }] })
+    setTerminalMode('AT-0001', 'ATTENDANCE')
+    renderTerminals('/terminals/AT-0001')
+
+    await screen.findByRole('heading', { name: 'North Gate', level: 1 })
+    const section = screen.getByRole('region', { name: 'What this terminal does' })
+    expect(within(section).getAllByText('Attendance').length).toBe(2)
+    // Neither notice applies: it is doing exactly what it was set up to do.
+    expect(section.querySelector('.notice')).toBeNull()
+  })
+
+  it('leaves an OFFLINE terminal reading as multi-purpose, not as misconfigured', async () => {
+    // Being unreachable is a health state with its own reporting further up the
+    // page. It must not also make the feature section claim the terminal is set
+    // up wrong — two unrelated problems reported as one is how an operator ends
+    // up changing a setting to fix a network fault.
+    signIn('ADMIN', { applications: [] })
+    renderTerminals('/terminals/AT-0002')
+
+    await screen.findByRole('heading', { name: 'Loading Bay', level: 1 })
+    const section = screen.getByRole('region', { name: 'What this terminal does' })
+    expect(section.querySelector('.notice--warning')).toBeNull()
+    expect(within(section).getByText('Multi-purpose')).toBeInTheDocument()
   })
 
   it('offers only capabilities the COMPANY has enabled, plus multi-purpose', async () => {
@@ -438,9 +868,9 @@ describe('application mode', () => {
     })
     renderTerminals('/terminals/AT-0001')
 
-    await user.click(await screen.findByRole('button', { name: 'Change application mode' }))
+    await user.click(await screen.findByRole('button', { name: 'Change feature' }))
 
-    const select = screen.getByLabelText('Application mode')
+    const select = screen.getByLabelText('Feature')
     const values = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)
     expect(values).toEqual(['MULTI_PURPOSE', 'ATTENDANCE', 'CHECK_IN'])
     // Not offered: a capability the platform has but this company has not enabled.
@@ -453,8 +883,8 @@ describe('application mode', () => {
     const client = makeTestQueryClient()
     renderTerminals('/terminals/AT-0001', client)
 
-    await user.click(await screen.findByRole('button', { name: 'Change application mode' }))
-    await user.selectOptions(screen.getByLabelText('Application mode'), 'ATTENDANCE')
+    await user.click(await screen.findByRole('button', { name: 'Change feature' }))
+    await user.selectOptions(screen.getByLabelText('Feature'), 'ATTENDANCE')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
@@ -477,15 +907,74 @@ describe('application mode', () => {
     signIn('ADMIN', { applications: [{ code: 'ATTENDANCE', settings: {} }] })
     renderTerminals('/terminals/AT-0001')
 
-    await user.click(await screen.findByRole('button', { name: 'Change application mode' }))
-    await user.selectOptions(screen.getByLabelText('Application mode'), 'ATTENDANCE')
+    await user.click(await screen.findByRole('button', { name: 'Change feature' }))
+    await user.selectOptions(screen.getByLabelText('Feature'), 'ATTENDANCE')
 
     // Take the capability away between opening the dialog and saving.
     if (state.session) state.session = { ...state.session, applications: [] }
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/not enabled for your company/)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not turned on for your company/)
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Vocabulary
+// ---------------------------------------------------------------------------
+
+/*
+  WHAT THE TERMINAL CONTROLS IS AN ACCESS POINT.
+
+  This is the screen where the word was hardest to avoid, because everything on
+  it is about a physical unit attached to a physical thing. It is also the screen
+  where naming that thing a door is most costly: the reader is deciding where to
+  mount hardware, and a warehouse mounting to a barrier or a school mounting to a
+  locker is being told, on the page that describes their own equipment, that the
+  product means something else.
+
+  The fleet used here is named North Gate / Loading Bay / Reception -- deliberately,
+  since a customer is free to call their own terminal "Front Door" and the rule
+  is about OUR words, not theirs.
+*/
+describe('access-point vocabulary', () => {
+  it('describes the fleet without calling an access point a door', async () => {
+    signIn()
+    renderTerminals()
+
+    await screen.findByRole('heading', { name: 'Terminals', level: 1 })
+    await screen.findByText('North Gate')
+    expectNoDoorWording('The terminals list', document.body.textContent ?? '')
+  })
+
+  it('describes one terminal, and what it controls, without saying door', async () => {
+    signIn()
+    renderTerminals('/terminals/AT-0001')
+
+    await screen.findByRole('heading', { name: 'North Gate', level: 1 })
+    // The lifecycle copy that used to read "Records nothing and moves no door".
+    expect(
+      screen.getByText(/Records nothing and changes nothing at the access point/),
+    ).toBeInTheDocument()
+    expectNoDoorWording('The terminal detail page', document.body.textContent ?? '')
+  })
+
+  it('previews a decision without saying a door moves or a door event is written', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderTerminals('/terminals/AT-0001')
+
+    await screen.findByRole('heading', { name: 'North Gate', level: 1 })
+    await user.click(screen.getByRole('button', { name: 'Check access' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(
+      within(dialog).getByText(/Nothing is recorded and nothing happens at the access point/),
+    ).toBeInTheDocument()
+    expect(
+      within(dialog).getByText(/This preview does not write an access event/),
+    ).toBeInTheDocument()
+    expectNoDoorWording('The check-access preview', dialog.textContent ?? '')
   })
 })
 
@@ -499,7 +988,7 @@ describe('role restrictions', () => {
       signIn(role)
       const { unmount } = renderTerminals('/terminals/AT-0001')
       expect(
-        await screen.findByRole('button', { name: 'Change application mode' }),
+        await screen.findByRole('button', { name: 'Change feature' }),
       ).toBeInTheDocument()
       unmount()
     }
@@ -511,9 +1000,9 @@ describe('role restrictions', () => {
 
     await screen.findByRole('heading', { name: 'North Gate', level: 1 })
     expect(
-      screen.queryByRole('button', { name: 'Change application mode' }),
+      screen.queryByRole('button', { name: 'Change feature' }),
     ).not.toBeInTheDocument()
     // Reading is unaffected — the gate is on the write, as it is server-side.
-    expect(screen.getByText('Assigned mode')).toBeInTheDocument()
+    expect(screen.getByText('Assigned to')).toBeInTheDocument()
   })
 })

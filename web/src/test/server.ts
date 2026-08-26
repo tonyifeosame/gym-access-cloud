@@ -84,6 +84,18 @@ interface ServerState {
   platformLoginStatus: number
   companies: PlatformCompany[]
   /**
+   * How many OWNER-or-ADMIN accounts a company has, for the recovery route.
+   *
+   * SEPARATE FROM `operator_count`, which counts every account including
+   * managers and viewers. The server's recovery predicate is about
+   * administrators specifically -- a viewer is not somebody who can issue a
+   * reset -- and a mock that reused the wrong count would let the console ship
+   * a rule that does not match the one it will meet.
+   *
+   * Keyed by company id; absent means one, which is the company signup creates.
+   */
+  administratorCount: Record<string, number>
+  /**
    * What each redemption token is worth. Absent means unknown, which is what an
    * invented token gets — so a test does not have to register a failure to
    * exercise the "that link is not valid" path.
@@ -124,6 +136,7 @@ function initialState(): ServerState {
     platformSession: null,
     platformLoginStatus: 200,
     companies: [],
+    administratorCount: {},
     redeemable: {},
     failNext: {},
     requests: [],
@@ -157,6 +170,27 @@ function takeFailure(key: string): number | null {
   if (status === undefined) return null
   delete state.failNext[key]
   return status
+}
+
+/**
+ * A bounded integer query parameter, clamped the way the API clamps it.
+ *
+ * MIRRORS `boundedQueryInt` IN handlers/console.go, including the parts that
+ * look like edge cases and are not: an absent OR unparseable value falls back
+ * to the default rather than failing the request, and an out-of-range one is
+ * CLAMPED rather than rejected. A mock that rejected what the server clamps
+ * would fail a client the real API serves happily.
+ *
+ * `max` of 0 means unbounded, as it does there -- that is how `offset` is
+ * declared.
+ */
+function boundedParam(raw: string | null, fallback: number, min: number, max: number): number {
+  if (raw === null || raw === '') return fallback
+  const value = Number.parseInt(raw, 10)
+  if (Number.isNaN(value)) return fallback
+  if (value < min) return min
+  if (max > 0 && value > max) return max
+  return value
 }
 
 function record(request: Request): void {
@@ -1341,7 +1375,42 @@ export const handlers = [
     if (url.searchParams.get('outdated') === 'true') {
       terminals = terminals.filter((terminal) => terminal.firmware_outdated)
     }
-    return json({ count: terminals.length, terminals })
+
+    /*
+      PAGED AND SEARCHED HERE, AS THE API DOES IT (D2).
+
+      This handler used to return the whole fleet in one response whatever was
+      asked of it, which is what the endpoint did before D2. That made the mock
+      INCAPABLE OF FAILING the way the real API now can: a console that read one
+      page of fifty and presented it as the fleet passed every test here and
+      under-counted against a real deployment. The default limit is the point --
+      a client that sends no `limit` gets fifty rows and a `has_more` telling it
+      so, exactly as it would in production.
+
+      `q` matches serial, terminal name and site name, as the store does.
+    */
+    const search = (url.searchParams.get('q') ?? '').trim().toLowerCase()
+    if (search) {
+      terminals = terminals.filter(
+        (terminal) =>
+          terminal.serial_number.toLowerCase().includes(search) ||
+          terminal.device_name.toLowerCase().includes(search) ||
+          terminal.site_name.toLowerCase().includes(search),
+      )
+    }
+
+    const limit = boundedParam(url.searchParams.get('limit'), 50, 1, 200)
+    const offset = boundedParam(url.searchParams.get('offset'), 0, 0, 0)
+    const page = terminals.slice(offset, offset + limit)
+
+    return json({
+      count: page.length,
+      total: terminals.length,
+      limit,
+      offset,
+      has_more: offset + page.length < terminals.length,
+      terminals: page,
+    })
   }),
 
   // --- adding a terminal: announce and approve -----------------------------
@@ -2396,6 +2465,23 @@ function terminalDetail(terminal: Terminal): TerminalDetail {
     application_mode: mode,
     effective_applications: enabled.filter((code) => mode === 'MULTI_PURPOSE' || code === mode),
   }
+}
+
+/**
+ * Points a terminal at a feature without going through the console.
+ *
+ * FOR THE STATE A TEST CANNOT REACH BY CLICKING: a terminal assigned to a
+ * feature its company has since turned OFF. The console refuses to offer a
+ * feature that is not enabled — correctly — so the only way to arrive at that
+ * combination in a test is to say the assignment already existed when the
+ * feature was switched off, which is exactly how it happens in the field.
+ *
+ * That state is not cosmetic: it is the one case where a terminal genuinely
+ * refuses everybody, and it has to stay distinguishable from multi-purpose,
+ * which refuses nobody.
+ */
+export function setTerminalMode(serial: string, mode: string): void {
+  modes.set(serial, mode)
 }
 
 export function resetTerminalModes(): void {

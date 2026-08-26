@@ -52,7 +52,7 @@ export function ApplicationModeDialog({
       value: MULTI_PURPOSE,
       label: 'Multi-purpose',
       description:
-        'Serves every capability this company has enabled. The default, and what a terminal keeps unless it is given a narrower job.',
+        'Serves every feature this company has turned on. The default, and what a terminal keeps unless it is given a narrower job.',
     },
     ...enabled.map((code: ApplicationCode) => {
       const definition = describeApplication(code)
@@ -76,7 +76,7 @@ export function ApplicationModeDialog({
       value: terminal.application_mode,
       label: `${describeApplication(terminal.application_mode).label} (not enabled)`,
       description:
-        'This terminal is still assigned to a capability your company has switched off. It resolves to nothing until the capability is re-enabled.',
+        'This terminal is still assigned to a feature your company has turned off. It resolves to nothing until that feature is turned back on.',
     })
   }
 
@@ -99,7 +99,7 @@ export function ApplicationModeDialog({
     <Dialog
       open={open}
       title={`What is ${terminal.serial_number} for?`}
-      description="This changes what this one terminal does. It does not change which capabilities your company has enabled."
+      description="This changes what this one terminal does. It does not change which features your company has turned on."
       dismissible={!update.isPending}
       onClose={onClose}
       footer={
@@ -125,23 +125,23 @@ export function ApplicationModeDialog({
     >
       {enabled.length === 0 ? (
         <p className="field__hint">
-          Your company has no applications enabled, so this terminal can only be
-          multi-purpose. An owner can enable capabilities from Applications.
+          Your company has no features turned on, so this terminal can only be
+          multi-purpose. An owner can turn them on under Features.
         </p>
       ) : null}
 
       <SelectField
-        label="Application mode"
+        label="Feature"
         value={mode}
         options={options}
         onChange={setMode}
-        hint="Only capabilities your company has enabled can be assigned."
+        hint="Only features your company has turned on can be assigned."
       />
 
       <FormError
         message={
           conflict
-            ? 'That capability is not enabled for your company. An owner can enable it from Applications.'
+            ? 'That feature is not turned on for your company. An owner can turn it on under Features.'
             : update.error
               ? update.error instanceof ApiError
                 ? update.error.message
