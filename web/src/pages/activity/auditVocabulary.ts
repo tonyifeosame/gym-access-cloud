@@ -38,6 +38,10 @@ const ACTIONS: Record<string, ActionDefinition> = {
   SITE_CREATED: { label: 'Site created', tone: 'notable' },
   SITE_UPDATED: { label: 'Site updated', tone: 'neutral' },
   SITE_RETIRED: { label: 'Site retired', tone: 'destructive' },
+  // "Provisioning key", the name the rest of the console uses for this
+  // credential. The stored action is `SITE_KEY_ROTATED` and stays that way; what
+  // changed is that an owner scanning the trail for the thing they rotated on
+  // the site page now finds it under the words that page used.
   SITE_KEY_ROTATED: { label: 'Provisioning key rotated', tone: 'destructive' },
   SITE_SETTINGS_UPDATED: { label: 'Site settings updated', tone: 'neutral' },
 
@@ -48,7 +52,7 @@ const ACTIONS: Record<string, ActionDefinition> = {
   TERMINAL_RETIRED: { label: 'Terminal retired', tone: 'destructive' },
   TERMINAL_MOVED: { label: 'Terminal moved to another site', tone: 'notable' },
   TERMINAL_RESYNCED: { label: 'Terminal resynced', tone: 'neutral' },
-  TERMINAL_MODE_SET: { label: 'Terminal application changed', tone: 'neutral' },
+  TERMINAL_MODE_SET: { label: 'Terminal feature changed', tone: 'neutral' },
 
   // People
   PERSON_CREATED: { label: 'Person added', tone: 'neutral' },
@@ -71,8 +75,8 @@ const ACTIONS: Record<string, ActionDefinition> = {
   OPERATOR_RESET_REQUESTED: { label: 'Password reset requested', tone: 'neutral' },
   OPERATOR_CREDENTIAL_REDEEMED: { label: 'Password set from a link', tone: 'notable' },
 
-  // Applications and configuration
-  APPLICATION_CONFIGURED: { label: 'Application configured', tone: 'notable' },
+  // Features and configuration
+  APPLICATION_CONFIGURED: { label: 'Feature configured', tone: 'notable' },
   PERMISSION_CREATED: { label: 'Permission created', tone: 'notable' },
   PERMISSION_DELETED: { label: 'Permission removed', tone: 'destructive' },
   SCHEDULE_CONFIGURED: { label: 'Schedule configured', tone: 'neutral' },
@@ -88,6 +92,7 @@ const ACTIONS: Record<string, ActionDefinition> = {
   COMPANY_DEACTIVATED: { label: 'Company suspended', tone: 'destructive' },
   COMPANY_REACTIVATED: { label: 'Company reactivated', tone: 'notable' },
   COMPANY_FIRST_OPERATOR_CREATED: { label: 'First operator created', tone: 'notable' },
+
 }
 
 export function describeAction(action: string): ActionDefinition {
@@ -126,8 +131,30 @@ const TARGET_TYPES = [
   'COMPANY',
 ] as const
 
+/**
+ * Where the stored word and the customer's word differ.
+ *
+ * `humaniseCode` is right for nine of the ten: SITE becomes "Site" and nobody
+ * has to be told. APPLICATION becomes "Application", which is a word this
+ * console stopped showing customers -- everywhere else the thing a company turns
+ * on is a FEATURE. Leaving it humanised put the abandoned word back in the one
+ * place an operator goes to find out what changed.
+ *
+ * A MAP RATHER THAN A RENAMED CONSTANT, deliberately. `APPLICATION` is what the
+ * server stores in `target_type` and what the filter has to send back to it, so
+ * only the label moves.
+ */
+const TARGET_LABELS: Record<string, string> = {
+  APPLICATION: 'Feature',
+}
+
+/** The customer's word for a target type, wherever it differs from the code. */
+export function describeTarget(target: string): string {
+  return TARGET_LABELS[target] ?? humaniseCode(target)
+}
+
 export function filterableTargets(): { value: string; label: string }[] {
-  return TARGET_TYPES.map((value) => ({ value, label: humaniseCode(value) }))
+  return TARGET_TYPES.map((value) => ({ value, label: describeTarget(value) }))
 }
 
 /**

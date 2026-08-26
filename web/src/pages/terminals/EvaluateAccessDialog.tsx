@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import type { AccessDecision, TerminalDetail } from '../../api/types'
+import { describeApplication } from '../../applications/registry'
 import { Badge } from '../../components/Badge'
 import { Dialog } from '../../components/Dialog'
 import { FormActions, FormError, TextField } from '../../components/Form'
@@ -11,6 +12,7 @@ import { Timestamp } from '../../components/Timestamp'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import { useEvaluateAccess } from '../../data/console'
 import { describeReason } from '../access/accessVocabulary'
+import { PERSON_ID_LABEL } from '../people/personVocabulary'
 
 /**
  * "Would this person get in at this terminal, right now, and why."
@@ -53,7 +55,7 @@ export function EvaluateAccessDialog({
   const form = useForm<Values>({
     initialValues: { external_id: '', at: '' },
     validate: (values) => ({
-      external_id: validators.required(values.external_id, 'An identifier'),
+      external_id: validators.required(values.external_id, `An ${PERSON_ID_LABEL}`),
     }),
     onSubmit: async (values) => {
       const result = await evaluate.mutateAsync({
@@ -74,14 +76,14 @@ export function EvaluateAccessDialog({
     <Dialog
       open={open}
       title={`Would somebody get in at ${name}?`}
-      description="Checks the rules as they stand. Nothing is recorded and no door moves."
+      description="Checks the rules as they stand. Nothing is recorded and nothing happens at the access point."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"
     >
       <form className="form" onSubmit={(event) => void form.handleSubmit(event)} noValidate>
         <TextField
-          label="Person identifier"
+          label={PERSON_ID_LABEL}
           required
           mono
           value={form.values.external_id}
@@ -94,7 +96,12 @@ export function EvaluateAccessDialog({
           }}
           onBlur={() => form.touch('external_id')}
           disabled={form.submitting}
-          hint="The external id the terminal would read — what People calls Identifier."
+          // NO TRANSLATION IN THE HINT. It used to read "the external id the
+          // terminal would read — what People calls Identifier", which existed
+          // only because this dialog and the People screen had different names
+          // for one field. They now share one, so the hint can say what the
+          // field is for instead of what it is called elsewhere.
+          hint="The number on the badge the terminal would read."
         />
 
         <TextField
@@ -133,7 +140,7 @@ export function EvaluateAccessDialog({
       {decision ? <DecisionResult decision={decision} askedAbout={askedAbout} /> : null}
 
       <InfoNote title="Nothing was recorded">
-        This preview does not write a door event. It cannot appear in Events or
+        This preview does not write an access event. It cannot appear in Events or
         be counted by anything built on that history — which is why it is safe to
         run repeatedly while working out a rule.
       </InfoNote>
@@ -209,7 +216,7 @@ function DecisionResult({
         {decision.application ? (
           <div className="detail-list__row">
             <dt>Acting as</dt>
-            <dd>{decision.application}</dd>
+            <dd>{describeApplication(decision.application).label}</dd>
           </div>
         ) : null}
 

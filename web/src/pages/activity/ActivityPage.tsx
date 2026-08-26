@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import type { AuditQuery, AuditRecord } from '../../api/types'
+import { roleLabel } from '../../auth/roles'
 import { Badge } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
 import { SelectField, TextField } from '../../components/Form'
@@ -11,6 +12,7 @@ import { Timestamp } from '../../components/Timestamp'
 import { useAuditEvents } from '../../data/console'
 import {
   describeAction,
+  describeTarget,
   filterableActions,
   filterableTargets,
   isKnownAction,
@@ -105,7 +107,24 @@ export function ActivityPage() {
       id: 'occurred',
       header: 'When',
       primary: true,
-      render: (entry) => <Timestamp value={entry.occurred_at} relative />,
+      /*
+        BOTH TIMES, AND ON AN AUDIT SCREEN THAT IS NOT A LUXURY.
+
+        This showed the relative form only, with the instant tucked into the
+        element's `title`. Relative time is right for scanning -- "2 weeks ago"
+        answers "is this recent" instantly -- but the question an audit trail is
+        opened to answer is usually the other one: what time did this happen, so
+        it can be lined up against an incident, a shift, or another system's log.
+        A `title` is no answer at all on a touch screen, which has no hover.
+      */
+      render: (entry) => (
+        <span className="audit__when">
+          <Timestamp value={entry.occurred_at} relative />
+          <span className="audit__when-absolute">
+            <Timestamp value={entry.occurred_at} />
+          </span>
+        </span>
+      ),
     },
     {
       id: 'action',
@@ -146,7 +165,18 @@ export function ActivityPage() {
           {entry.actor_role === 'PLATFORM' ? (
             <Badge tone="warning">Platform</Badge>
           ) : entry.actor_role ? (
-            <span className="audit__role">{entry.actor_role}</span>
+            /*
+              `roleLabel`, the same function the operators list and every role
+              badge use. This column printed the stored enum -- "ADMIN" -- beside
+              an email address, while the Operators screen called the same value
+              "Administrator". One product, two vocabularies for one fact.
+
+              PLATFORM is deliberately NOT passed through it: it is not an
+              operator role, it marks a change made by the vendor's own surface,
+              and `roleLabel` would have nothing to say about it. Its badge is
+              unchanged.
+            */
+            <span className="audit__role">{roleLabel(entry.actor_role)}</span>
           ) : null}
         </span>
       ),
@@ -157,7 +187,24 @@ export function ActivityPage() {
       render: (entry) =>
         entry.target_label || entry.target_id ? (
           <span className="audit__target">
-            {entry.target_type ? <span className="audit__role">{entry.target_type}</span> : null}{' '}
+            {/*
+              Humanised, because the filter above this table already offers these
+              same values as "Terminal" and "Site" while the column printed
+              "TERMINAL" and "SITE". An operator filtering by one and reading the
+              other had to work out they were the same set.
+
+              THROUGH `describeTarget` RATHER THAN `humaniseCode`, so the column
+              and the filter stay the same set even where the stored word and
+              the customer's word differ -- APPLICATION is shown as "Feature" in
+              both, which is what every other screen calls it.
+
+              THE TARGET'S OWN IDENTIFIER IS UNTOUCHED and stays monospaced: it
+              is the serial, the email or the id that makes the record traceable,
+              and it is the half of this column the audit contract depends on.
+            */}
+            {entry.target_type ? (
+              <span className="audit__role">{describeTarget(entry.target_type)}</span>
+            ) : null}{' '}
             <span className="mono">{entry.target_label || entry.target_id}</span>
           </span>
         ) : (
@@ -167,7 +214,19 @@ export function ActivityPage() {
     {
       id: 'detail',
       header: 'Detail',
-      secondary: true,
+      /*
+        NOT `secondary`, AND THAT WAS THE WHOLE OF THE MOBILE BUG.
+
+        `secondary` hides a cell below the breakpoint -- correctly, for detail
+        that does not earn phone space. This cell is not detail; it is the only
+        route to it. Marked secondary, the button measured 0x0 at 390px, was
+        removed from the accessibility tree along with its cell, and could not be
+        focused: there were zero keyboard-reachable Show controls on a phone, so
+        a record's IP address and its changes were desktop-only.
+
+        On a phone this now appears as a labelled "Detail" row on each card,
+        which is what every other column does there.
+      */
       align: 'end',
       render: (entry) => {
         const changes = readChanges(entry.changes)
@@ -209,7 +268,7 @@ export function ActivityPage() {
         question to the other page, once, rather than leaving them to conclude
         the trail is empty.
       */}
-      <InfoNote title="This is the operator trail, not the door log">
+      <InfoNote title="This is the operator trail, not the event log">
         Every record here is a change somebody made in this console. What happened
         at a terminal — who was let in, who was refused and why, enrolments,
         tamper — is in <Link to="/events">Events</Link>.
@@ -235,7 +294,7 @@ export function ActivityPage() {
           />
 
           <SelectField
-            label="Kind of thing"
+            label="Target type"
             value={targetType}
             placeholder="Anything"
             onChange={change(setTargetType)}
@@ -250,21 +309,32 @@ export function ActivityPage() {
             busy={audit.isFetching && actor.trim().length > 0}
           />
 
-          <TextField
-            label="From"
-            type="date"
-            value={since}
-            onChange={change(setSince)}
-            hint="Includes the whole day."
-          />
+          {/*
+            ONE GRID CELL FOR BOTH ENDS OF THE RANGE.
 
-          <TextField
-            label="To"
-            type="date"
-            value={until}
-            onChange={change(setUntil)}
-            hint="Includes the whole day."
-          />
+            `.filter-grid` is `auto-fit`, so with five filters at 1440px it made
+            four columns and dropped "To" onto a row of its own, beside a wide
+            empty gap -- the two halves of one range separated, which is the pair
+            that most needs to be read together. Wrapping them means the range
+            travels as one item at every width and stacks as one on a phone.
+          */}
+          <div className="filter-range">
+            <TextField
+              label="From"
+              type="date"
+              value={since}
+              onChange={change(setSince)}
+              hint="Includes the whole day."
+            />
+
+            <TextField
+              label="To"
+              type="date"
+              value={until}
+              onChange={change(setUntil)}
+              hint="Includes the whole day."
+            />
+          </div>
         </div>
 
         {filtered ? (
@@ -297,7 +367,9 @@ export function ActivityPage() {
         shape breaks the table's column semantics for a screen reader, and the
         responsive card layout has no place to put it at all.
       */}
-      {expanded && page ? <ExpandedDetail entry={page.entries.find((e) => e.id === expanded)} /> : null}
+      {expanded && page ? (
+        <ExpandedDetail entry={page.entries.find((e) => e.id === expanded)} />
+      ) : null}
 
       {page ? (
         <Pagination
@@ -315,14 +387,52 @@ export function ActivityPage() {
   )
 }
 
+/**
+ * One record, opened.
+ *
+ * IT IS BELOW THE TABLE AND IT HAS TO COME TO YOU.
+ *
+ * Rendering it here rather than as an expanded row is deliberate and stays: a
+ * second row of a different shape breaks the table's column semantics for a
+ * screen reader, and the responsive card layout has nowhere to put one. The cost
+ * is that "below the table" means below FIFTY ROWS -- measured at 2,882px down
+ * at 1440px and 7,887px down at 390px, with the page not scrolling and focus
+ * left on the button. Pressing Show did nothing an operator could perceive.
+ *
+ * So opening a record now brings the reader to it: the panel is scrolled into
+ * view and its heading takes focus. That serves both halves of the problem at
+ * once -- a pointer user sees the panel, and a keyboard or screen-reader user is
+ * placed inside it rather than left forty rows above it.
+ *
+ * `scrollIntoView` WITHOUT `behavior: 'smooth'`, deliberately: a long animated
+ * jump is exactly the motion `prefers-reduced-motion` exists to suppress, and
+ * there is nothing to be learned from watching fifty rows go past.
+ */
 function ExpandedDetail({ entry }: { entry: AuditRecord | undefined }) {
+  const headingRef = useRef<HTMLHeadingElement | null>(null)
+
+  // Keyed on the record, so moving from one open record to another moves the
+  // reader again rather than leaving them on a panel that quietly changed.
+  const entryId = entry?.id
+  useEffect(() => {
+    if (!entryId) return
+    // Optional-called because `scrollIntoView` is not implemented in jsdom, and
+    // it is the expendable half: FOCUS is what makes the panel reachable, and
+    // moving focus scrolls the target into view in every real browser anyway.
+    // The scroll is here for predictable placement, not for reachability.
+    headingRef.current?.scrollIntoView?.({ block: 'nearest' })
+    headingRef.current?.focus()
+  }, [entryId])
+
   if (!entry) return null
   const changes = readChanges(entry.changes)
 
   return (
     <section className="panel" aria-label="Record detail">
       <div className="panel__header">
-        <h2 className="panel__title">{describeAction(entry.action).label}</h2>
+        <h2 className="panel__title" tabIndex={-1} ref={headingRef}>
+          {describeAction(entry.action).label}
+        </h2>
         <p className="field__hint">
           <Timestamp value={entry.occurred_at} /> · {entry.actor_email ?? 'actor not recorded'}
         </p>

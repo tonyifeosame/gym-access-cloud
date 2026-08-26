@@ -190,12 +190,26 @@ describe('Pagination', () => {
     noun: 'people',
   }
 
-  it('renders nothing when everything fits on one page', () => {
-    // Controls that can only be disabled are noise.
-    const { container } = render(
-      <Pagination {...base} count={3} total={3} hasMore={false} />,
-    )
-    expect(container).toBeEmptyDOMElement()
+  it('STATES THE COUNT ON A SINGLE PAGE, and offers no controls', () => {
+    /*
+      THIS REVERSES HALF OF WHAT THIS TEST USED TO ASSERT, and only half.
+
+      The old rule was "render nothing at all when everything fits", on the
+      reasoning that controls which can only be disabled are noise. That
+      reasoning is right and is kept -- Previous and Next are still absent. But
+      the COUNT LINE lives in this component too, so "how many matched"
+      disappeared in exactly the case where it is the whole answer.
+
+      That is the normal case on the audit trail: an operator narrows to one
+      person and a fortnight, and "3 records" is the finding. Three rows on
+      screen and nothing saying whether that is all of them is not an answer.
+    */
+    render(<Pagination {...base} count={3} total={3} hasMore={false} />)
+
+    expect(screen.getByText(/Showing/)).toHaveTextContent('Showing 1–3 of 3 people')
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Page \d+ of/)).not.toBeInTheDocument()
   })
 
   it('renders nothing at all when there is no data', () => {

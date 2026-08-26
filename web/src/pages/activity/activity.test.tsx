@@ -7,6 +7,7 @@ import { setCsrfToken } from '../../api/csrf'
 import type { AuditRecord, Role } from '../../api/types'
 import { makeAuditRecord, makeSession } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { ActivityPage } from './ActivityPage'
 import { describeAction, isKnownAction, readChanges } from './auditVocabulary'
@@ -57,6 +58,27 @@ const TRAIL: AuditRecord[] = [
     target_type: 'COMPANY',
     target_label: 'Northwind Logistics',
     occurred_at: '2026-01-01T00:00:00Z',
+  }),
+  makeAuditRecord({
+    id: 'audit-5',
+    // The two records whose stored words and customer-facing words differ. The
+    // target type is APPLICATION and reads "Feature"; the action is
+    // SITE_KEY_ROTATED and reads "Provisioning key rotated".
+    action: 'APPLICATION_CONFIGURED',
+    actor_email: 'owner@example.com',
+    actor_role: 'OWNER',
+    target_type: 'APPLICATION',
+    target_label: 'ACCESS_CONTROL',
+    occurred_at: '2026-08-11T08:00:00Z',
+  }),
+  makeAuditRecord({
+    id: 'audit-6',
+    action: 'SITE_KEY_ROTATED',
+    actor_email: 'owner@example.com',
+    actor_role: 'OWNER',
+    target_type: 'SITE',
+    target_label: 'Lagos Distribution Centre',
+    occurred_at: '2026-08-10T08:00:00Z',
   }),
   makeAuditRecord({
     id: 'audit-4',
@@ -186,6 +208,216 @@ describe('the activity table', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Reaching a record's detail
+// ---------------------------------------------------------------------------
+
+describe('opening a record brings the reader to it', () => {
+  it('MOVES FOCUS INTO THE PANEL, which is what makes it reachable', async () => {
+    /*
+      The panel renders below the table, deliberately -- an expanded row of a
+      different shape breaks the table's column semantics and has nowhere to go
+      in the card layout. The cost is that "below the table" means below fifty
+      rows: measured in a real browser at 2,882px down at 1440px and 7,887px down
+      at 390px, with the page not scrolling and focus left on the button.
+      Pressing Show did nothing an operator could perceive.
+
+      Focus is the half that carries the fix. A pointer user gets the scroll; a
+      keyboard or screen-reader user gets placed inside the panel instead of
+      being left forty rows above it.
+    */
+    const user = userEvent.setup()
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    await user.click(within(row).getByRole('button', { name: 'Show' }))
+
+    const detail = screen.getByRole('region', { name: 'Record detail' })
+    const heading = within(detail).getByRole('heading', { level: 2 })
+    expect(heading).toHaveFocus()
+  })
+
+  it('moves the reader again when a different record is opened', async () => {
+    // Otherwise the second click silently swaps the contents of a panel the
+    // operator is no longer looking at.
+    const user = userEvent.setup()
+    signIn()
+    renderActivity()
+
+    const first = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    await user.click(within(first).getByRole('button', { name: 'Show' }))
+
+    const second = (await screen.findByText('P-0007')).closest('tr') as HTMLElement
+    await user.click(within(second).getByRole('button', { name: 'Show' }))
+
+    const detail = screen.getByRole('region', { name: 'Record detail' })
+    expect(within(detail).getByRole('heading', { level: 2 })).toHaveFocus()
+  })
+
+  it('KEEPS THE DETAIL CONTROL ON EVERY VIEWPORT, because it is the only route in', async () => {
+    /*
+      The Detail column was marked `secondary`, which hides a cell below the
+      breakpoint. That is right for detail that does not earn phone space and
+      wrong here: this cell is not detail, it is the only way to reach it.
+      Measured at 390px the button was 0x0, absent from the accessibility tree
+      with its cell, and unfocusable -- zero keyboard-reachable Show controls --
+      so a record's IP address and its changes were desktop-only.
+
+      Asserted on the class rather than on a rendered width because jsdom has no
+      layout: `table__cell--secondary` is what the breakpoint keys on.
+    */
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    const cell = within(row).getByRole('button', { name: 'Show' }).closest('td') as HTMLElement
+    expect(cell).not.toHaveClass('table__cell--secondary')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Saying it in the console's own words
+// ---------------------------------------------------------------------------
+
+describe('the trail reads in one vocabulary', () => {
+  it('NAMES AN OPERATOR ROLE AS THE REST OF THE CONSOLE NAMES IT', async () => {
+    // This column printed the stored enum, "ADMIN", beside an email address,
+    // while the Operators screen called the same value "Administrator".
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    expect(within(row).getByText('Administrator')).toBeInTheDocument()
+    expect(within(row).queryByText('ADMIN')).not.toBeInTheDocument()
+  })
+
+  it('LEAVES THE PLATFORM MARKER ALONE, because it is not an operator role', async () => {
+    // PLATFORM marks a change made by the vendor's own surface rather than by
+    // somebody inside the company. Passing it through a role label would be
+    // inventing a role that does not exist.
+    signIn()
+    renderActivity()
+
+    expect(await screen.findByText('Platform')).toBeInTheDocument()
+  })
+
+  it('humanises a target type the way its own filter already does', async () => {
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    expect(within(row).getByText('Terminal')).toBeInTheDocument()
+    expect(within(row).queryByText('TERMINAL')).not.toBeInTheDocument()
+  })
+
+  it('KEEPS THE TARGET IDENTIFIER EXACTLY AS RECORDED', async () => {
+    // The half of that column the audit contract depends on. Humanising the KIND
+    // of thing must not touch WHICH thing.
+    signIn()
+    renderActivity()
+
+    expect(await screen.findByText('AT-0001')).toBeInTheDocument()
+  })
+
+  it('CALLS A FEATURE A FEATURE, in the column and in the filter alike', async () => {
+    /*
+      The stored `target_type` is APPLICATION, and humanising it gave
+      "Application" -- a word this console stopped showing customers. Everywhere
+      else, the thing a company turns on is a FEATURE: the navigation entry, the
+      page heading, the terminal assignment dialog and the role descriptions all
+      say so. Leaving this one humanised put the abandoned word back in the one
+      screen an operator opens to find out what changed.
+
+      THE STORED VALUE IS UNTOUCHED. `describeTarget` maps only the label, and
+      the filter still sends APPLICATION to the server -- which is asserted here
+      by checking that selecting the option produces a matching request rather
+      than an empty table.
+    */
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('ACCESS_CONTROL')).closest('tr') as HTMLElement
+    expect(within(row).getByText('Feature')).toBeInTheDocument()
+    expect(within(row).queryByText('Application')).not.toBeInTheDocument()
+
+    expect(
+      within(screen.getByLabelText('Target type')).getByRole('option', { name: 'Feature' }),
+    ).toHaveValue('APPLICATION')
+  })
+
+  it('names the site credential the way the site page named it', async () => {
+    /*
+      `SITE_KEY_ROTATED` read as "Site key rotated" while every other surface --
+      the button that does it, the confirmation, the panel that follows, the
+      warning inside it -- calls the same credential a PROVISIONING KEY. An
+      owner checking the trail for the rotation they just performed was looking
+      for a phrase the product had used nowhere else.
+    */
+    signIn()
+    renderActivity()
+
+    expect(await screen.findByText('Provisioning key rotated')).toBeInTheDocument()
+    expect(screen.queryByText('Site key rotated')).not.toBeInTheDocument()
+  })
+
+  it('still shows the raw code for an action it cannot describe', async () => {
+    // Unchanged and non-negotiable: the action column is open server-side, and a
+    // record this build cannot name must still be identifiable.
+    signIn()
+    renderActivity()
+
+    expect(await screen.findByText('VISITOR_BADGE_PRINTED')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Time, and how much of the answer is on screen
+// ---------------------------------------------------------------------------
+
+describe('what the trail says about when', () => {
+  it('SHOWS AN ABSOLUTE TIME AS WELL AS A RELATIVE ONE', async () => {
+    /*
+      Relative time is right for scanning, and it was all there was -- the
+      instant sat in a `title`, which a touch screen has no way to reach. The
+      question an audit trail is usually opened to answer is the other one: what
+      time did this happen, so it can be lined up against an incident or another
+      system's log.
+    */
+    signIn()
+    renderActivity()
+
+    const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
+    const times = within(row).getAllByRole('time')
+    expect(times.length).toBeGreaterThanOrEqual(2)
+
+    // One of them still reads as elapsed time, and one as a date.
+    const text = times.map((t) => t.textContent ?? '').join(' | ')
+    expect(text).toMatch(/ago|just now|yesterday/i)
+    expect(text).toMatch(/\d{4}/)
+  })
+
+  it('ALWAYS SAYS HOW MANY RECORDS MATCHED, even when they all fit on one page', async () => {
+    /*
+      The count line lived inside the pagination control, which returned nothing
+      at all when everything fitted on one page -- so "how many matched"
+      disappeared in exactly the case where it is the answer. On an audit trail
+      that is the normal case: narrow to one operator and a fortnight, and
+      "three records match" IS the finding.
+    */
+    signIn()
+    renderActivity()
+
+    await screen.findByText('AT-0001')
+    expect(screen.getByText(/Showing/)).toBeInTheDocument()
+    expect(screen.getByText(/records/)).toBeInTheDocument()
+    // A single page still offers no paging controls: two disabled buttons are a
+    // worse way of saying "there is no more" than their absence.
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Previous' })).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Filtering
 // ---------------------------------------------------------------------------
 
@@ -295,7 +527,7 @@ describe('filtering', () => {
 // ---------------------------------------------------------------------------
 
 describe('what this page does not cover', () => {
-  it('sends somebody looking for the door log to the door log', async () => {
+  it('sends somebody looking for the event log to the event log', async () => {
     // Somebody investigating why a person could not get in will come here
     // first. Leaving them to conclude the trail is broken is the failure, and
     // so is telling them the history does not exist once it does.
@@ -303,9 +535,24 @@ describe('what this page does not cover', () => {
     renderActivity()
 
     expect(
-      await screen.findByText('This is the operator trail, not the door log'),
+      await screen.findByText('This is the operator trail, not the event log'),
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Events' })).toHaveAttribute('href', '/events')
+  })
+
+  /*
+    THE OTHER TRAIL IS THE EVENT LOG, NOT THE DOOR LOG.
+
+    The note that points at Events named it after one kind of hardware. A school
+    reading "door log" on the screen that explains where its access history
+    lives has been told the product is somebody else's.
+  */
+  it('names the other trail without calling it a door log', async () => {
+    signIn()
+    renderActivity()
+
+    await screen.findByText('This is the operator trail, not the event log')
+    expectNoDoorWording('Activity', document.body.textContent ?? '')
   })
 
   it('reports a failed load as an error rather than as an empty trail', async () => {

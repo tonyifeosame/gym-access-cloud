@@ -6,6 +6,7 @@ import type {
   ScheduleWindow,
 } from '../../api/types'
 import { DAY_BITS, EVERY_DAY } from '../../api/types'
+import { PERSON_ID_LABEL } from '../people/personVocabulary'
 
 /**
  * How the access-control model READS.
@@ -244,7 +245,7 @@ const REASONS: Record<string, ReasonDefinition> = {
   PERSON_UNKNOWN: {
     label: 'Nobody matched',
     meaning:
-      'The terminal read an identifier the platform does not recognise. This is a real outcome and often the most interesting one in the trail.',
+      `The terminal read an ${PERSON_ID_LABEL} the platform does not recognise. This is a real outcome and often the most interesting one in the trail.`,
   },
   CREDENTIAL_UNKNOWN: {
     label: 'The credential is not known',
@@ -261,10 +262,10 @@ const REASONS: Record<string, ReasonDefinition> = {
     meaning: 'Its validity begins later.',
   },
   APPLICATION_NOT_ENABLED: {
-    label: 'The capability is not enabled',
+    label: 'The feature is turned off',
     meaning:
-      'The terminal is acting under a capability this company has switched off, so it resolves to nothing.',
-    remedy: 'An owner can enable it under Applications, or the terminal can be reassigned.',
+      'The terminal is assigned to a feature this company has turned off, so it resolves to nothing.',
+    remedy: 'An owner can turn it back on under Features, or the terminal can be assigned to another one.',
   },
   TERMINAL_DISABLED: {
     label: 'The terminal is disabled',
@@ -277,13 +278,85 @@ const REASONS: Record<string, ReasonDefinition> = {
   },
   COMPANY_INACTIVE: {
     label: 'The company is suspended',
-    meaning: 'The whole tenant is suspended at the platform level.',
+    /*
+      SAYS WHO DID IT AND HOW WIDE IT IS, in the customer's terms.
+
+      This read "the whole tenant is suspended at the platform level", which is
+      two pieces of our own vocabulary in one sentence: "tenant" is what the
+      schema calls a customer, and "the platform level" is where we sit rather
+      than a place the reader can go. Somebody standing at a door that has
+      stopped working learns nothing from either, and cannot tell from it
+      whether the problem is theirs to fix.
+    */
+    meaning:
+      'Your whole company account is suspended, so no terminal anywhere in it admits anybody.',
+    remedy: 'Nothing in the console can lift this. Contact AccessLink.',
   },
   OFFLINE_POLICY: {
     label: 'Refused by the offline policy',
     meaning:
       'The terminal could not reach the platform and its site’s offline policy refused rather than using a cached answer.',
   },
+}
+
+/**
+ * What an event MEANS when it carries no reason of its own.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS SEPARATE FROM `REASONS`
+ * ---------------------------------------------------------------------------
+ *
+ * A decision reason answers "why did this person get that answer". Most events
+ * carry one. SOME DO NOT, because nothing was decided about anybody — and the
+ * most important of those is the one this table exists for.
+ *
+ * `ROSTER_CAPACITY_EXCEEDED` is written by the platform, not by a door:
+ * `database/capacity.go` records it with `Decision: ERROR` and NO `reason` at
+ * all. So the events table's "Why" column, which reads `reason`, had nothing to
+ * show for it — the single most operationally serious thing the platform emits
+ * arrived with an "Error" badge and no explanation anywhere in the product.
+ *
+ * WHAT IT ACTUALLY MEANS, in the operator's terms rather than the platform's:
+ * a terminal's permissions cover more people than that unit can physically
+ * store, so the platform withheld the roster rather than sending a truncated one
+ * the terminal would refuse wholesale. NOBODY WAS REFUSED BY THIS EVENT. What
+ * changed is that the terminal is no longer being kept up to date, so it is
+ * deciding from whatever it last held — which is why it is an error rather than
+ * a denial, and why the remedy is about scope rather than about a person.
+ *
+ * DOMAIN-NEUTRAL, like everything else here: a terminal might stand at a door, a
+ * turnstile, a barrier or a locker, and this says what the platform stopped
+ * being able to promise it, not what it is attached to.
+ */
+const EVENT_TYPE_MEANINGS: Record<string, ReasonDefinition> = {
+  ROSTER_CAPACITY_EXCEEDED: {
+    label: 'Too many people for this terminal',
+    meaning:
+      'The people permitted at this terminal outnumber the records it can hold, so the ' +
+      'platform did not send the list rather than send part of one. Nobody was refused ' +
+      'by this event, but the terminal is no longer being kept up to date and is ' +
+      'deciding from the list it already had.',
+    remedy:
+      'Narrow who is permitted at this terminal — a rule scoped to the site or the ' +
+      'whole company reaches more people than one scoped to the terminal itself.',
+  },
+}
+
+/**
+ * What to show in the "Why" column for one event.
+ *
+ * THE REASON WINS WHERE THERE IS ONE. Where there is not, an event type that
+ * this build can explain is used instead, so an event that decided nothing about
+ * anybody still says what happened. Returns null when neither applies, which is
+ * a legitimate state — a plain presentation with nothing to add — and is
+ * rendered as an em dash rather than as an empty cell.
+ */
+export function describeEventCause(event: {
+  reason?: string
+  event_type: string
+}): ReasonDefinition | null {
+  if (event.reason) return describeReason(event.reason)
+  return EVENT_TYPE_MEANINGS[event.event_type] ?? null
 }
 
 /**
@@ -311,7 +384,10 @@ export function describeReason(reason: DecisionReason): ReasonDefinition {
   return (
     REASONS[reason] ?? {
       label: humanise(reason),
-      meaning: 'This console has no description for that reason code.',
+      // NOT "reason code". The reader is being told the console cannot explain
+      // something; telling them it cannot explain a CODE adds a word from our
+      // storage model to a sentence that is already an apology.
+      meaning: 'This console has no description for that outcome.',
     }
   )
 }
