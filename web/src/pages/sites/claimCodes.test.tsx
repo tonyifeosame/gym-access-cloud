@@ -7,6 +7,7 @@ import { setCsrfToken } from '../../api/csrf'
 import type { Role } from '../../api/types'
 import { makeSession, makeSite, SITE_A } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { ProvisionTerminalDialog } from './ClaimCodeDialog'
 import { SiteDetailPage } from './SiteDetailPage'
@@ -130,16 +131,57 @@ describe('asking for a code', () => {
     ).toBeInTheDocument()
   })
 
-  it('states that the code is single use, expiring, and supersedes an earlier one', async () => {
+  it('WARNS BEFORE THE BUTTON about the one fact that strands somebody', async () => {
+    /*
+      THE FORM CARRIES ONE WARNING, NOT FOUR.
+
+      "Shown once", "works once" and "expires" were stated here and then stated
+      again, in full, on the panel that follows -- which is the screen somebody
+      actually has to act on before they can close it. Saying them twice meant an
+      operator read the same three facts on consecutive screens and scrolled past
+      the one that was different.
+
+      What is left is the fact that cannot wait for the next screen, because the
+      decision it bears on is made HERE: issuing another code for a serial kills
+      the code somebody may already be holding, and they find out at a door.
+    */
     signIn()
     renderDialog()
 
-    expect(await screen.findByText('One code, one terminal, one use')).toBeInTheDocument()
-    expect(screen.getByText(/cannot be read back/i)).toBeInTheDocument()
-    expect(screen.getByText(/expires whether or not it is used/i)).toBeInTheDocument()
+    expect(await screen.findByText('Re-issuing cancels any earlier code')).toBeInTheDocument()
+    expect(screen.getByText(/stops theirs working/i)).toBeInTheDocument()
+
+    // Said once, on the panel that shows the code -- not twice.
+    expect(screen.queryByText(/expires whether or not it is used/i)).not.toBeInTheDocument()
+  })
+
+  /*
+    WHERE THEY FIND OUT IS "ON SITE", NOT "AT THE DOOR". The fact is about the
+    installer standing next to hardware that will not accept their code, which
+    is as true of a turnstile, a barrier or a locker as it is of a door.
+  */
+  it('says where a stranded installer finds out without naming a door', async () => {
+    signIn()
+    renderDialog()
+
     expect(
-      screen.getByText(/Issuing a second code for the same serial cancels the first/i),
+      await screen.findByText(/stops theirs working . on site, with no warning to them/),
     ).toBeInTheDocument()
+    expectNoDoorWording('The claim-code dialog', document.body.textContent ?? '')
+  })
+
+  it('does not repeat the Terminals-page pointer the disclosure already made', async () => {
+    // The dialog is opened from "Advanced: pre-authorise a terminal", whose one
+    // paragraph says most terminals are added from Terminals instead. Repeating
+    // it in the dialog description put the same redirection twice on the path of
+    // somebody who had already chosen the specialist route.
+    signIn()
+    renderDialog()
+
+    expect(
+      await screen.findByText(/provisioning key is not involved/i),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/code the unit shows on its own screen/i)).not.toBeInTheDocument()
   })
 
   it('requires a serial, because the code is bound to one', async () => {

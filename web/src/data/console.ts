@@ -57,6 +57,7 @@ import type {
   SiteGrantsRequest,
   SiteSettings,
   SiteSettingsRequest,
+  SitesQuery,
   SitesResponse,
   TerminalDetail,
   TerminalLifecycleResponse,
@@ -110,11 +111,28 @@ export function useCompany(): UseQueryResult<CompanyDetail> {
 // Sites
 // ---------------------------------------------------------------------------
 
-export function useSites(): UseQueryResult<SitesResponse> {
+/**
+ * A company's sites, optionally narrowed by a search term.
+ *
+ * THE SEARCH IS OPT-IN AND SERVER-SIDE. Ten call sites want the complete estate
+ * to fill a dropdown or a site filter, and exactly one — the Sites page — wants
+ * a match. Defaulting the term to empty keeps those ten on one shared cache
+ * entry and one request, and sends `q` only when somebody has typed something.
+ *
+ * The narrowing happens in SQL rather than here: filtering the fetched array
+ * would search whatever the last response carried rather than the estate, which
+ * is the same trap the people list documents and the terminal list is exempt
+ * from only because it fetches everything by design.
+ */
+export function useSites({ search = '' }: SitesQuery = {}): UseQueryResult<SitesResponse> {
+  const term = search.trim()
   return useQuery({
-    queryKey: keys.sites.list(),
-    queryFn: () => endpoints.fetchSites(),
+    queryKey: keys.sites.list(term),
+    queryFn: () => endpoints.fetchSites({ search: term }),
     staleTime: 60_000,
+    // Keeps the previous match on screen while the next one is in flight, so
+    // typing does not flash an empty state between two populated ones.
+    placeholderData: (previous) => previous,
   })
 }
 

@@ -674,7 +674,17 @@ export const handlers = [
     if (failure) return json({ error: 'Failed to retrieve sites' }, failure)
 
     const scope = reachableSiteIds()
-    const sites = scope ? state.sites.filter((site) => scope.includes(site.id)) : state.sites
+    const reachable = scope ? state.sites.filter((site) => scope.includes(site.id)) : state.sites
+
+    const term = (new URL(request.url).searchParams.get('q') ?? '').trim().toLowerCase()
+    const sites = term
+      ? reachable.filter(
+          (site) =>
+            site.name.toLowerCase().includes(term) ||
+            (site.address ?? '').toLowerCase().includes(term),
+        )
+      : reachable
+
     return json({ count: sites.length, sites })
   }),
 
@@ -748,13 +758,23 @@ export const handlers = [
 
     // A key shaped exactly as the server issues one: ats_ + 64 hex.
     const key = `ats_${'ab12cd34'.repeat(8)}`
+    /*
+      THE STORED SITE CARRIES NO PREFIX, because `models.ConsoleSite` has no such
+      field and `consoleSiteColumns` selects none. This mock used to attach one,
+      which made a permanently-dead column on the sites list and a permanently
+      "Not reported" card on the site page look populated in every test and every
+      dev session. Both surfaces have been removed; this stays honest so nothing
+      like them can be built against a fixture the API will not supply.
+
+      The prefix is still returned ON THE CREDENTIAL, which is where the real
+      response carries it and where the one-time panel reads it.
+    */
     const site = makeSite({
       id: `site-${state.sites.length + 1}`,
       name,
       address: body.address,
       timezone: (body.timezone ?? '').trim() || 'UTC',
       terminal_count: 0,
-      api_key_prefix: key.slice(0, 12),
     })
     state.sites = [...state.sites, site]
 
@@ -950,9 +970,8 @@ export const handlers = [
     if (failure) return json({ error: 'Failed to rotate the site key' }, failure)
 
     const key = `ats_${'ff99ee88'.repeat(8)}`
-    state.sites = state.sites.map((site) =>
-      site.id === siteId ? { ...site, api_key_prefix: key.slice(0, 12) } : site,
-    )
+    // Nothing is written back onto the stored site: a rotation changes no
+    // field any read endpoint returns. See the note on site creation above.
 
     // Terminals with no device credential of their own still depend on the
     // site key; the server reports them and so does this.

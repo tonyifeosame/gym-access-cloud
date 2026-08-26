@@ -5,7 +5,8 @@ import type { Site } from '../../api/types'
 import { can } from '../../auth/permissions'
 import { ActiveBadge, Badge } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
-import { PageHeader } from '../../components/states'
+import { SearchInput } from '../../components/Pagination'
+import { PageHeader, RefreshingIndicator } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useSites } from '../../data/console'
 import { useSession } from '../../session/useSession'
@@ -15,10 +16,18 @@ import { SiteFormDialog } from './SiteFormDialog'
 /**
  * Every site this operator can reach.
  *
- * NARROWED BY THE API, not here. A site-scoped operator is served only their
- * granted sites, so this renders whatever came back rather than filtering a
- * fuller list client-side — which would mean the browser had briefly held sites
- * the operator is not entitled to.
+ * NARROWED BY THE API, not here — twice over.
+ *
+ * A site-scoped operator is served only their granted sites, so this renders
+ * whatever came back rather than filtering a fuller list client-side, which
+ * would mean the browser had briefly held sites the operator is not entitled to.
+ *
+ * SEARCH IS SERVER-SIDE FOR THE SAME REASON IT IS ON THE PEOPLE LIST: matching
+ * the fetched array would search what one response happened to carry rather than
+ * the estate. That is silently wrong for a customer with more locations than the
+ * screen was built around, and silently right in every test with two fixtures.
+ * The scope predicate and the search predicate are applied in the same
+ * statement, so a term narrows within the grant and can never widen it.
  *
  * A site is domain-neutral: a location with terminals at it. An office, a
  * campus, a warehouse, a venue. Nothing here assumes which.
@@ -26,12 +35,15 @@ import { SiteFormDialog } from './SiteFormDialog'
 export function SitesListPage() {
   const { session } = useSession()
   const navigate = useNavigate()
-  const query = useSites()
+  const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
+
+  const query = useSites({ search })
 
   // ADMIN, matching the server. The gate is a courtesy: the API refuses
   // anything this wrongly permitted.
   const mayManage = can(session, 'manageSites')
+  const searching = search.trim() !== ''
 
   const columns: Column<Site>[] = [
     {
@@ -86,19 +98,17 @@ export function SitesListPage() {
         </Badge>
       ),
     },
-    {
-      id: 'key',
-      header: 'Key',
-      secondary: true,
-      // Only ever the PREFIX, and only when the API supplies one. There is no
-      // path that fetches a whole key, and adding one would be a bug.
-      render: (site) =>
-        site.api_key_prefix ? (
-          <code className="mono">{site.api_key_prefix}…</code>
-        ) : (
-          <span className="muted">—</span>
-        ),
-    },
+    /*
+      NO "KEY" COLUMN. It rendered the first characters of a site's provisioning
+      key, and it could never render anything: `models.ConsoleSite` has no such
+      field and `consoleSiteColumns` does not select one, so no read carries a
+      prefix and no cache write puts one there. Every row showed an em dash, in
+      every session, for ever.
+
+      It looked alive in development only because the test mock stored a prefix
+      on the site after a create or a rotation, which the real API does not.
+      The mock no longer does either.
+    */
     {
       id: 'created',
       header: 'Added',
@@ -121,6 +131,17 @@ export function SitesListPage() {
         }
       />
 
+      <div className="toolbar">
+        <SearchInput
+          label="Search sites"
+          placeholder="Name or address"
+          value={search}
+          onChange={setSearch}
+          busy={query.isFetching && !query.isPending}
+        />
+        <RefreshingIndicator active={query.isFetching && !query.isPending} />
+      </div>
+
       <DataTable<Site>
         caption="Sites"
         columns={columns}
@@ -131,14 +152,28 @@ export function SitesListPage() {
         error={query.isError ? query.error : null}
         onRetry={() => void query.refetch()}
         onRowClick={(site) => navigate(`/sites/${site.id}`)}
-        emptyTitle="No sites yet"
+        // "Nothing matched" and "no sites yet" are different facts, and telling a
+        // company with a full estate that it has no locations is the worse one
+        // to get wrong.
+        emptyTitle={searching ? 'No sites match that search' : 'No sites yet'}
         emptyDescription={
-          mayManage
-            ? 'A site is a location with terminals at it. Add your first one to start provisioning hardware.'
-            : 'No sites have been set up for your company yet, or none have been shared with you.'
+          searching
+            ? 'Search matches a site name or an address, anywhere in the value.'
+            : mayManage
+              ? // NO SECOND DEFINITION. What a site is, is the page lead directly
+                // above; saying it again here — and a third time in the dialog this
+                // button opens — was the same sentence three times in two clicks.
+                // What is left is the next step, which is the part somebody
+                // standing on an empty page does not know.
+                'Add your first one, then add terminals to it.'
+              : 'No sites have been set up for your company yet, or none have been shared with you.'
         }
         emptyAction={
-          mayManage ? (
+          searching ? (
+            <button type="button" className="button" onClick={() => setSearch('')}>
+              Clear search
+            </button>
+          ) : mayManage ? (
             <button type="button" className="button button--primary" onClick={() => setCreating(true)}>
               Add a site
             </button>

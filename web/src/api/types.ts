@@ -163,31 +163,32 @@ export interface Site {
   name: string
   address?: string
   /**
-   * IANA zone. Describes where the HARDWARE stands — a different question from
-   * the zone an operator reads timestamps in, which is their own browser's.
+   * The zone the HARDWARE stands in — a different question from the zone an
+   * operator reads timestamps in, which is their own browser's.
    */
   timezone: string
   active: boolean
   /** Live terminals at this site. */
   terminal_count: number
   created_at: string
-  /**
-   * The first 12 characters of the site's provisioning key. NOT SECRET — it
-   * identifies which key a site is on without being reconstructible.
-   *
-   * OPTIONAL BECAUSE NO READ ENDPOINT RETURNS IT, and that is still true after
-   * the terminal-lifecycle pass. `sites.api_key_prefix` exists and
-   * `database.SiteKeyPrefix` reads it, but `consoleSiteColumns`
-   * (database/console.go) does not select it and `models.ConsoleSite` has no
-   * field for it — so neither `GET /console/sites` nor
-   * `GET /console/sites/{id}` carries one. This is populated ONLY from a create
-   * or rotate response, for the life of that panel.
-   *
-   * Typed optional rather than assumed, so adding it to the projection is a
-   * backend-only change with nothing to alter here. Recorded in
-   * docs/frontend-backend-requirements.md as CO-01.
-   */
-  api_key_prefix?: string
+  /*
+    NO `api_key_prefix` HERE, AND THAT IS THE CORRECTED FACT rather than an
+    omission. It was typed optional on the theory that a create or rotate
+    response could populate it for the life of a panel, and the list and detail
+    pages both rendered a column and a card for it.
+
+    Neither could ever fill. `models.ConsoleSite` has no such field and
+    `consoleSiteColumns` does not select it, so no read carries one; `useCreateSite`
+    caches `result.site` rather than the response, and `useRotateSiteKey` only
+    invalidates. Every row and every card rendered an em dash, in every session,
+    for ever — while the browser mock injected a prefix onto its stored site and
+    made the dead UI look alive in development.
+
+    The prefix still exists where it is real and useful: on `SiteCredential`,
+    inside the one-time panel that shows the key it belongs to. If a read
+    endpoint ever returns one, add the field back together with the surface that
+    displays it, not before.
+  */
   /**
    * The site's outage behaviour, and the grace period `CACHED_GRACE` uses.
    *

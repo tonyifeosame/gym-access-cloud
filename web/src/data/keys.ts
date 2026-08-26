@@ -46,7 +46,11 @@ export const keys = {
 
   sites: {
     all: [ROOT, 'sites'] as const,
-    list: () => [ROOT, 'sites', 'list'] as const,
+    // Keyed on the search term, so the Sites page's filtered result and the ten
+    // other callers that want the whole estate for a dropdown do not overwrite
+    // one another. Every invalidation targets `sites.all`, which is a prefix of
+    // all of these, so no call site has to know the term to refresh.
+    list: (search = '') => [ROOT, 'sites', 'list', { search }] as const,
     detail: (siteId: string) => [ROOT, 'sites', 'detail', siteId] as const,
     settings: (siteId: string) => [ROOT, 'sites', 'settings', siteId] as const,
   },

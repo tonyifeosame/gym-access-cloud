@@ -6,6 +6,7 @@ import { setCsrfToken } from '../../api/csrf'
 import { MAX_OFFLINE_GRACE_MINUTES, type Role } from '../../api/types'
 import { makeSession, makeSite, SITE_A } from '../../test/fixtures'
 import { renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, offlinePolicyFor, resetServerState, seed, state } from '../../test/server'
 import { OfflinePolicyPanel } from './OfflinePolicyPanel'
 import { describeGrace, graceError, usesGracePeriod } from './offlinePolicy'
@@ -41,6 +42,21 @@ function signIn(role: Role = 'ADMIN') {
 
 function renderPanel() {
   return renderWithSession(<OfflinePolicyPanel site={SITE} />)
+}
+
+/**
+ * Opens the editor.
+ *
+ * THE PANEL RESTS ON THE ANSWER, NOT THE QUESTION. It used to render the three
+ * options and their consequences unconditionally -- about two hundred and forty
+ * words permanently open, with the policy in force stated three times over,
+ * because the pre-selected radio repeated what the badge and the summary had
+ * already said. The alternatives now appear when somebody asks to change
+ * something, so every test about the CHOICE goes through here first, and the
+ * tests about what is IN FORCE deliberately do not.
+ */
+async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'Change policy' }))
 }
 
 beforeEach(() => setCsrfToken(null))
@@ -107,19 +123,70 @@ describe('the grace period belongs to exactly one policy', () => {
 // ---------------------------------------------------------------------------
 
 describe('choosing what happens during an outage', () => {
-  it('offers all three policies, each with its consequence beside it', async () => {
-    // A select would hide two of the three behind an interaction. The choice is
-    // between exposures, and they have to be readable side by side.
+  it('RESTS ON THE ANSWER, not on the question', async () => {
+    // The page this sits on is opened to check a terminal count. Three options
+    // and three paragraphs of consequence, permanently expanded, is a safety
+    // control shouting at somebody who did not come to change one -- and the
+    // pre-selected radio stated the policy in force a third time, after the
+    // badge and the summary had both said it.
     signIn()
     renderPanel()
 
-    expect(await screen.findByRole('radio', { name: 'Refuse everybody' })).toBeInTheDocument()
+    expect(await screen.findByText('In force now')).toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.queryByText(/a network fault becomes a lockout/i)).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Apply to every terminal here' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers all three policies, each with its consequence beside it, once asked', async () => {
+    // A select would hide two of the three behind an interaction. The choice is
+    // between exposures, and they have to be readable side by side. NOTHING WAS
+    // CUT from the consequences -- they moved to the moment they are weighed.
+    const user = userEvent.setup()
+    signIn()
+    renderPanel()
+    await openEditor(user)
+
+    expect(screen.getByRole('radio', { name: 'Refuse everybody' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: 'Keep working for a limited time' })).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: 'Keep working indefinitely' })).toBeInTheDocument()
 
     expect(screen.getByText(/a network fault becomes a lockout/i)).toBeInTheDocument()
     expect(screen.getByText(/until the grace period runs out/i)).toBeInTheDocument()
     expect(screen.getByText(/keeps getting in until it reconnects/i)).toBeInTheDocument()
+  })
+
+  it('closes the editor again on cancel, leaving what is in force on screen', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderPanel()
+    await openEditor(user)
+
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    const shown = screen.getByText('In force now').closest('div') as HTMLElement
+    expect(within(shown).getByText('Keep working for a limited time')).toBeInTheDocument()
+  })
+
+  it('re-seeds from the site when reopened, not from the abandoned selection', async () => {
+    // Somebody may open this, wander off, and come back after a colleague has
+    // changed the policy. Starting from a stale selection is how a change nobody
+    // saw gets reverted.
+    const user = userEvent.setup()
+    signIn()
+    renderPanel()
+
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await openEditor(user)
+
+    expect(screen.getByRole('radio', { name: 'Keep working for a limited time' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Refuse everybody' })).not.toBeChecked()
   })
 
   it('SHOWS WHAT IS ACTUALLY IN FORCE, from the site rather than from a default', async () => {
@@ -144,25 +211,45 @@ describe('choosing what happens during an outage', () => {
   })
 
   it('pre-selects the policy in force, so the form starts from the truth', async () => {
+    const user = userEvent.setup()
     signIn()
     renderPanel()
+    await openEditor(user)
 
-    expect(
-      await screen.findByRole('radio', { name: 'Keep working for a limited time' }),
-    ).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Keep working for a limited time' })).toBeChecked()
     expect(screen.getByRole('radio', { name: 'Refuse everybody' })).not.toBeChecked()
   })
 
   it('cannot be applied while the form matches what the site already holds', async () => {
     // Applying an unchanged policy would push a settings job to every terminal
-    // at the site for no reason.
+    // at the site for no reason. The disabled button IS the message now -- the
+    // sentence that used to say "this is what the site is already set to" was
+    // explaining a state the control was already showing.
+    const user = userEvent.setup()
+    signIn()
+    renderPanel()
+    await openEditor(user)
+
+    expect(screen.getByRole('button', { name: 'Apply to every terminal here' })).toBeDisabled()
+    expect(screen.queryByText('This changes what your terminals do')).not.toBeInTheDocument()
+  })
+
+  /*
+    THE SUBJECT OF THIS NOTE IS THE TERMINALS, and it now says so. It read
+    "This changes what the doors do", which named one kind of hardware for a
+    setting that is sent to every terminal at the site whatever each one is
+    mounted to.
+  */
+  it('names the terminals rather than the doors in the impact note', async () => {
+    const user = userEvent.setup()
     signIn()
     renderPanel()
 
-    expect(
-      await screen.findByRole('button', { name: 'Apply to every terminal here' }),
-    ).toBeDisabled()
-    expect(screen.getByText(/what the site is already set to/i)).toBeInTheDocument()
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
+
+    expect(screen.getByText('This changes what your terminals do')).toBeInTheDocument()
+    expectNoDoorWording('The offline-policy panel', document.body.textContent ?? '')
   })
 
   it('WARNS WHAT THE CHANGE REPLACES once something is chosen', async () => {
@@ -170,15 +257,16 @@ describe('choosing what happens during an outage', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Refuse everybody' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
 
-    expect(screen.getByText('This changes what the doors do')).toBeInTheDocument()
+    expect(screen.getByText('This changes what your terminals do')).toBeInTheDocument()
     expect(
       screen.getByText(/all 4 terminals at this site/i),
     ).toBeInTheDocument()
     // The case that matters during an actual outage.
     expect(
-      screen.getByText(/already offline will not hear about this at all/i),
+      screen.getByText(/already offline will not hear about this until it comes back/i),
     ).toBeInTheDocument()
   })
 
@@ -189,7 +277,8 @@ describe('choosing what happens during an outage', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Refuse everybody' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
     expect(screen.queryByLabelText(/Grace period/)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
@@ -204,7 +293,8 @@ describe('choosing what happens during an outage', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working for a limited time' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
     expect(screen.getByText(/43,200 minutes — 30 days/)).toBeInTheDocument()
   })
 
@@ -213,7 +303,8 @@ describe('choosing what happens during an outage', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working for a limited time' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
     expect(screen.getByText(/That is 12 hours/)).toBeInTheDocument()
   })
 
@@ -225,7 +316,8 @@ describe('applying a policy', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Refuse everybody' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
     await user.click(screen.getByRole('button', { name: 'Apply to every terminal here' }))
 
     await waitFor(() => expect(offlinePolicyFor(SITE_A.site_id)?.policy).toBe('DENY_ALL'))
@@ -236,7 +328,8 @@ describe('applying a policy', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working for a limited time' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
     const grace = screen.getByLabelText(/Grace period/)
     await user.clear(grace)
     await user.type(grace, '2880')
@@ -253,7 +346,8 @@ describe('applying a policy', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working for a limited time' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
     const grace = screen.getByLabelText(/Grace period/)
     await user.clear(grace)
     await user.type(grace, '20160')
@@ -267,7 +361,8 @@ describe('applying a policy', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working for a limited time' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working for a limited time' }))
     const grace = screen.getByLabelText(/Grace period/)
     await user.clear(grace)
     await user.type(grace, '99999')
@@ -284,7 +379,8 @@ describe('applying a policy', () => {
     signIn()
     renderPanel()
 
-    await user.click(await screen.findByRole('radio', { name: 'Keep working indefinitely' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Keep working indefinitely' }))
     await user.click(screen.getByRole('button', { name: 'Apply to every terminal here' }))
 
     expect(
@@ -298,7 +394,8 @@ describe('applying a policy', () => {
     renderPanel()
 
     // A real change, so the button is live — an unchanged form is disabled.
-    await user.click(await screen.findByRole('radio', { name: 'Refuse everybody' }))
+    await openEditor(user)
+    await user.click(screen.getByRole('radio', { name: 'Refuse everybody' }))
 
     failNext('update-site', 500)
     await user.click(screen.getByRole('button', { name: 'Apply to every terminal here' }))
@@ -311,12 +408,29 @@ describe('applying a policy', () => {
 })
 
 describe('role restrictions mirror the server', () => {
-  it('lets a VIEWER read the choices but not make one', async () => {
+  /*
+    A NON-ADMIN IS SHOWN THE ANSWER AND NOTHING ELSE, which is the correction
+    these three tests now hold the line on.
+
+    The panel used to render the whole editor for every role and disable it. A
+    manager or a viewer therefore got a hundred and eighty words of consequence
+    text describing three choices they could not make, below the one line that
+    told them what was actually true -- an offer that could only ever have
+    produced a 403 if it had been reachable.
+
+    Read-only is not the same as edit-disabled: what somebody cannot do, they
+    should not have to read past.
+  */
+  it('shows a VIEWER what is in force and no editor at all', async () => {
     signIn('VIEWER')
     renderPanel()
 
-    expect(await screen.findByText('Read only')).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: 'Refuse everybody' })).toBeDisabled()
+    expect(await screen.findByText('In force now')).toBeInTheDocument()
+    const shown = screen.getByText('In force now').closest('div') as HTMLElement
+    expect(within(shown).getByText('Keep working for a limited time')).toBeInTheDocument()
+
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Change policy' })).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: 'Apply to every terminal here' }),
     ).not.toBeInTheDocument()
@@ -325,15 +439,13 @@ describe('role restrictions mirror the server', () => {
   it('REFUSES A MANAGER, because this rides on the site route rather than settings', async () => {
     // The panel below this one is MANAGER, and the two look like the same kind
     // of change. They are not: the offline policy is carried on
-    // `PUT /console/sites/{id}`, which is ADMIN. Offering it to a manager would
-    // be a control that could only ever produce a 403.
+    // `PUT /console/sites/{id}`, which is ADMIN.
     signIn('MANAGER')
     renderPanel()
 
-    expect(await screen.findByText('Read only')).toBeInTheDocument()
-    expect(
-      screen.queryByRole('button', { name: 'Apply to every terminal here' }),
-    ).not.toBeInTheDocument()
+    expect(await screen.findByText(/administrator or owner action/i)).toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Change policy' })).not.toBeInTheDocument()
   })
 
   it('lets an ADMIN set it', async () => {
@@ -341,11 +453,10 @@ describe('role restrictions mirror the server', () => {
     renderPanel()
 
     // Waited for rather than asserted immediately: the panel renders before
-    // GET /auth/me resolves, and until it does there is no role to gate on, so
-    // the controls start disabled and become enabled.
+    // GET /auth/me resolves, and until it does there is no role to gate on.
     await waitFor(() =>
-      expect(screen.getByRole('radio', { name: 'Refuse everybody' })).toBeEnabled(),
+      expect(screen.getByRole('button', { name: 'Change policy' })).toBeEnabled(),
     )
-    expect(screen.queryByText('Read only')).not.toBeInTheDocument()
+    expect(screen.queryByText(/administrator or owner action/i)).not.toBeInTheDocument()
   })
 })
