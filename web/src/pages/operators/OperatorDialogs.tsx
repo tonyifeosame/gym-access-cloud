@@ -1,8 +1,9 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import type { CredentialToken, OperatorAccount, Role } from '../../api/types'
-import { assignableRoles } from '../../auth/permissions'
+import { assignableRoles, isSelf } from '../../auth/permissions'
 import { roleLabel } from '../../auth/roles'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { Dialog } from '../../components/Dialog'
@@ -212,6 +213,14 @@ export function SiteGrantsDialog({
         </InfoNote>
       ) : null}
 
+      {/*
+        `loading` IS NOT COSMETIC HERE. `empty` is a claim of FACT about the
+        customer's account, and without this the group made it while the request
+        was still in flight: a company with sites was told "Your company has no
+        sites yet", with no spinner, alongside a hint reading "Narrowed to 1
+        site" — two contradictory statements in one dialog. Nothing is asserted
+        until the request resolves.
+      */}
       <CheckboxGroup
         legend="Sites"
         hint={
@@ -227,6 +236,7 @@ export function SiteGrantsDialog({
         selected={selected}
         onChange={setSelected}
         disabled={save.isPending}
+        loading={sites.isPending}
         empty="Your company has no sites yet."
       />
 
@@ -290,6 +300,7 @@ export function ResetPasswordDialog({
   operator: OperatorAccount
   onClose: () => void
 }) {
+  const session = useAuthenticatedSession()
   const update = useUpdateOperator(operator.id)
   const issueReset = useResetOperatorPassword(operator.id)
   const notifications = useNotifications()
@@ -317,6 +328,41 @@ export function ResetPasswordDialog({
     setIssued(null)
     setPassword('')
     onClose()
+  }
+
+  /*
+    THIS DIALOG IS WRITTEN ABOUT SOMEBODY ELSE, AND THAT IS LOAD-BEARING RATHER
+    THAN INCIDENTAL. Every line of it — "they choose their own password", "you
+    never learn it", "you only pass the link on", "the audit trail records that
+    you set it" — describes an administrator handing a credential to a colleague.
+    Pointed at the signed-in operator's own account, all of it is nonsense: it
+    told somebody they would never learn their own password.
+
+    That reachable state has been closed at the source; the detail page no longer
+    offers this on your own account. THIS GUARD IS THE SECOND LOCK, because a
+    dialog whose copy is only correct for one audience should not depend on every
+    future caller remembering that. A new call site that gets it wrong now gets a
+    correct screen instead of a confidently wrong one.
+
+    Nothing about the reset MECHANISM is duplicated here — no mutation is called,
+    no route is decided. The signed-in operator changes their own password in
+    Settings, which is where the account's own credential lives.
+  */
+  if (isSelf(session, operator)) {
+    return (
+      <Dialog open={open} title="Change your own password" onClose={onClose}>
+        <InfoNote title="This is your own account">
+          <p>
+            The reset here is the one an administrator issues to somebody else, so it
+            is not the way you change your own password.
+          </p>
+          <p>
+            Go to <Link to="/settings">Settings</Link>, where you enter your current
+            password and choose a new one yourself.
+          </p>
+        </InfoNote>
+      </Dialog>
+    )
   }
 
   if (issued) {

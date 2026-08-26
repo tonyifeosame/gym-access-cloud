@@ -165,7 +165,11 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
     <Dialog
       open={open}
       title="Add an operator"
-      description="Someone who can sign in to this console. This is not a person the terminals recognise — that is People."
+      // The Operators/People distinction is made on the page this opens from,
+      // in its lead and again in its footer. A third statement of it, to
+      // somebody who has already pressed "Add an operator", is a line of text
+      // between them and the first field.
+      description="Someone who can sign in to this console."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"
@@ -204,18 +208,36 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
             {
               value: 'INVITE',
               label: 'Send them an invitation link',
+              // THE SECURITY CONSEQUENCE IS THE WHOLE POINT OF THIS OPTION and
+              // stays in full: you never learn their password. The delivery fact
+              // moved in here from the note this replaces, because it is what
+              // makes the choice a real one -- there is no email, so choosing
+              // this means undertaking to send something.
               description:
-                'The account is created with no usable password and you get a single-use link to send them. You never learn their password.',
+                'They set their own password from a single-use link, shown once here for you to send. You never learn it.',
             },
             {
               value: 'PASSWORD',
               label: 'Set a password myself',
               description:
-                'You choose the password and hand it over yourself. You will know their credential, and they are asked to change it at first sign-in.',
+                'You choose it and hand it over yourself. You will know their credential, and they are asked to change it at first sign-in.',
             },
           ]}
         />
 
+        {/*
+          THE SELECT'S OWN DESCRIPTIONS CARRY THIS NOW.
+
+          Choosing "invitation" used to add a full note repeating what the option
+          under the cursor had just said — the link appears once, you send it
+          yourself — which is one of two blocks that pushed this dialog to 872px
+          in a 900px viewport and put its submit button below the fold on open.
+
+          WHAT SURVIVES IS THE PART THE OPTION DESCRIPTION CANNOT CARRY: that the
+          link is shown ONCE and the platform will not deliver it. That is the
+          fact an administrator has to act on before they close the next screen,
+          so it is a hint on the control rather than a panel of its own.
+        */}
         {handover === 'PASSWORD' ? (
           <TextField
             label="Initial password"
@@ -227,14 +249,9 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
             onChange={(value) => form.setValue('password', value)}
             onBlur={() => form.touch('password')}
             disabled={form.submitting}
-            hint={`At least ${MIN_PASSWORD_LENGTH} characters. You will need to give this to them yourself — AccessLink does not send it, and cannot show it to you again.`}
+            hint={`At least ${MIN_PASSWORD_LENGTH} characters. You give it to them yourself — it cannot be shown again.`}
           />
-        ) : (
-          <InfoNote title="You will be given a link to send">
-            AccessLink does not have email. The link appears once, here, after the
-            account is created — copy it then and send it over a channel you trust.
-          </InfoNote>
-        )}
+        ) : null}
 
         <SelectField
           label="Role"
@@ -249,11 +266,17 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
           }))}
         />
 
+        {/*
+          `loading` is passed because `empty` is a claim of FACT about the
+          customer's account. Without it the group told companies that have sites
+          "Your company has no sites yet" for as long as the request took, with
+          nothing on screen to say anything was loading.
+        */}
         <CheckboxGroup
           legend="Sites this operator may act on"
           hint={
             roleIgnoresGrants
-              ? 'Not used for this role — an administrator or owner reaches every site in the company.'
+              ? 'Not used for this role — an administrator or owner reaches all sites in the company.'
               : unscoped
                 ? 'Nothing selected means EVERY site in the company. Select sites to narrow them to those.'
                 : `Narrowed to ${form.values.site_ids.length} site${form.values.site_ids.length === 1 ? '' : 's'}.`
@@ -266,13 +289,25 @@ export function OperatorFormDialog({ open, onClose }: { open: boolean; onClose: 
           selected={form.values.site_ids}
           onChange={(selected) => form.setValue('site_ids', selected)}
           disabled={form.submitting || roleIgnoresGrants}
+          loading={sites.isPending}
           empty="Your company has no sites yet."
         />
 
+        {/*
+          THIS WARNING IS NOT ONE OF THE THINGS THAT WAS TRIMMED, and it is worth
+          saying why while the rest of this dialog got shorter.
+
+          It is the one place in the product where the two readings of a control
+          are exact OPPOSITES and the dangerous one looks like the safe one: an
+          administrator clearing the list to "remove their access" grants every
+          site instead. The hint above states the rule; this states the
+          consequence for THIS account, naming the company, at the moment the
+          selection is empty. Both earn their place.
+        */}
         {!roleIgnoresGrants && unscoped ? (
-          <InfoNote tone="warning" title="This operator will reach every site">
+          <InfoNote tone="warning" headingLevel={3} title="This operator will reach all sites">
             An empty selection is not &ldquo;no access&rdquo; — it means the account is
-            not scoped, which is every site in {session.company.name}. Choose sites
+            not scoped, which is all sites in {session.company.name}. Choose sites
             above to limit them.
           </InfoNote>
         ) : null}
@@ -319,5 +354,5 @@ export const ROLE_DESCRIPTIONS: Record<Role, string> = {
   VIEWER: 'Read everything they are scoped to. Changes nothing.',
   MANAGER: 'Day-to-day work: people, terminal configuration, site settings.',
   ADMIN: 'Everything a manager can do, plus sites and operator accounts. Reaches every site.',
-  OWNER: 'Everything, including which applications the company has enabled.',
+  OWNER: 'Everything, including which features the company has turned on.',
 }

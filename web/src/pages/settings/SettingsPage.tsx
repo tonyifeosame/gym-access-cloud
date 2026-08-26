@@ -8,7 +8,7 @@ import { roleLabel } from '../../auth/roles'
 import { Badge } from '../../components/Badge'
 import { FormActions, FormError, TextField } from '../../components/Form'
 import { useNotifications } from '../../components/Notifications'
-import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
+import { ErrorState, LoadingState, PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import { useCompany } from '../../data/console'
@@ -90,11 +90,24 @@ export function SettingsPage() {
           </div>
         </dl>
 
-        <InfoNote title="Your name, email and role are set by an administrator">
-          You cannot change them yourself. Ask an administrator or owner in your
-          company — this is what stops an account quietly granting itself more than
-          it was given.
-        </InfoNote>
+        {/*
+          REPHRASED FROM A PROHIBITION TO A ROUTE.
+
+          This said "Your name, email and role are set by an administrator" and
+          then "You cannot change them yourself" — and it was one of two notices
+          on this page whose headline was a refusal. Between them they made the
+          settings screen read as a list of things the customer is not allowed to
+          do.
+
+          The RULE IS UNCHANGED and so is the reason for it, which is worth
+          keeping: an account that could raise its own role would be no boundary
+          at all. What changed is that the sentence now starts with who to ask.
+        */}
+        <p className="field__hint">
+          To change your name, email or role, ask an administrator or owner in your
+          company. An account cannot raise its own permissions — that is what makes
+          the role mean anything.
+        </p>
       </section>
 
       <ChangePasswordSection />
@@ -119,8 +132,18 @@ export function SettingsPage() {
               <dd>{company.data.name}</dd>
             </div>
             <div className="detail-list__row">
-              <dt>Identifier</dt>
-              <dd className="mono">{company.data.slug}</dd>
+              {/*
+                RENAMED AND EXPLAINED. "Identifier" with a monospaced string
+                under it told a customer nothing about what it was for, so it
+                read as something they were supposed to understand and did not.
+                It is the short name support asks for, which is the only thing
+                anybody outside this codebase uses it for.
+              */}
+              <dt>Reference</dt>
+              <dd>
+                <span className="mono">{company.data.slug}</span>{' '}
+                <span className="muted">— quote this if you contact support</span>
+              </dd>
             </div>
             {company.data.contact_email ? (
               <div className="detail-list__row">
@@ -139,65 +162,91 @@ export function SettingsPage() {
             <div className="detail-list__row">
               <dt>Created</dt>
               <dd>
-                <Timestamp value={company.data.created_at} />
+                {/*
+                  NO TIME OF DAY. The value is whatever moment the row was
+                  written, read back in the viewer's zone — so a midnight-UTC
+                  creation rendered as "1:00 AM" one zone east, a precise-looking
+                  hour describing nothing anybody did. The full instant stays in
+                  the element's `datetime` and `title`.
+                */}
+                <Timestamp value={company.data.created_at} dateOnly />
               </dd>
             </div>
           </dl>
         )}
 
         {/*
-          Read-only because the API has no company update route at all -- not
-          because of a permission. Saying which it is matters: an owner who
-          assumes it is a permission problem will go looking for someone with a
-          higher role who also cannot do it.
+          THE SUBSTANCE IS UNCHANGED AND MUST BE: nobody can edit these, whatever
+          their role, because AccessLink offers no way to. Saying which kind of
+          limit it is stops an owner hunting for a colleague with a higher role
+          who also cannot do it.
+
+          WHAT CHANGED IS THE VOCABULARY. "AccessLink has no operator API for
+          changing a company's name" describes our system to somebody who does
+          not have one, and "API" is the word that gives it away. A customer does
+          not need to know what we did not build — only that the route is
+          support, and that a bigger role would not help.
         */}
-        <InfoNote title="Company details cannot be edited here">
-          AccessLink has no operator API for changing a company&apos;s name, identifier
-          or contact address. This is a gap in the platform rather than a
-          restriction on your role — contact support to have them changed.
-        </InfoNote>
+        <p className="field__hint">
+          These cannot be changed from the console by anyone, whatever their role.
+          Contact support to have your company&apos;s name or contact address updated.
+        </p>
       </section>
 
       {/* --- everything else ------------------------------------------------ */}
+      {/*
+        SHORTER, AND EACH LINK NOW SAYS WHERE IT GOES.
+
+        "Site settings" and "Terminal settings" both led to a LIST — /sites and
+        /terminals — so the label promised a settings screen and delivered an
+        index. The blurbs disclosed the extra step in their last sentence;
+        the labels now do it in the first word.
+
+        The blurbs are also shorter. Every destination here is already a
+        top-level navigation item, so this section's job is to answer "which of
+        those holds the thing I am looking for", not to describe each screen
+        again. One clause each is enough to choose by.
+      */}
       <section className="panel" aria-labelledby="settings-elsewhere-heading">
         <div className="panel__header">
           <h2 className="panel__title" id="settings-elsewhere-heading">
             Configured elsewhere
           </h2>
           <p className="field__hint">
-            Each of these belongs to the thing it configures, so it is edited there
-            rather than here.
+            Each of these belongs to the thing it configures, so it is edited there.
           </p>
         </div>
 
         <ul className="settings-links">
           <li>
-            <Link to="/sites">Site settings</Link>
+            <Link to="/sites">Manage site settings</Link>
             <span>
-              Device configuration for one location — relay hold time and sync
-              interval — and what its terminals do during a network outage, which is a
-              safety decision with its own control. Open a site to change either.
+              Relay hold time, sync interval, and what a location&apos;s terminals do
+              during a network outage. Open a site to change them.
             </span>
           </li>
           <li>
-            <Link to="/terminals">Terminal settings</Link>
+            <Link to="/terminals">Manage terminal settings</Link>
             <span>
-              What one terminal is assigned to do. Open a terminal to change its
-              application mode.
+              Which feature a terminal runs. Open a terminal to change it.
             </span>
           </li>
-          {can(maybeSession, 'manageOperators') ? (
+          {can(maybeSession, 'configureApplications') || can(maybeSession, 'manageOperators') ? (
             <li>
-              <Link to="/settings/applications">Application settings</Link>
-              <span>
-                Which capabilities your company has enabled, and their configuration.
-              </span>
+              {/*
+                GATED ON THE ROLES THAT ACTUALLY GOVERN THE DESTINATION. This was
+                `manageOperators` alone, which is ADMIN and happened to match the
+                page's ADMIN route gate -- correct by coincidence rather than by
+                meaning. Reading is ADMIN and writing is OWNER, so both are named.
+              */}
+              <Link to="/settings/applications">Manage features</Link>
+              <span>Which features your company has turned on.</span>
             </li>
           ) : null}
           {can(maybeSession, 'manageOperators') ? (
             <li>
-              <Link to="/operators">Operators</Link>
-              <span>Who can sign in to this console, their roles and site access.</span>
+              <Link to="/operators">Manage operators</Link>
+              <span>Who can sign in, and what each of them may do.</span>
             </li>
           ) : null}
         </ul>

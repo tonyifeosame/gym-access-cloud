@@ -58,14 +58,40 @@ export function OperatorsListPage() {
     {
       id: 'sites',
       header: 'Site access',
+      /*
+        ONE TERM, WITH THE REASON BESIDE IT.
+
+        The two unrestricted cases used to read "All sites (by role)" and "All
+        sites" — different strings for the same reach — and the first was
+        rendered muted while the second was not, so part of what told them apart
+        was a grey. Colour carrying meaning is a problem for anybody who cannot
+        see the difference, and "which of these two phrasings of all sites am I
+        looking at" is a question no administrator should have to hold.
+
+        Both now LEAD with the same words, and the parenthetical says why in
+        plain language rather than by tone. The distinction is worth keeping —
+        restricting an administrator does nothing, restricting a manager does —
+        it just should not be smuggled in as a colour.
+
+        Empty grants still means unrestricted, never "no access": the two
+        readings are opposites, so this cell never renders a bare "0".
+      */
       render: (operator) => {
         if (operator.role === 'ADMIN' || operator.role === 'OWNER') {
-          return <span className="muted">All sites (by role)</span>
+          return (
+            <span>
+              All sites <span className="muted">(by role)</span>
+            </span>
+          )
         }
         const count = operator.sites?.length ?? 0
-        // Empty grants means unrestricted, not "no access". The two readings are
-        // opposites, so the column never renders a bare "0".
-        if (count === 0) return <span>All sites</span>
+        if (count === 0) {
+          return (
+            <span>
+              All sites <span className="muted">(not restricted)</span>
+            </span>
+          )
+        }
         return (
           <span>
             {count} site{count === 1 ? '' : 's'}

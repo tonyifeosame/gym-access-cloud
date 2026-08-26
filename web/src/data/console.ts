@@ -193,10 +193,19 @@ export function useCreateSite(): UseMutationResult<CreateSiteResponse, Error, Cr
  * The settings cache is therefore invalidated too — the version it holds is now
  * behind.
  *
- * THE RESPONSE DOES NOT ECHO THE POLICY BACK. `models.ConsoleSite` has no field
- * for either column, so the site written into the cache below carries the
- * metadata and nothing about the outage behaviour. A caller must not read the
- * result and conclude it knows what is in force; see the note on `Site`.
+ * THE RESPONSE DOES ECHO THE POLICY BACK, and this note used to say the
+ * opposite. `models.ConsoleSite` carries `offline_policy` and
+ * `offline_grace_minutes`, and `database.UpdateSite`'s RETURNING clause selects
+ * both — so the site written into the cache below is authoritative about the
+ * outage behaviour as well as the metadata, including on a write that changed
+ * the policy (the policy is applied first, then the metadata UPDATE reads the
+ * columns back).
+ *
+ * That is load-bearing for the offline-policy panel: it closes its editor after
+ * applying and returns to showing what is in force, with no refetch, because
+ * this cache write is what makes the value on screen the new one. A maintainer
+ * who believed the old note would add a refetch that is not needed, or distrust
+ * a display that is correct.
  *
  * Terminals are invalidated as well: deactivating a site stops every terminal
  * there authenticating, so a fleet view showing them as they were is stale in
@@ -726,6 +735,9 @@ export function useCreatePerson(): UseMutationResult<Person, Error, PersonReques
       // Every page and search is now potentially wrong -- the new person may
       // belong on any of them, and every total is off by one.
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
@@ -740,6 +752,9 @@ export function useUpdatePerson(
     onSuccess: (person) => {
       queryClient.setQueryData(keys.people.detail(externalId), person)
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
@@ -763,6 +778,9 @@ export function useDeletePerson(): UseMutationResult<void, Error, string> {
     onSuccess: (_result, externalId) => {
       queryClient.removeQueries({ queryKey: keys.people.detail(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
@@ -985,6 +1003,10 @@ export function useGrantPermission(
       // A schedule's permission_count has just changed.
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      // And so has how many people have no access at all, which is what the
+      // overview's setup guidance is built on. Without this, a customer who
+      // grants the last outstanding rule still sees "nobody can get in yet"
+      // until the figure goes stale on its own.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
@@ -1000,6 +1022,7 @@ export function useRevokePermission(
       void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      // Revoking the last rule for somebody puts them back into the count.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })

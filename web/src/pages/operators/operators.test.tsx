@@ -1,13 +1,17 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { createMemoryRouter, RouterProvider } from 'react-router-dom'
+import { delay, http } from 'msw'
+import { createMemoryRouter, MemoryRouter, RouterProvider } from 'react-router-dom'
+import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { setCsrfToken } from '../../api/csrf'
 import type { OperatorAccount, Role, Session } from '../../api/types'
 import { makeOperatorAccount, makeSession, makeSite, SITE_A, SITE_B } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
-import { failNext, resetServerState, seed, state } from '../../test/server'
+import { useSession } from '../../session/useSession'
+import { failNext, resetServerState, seed, server, state } from '../../test/server'
+import { ResetPasswordDialog } from './OperatorDialogs'
 import { OperatorDetailPage } from './OperatorDetailPage'
 import { OperatorsListPage } from './OperatorsListPage'
 
@@ -119,12 +123,33 @@ describe('operator list', () => {
     expect(within(manager).queryByText('0')).not.toBeInTheDocument()
   })
 
-  it('distinguishes "all sites by role" from "all sites by default"', async () => {
-    signIn()
+  it('LEADS WITH THE SAME WORDS FOR BOTH KINDS OF "all sites"', async () => {
+    /*
+      The two unrestricted cases used to read "All sites (by role)" and a bare
+      "All sites", and the first was muted while the second was not — two strings
+      for one reach, told apart partly by a grey. Colour is not available to every
+      reader, and neither is the knack of spotting which phrasing this is.
+
+      Both now begin with the same two words and put the reason beside them in
+      plain language. The DISTINCTION IS STILL MADE, because restricting an
+      administrator does nothing while restricting a manager does; it is just no
+      longer smuggled in as a tone.
+    */
+    signIn('ADMIN')
     renderOperators()
 
-    const owner = (await screen.findByText('owner@example.com')).closest('tr') as HTMLElement
-    expect(within(owner).getByText('All sites (by role)')).toBeInTheDocument()
+    const owner = (await screen.findByRole('link', { name: 'Tobi Owner' })).closest('tr')
+    const manager = screen.getByRole('link', { name: 'Kemi Manager' }).closest('tr')
+
+    expect(within(owner as HTMLElement).getByText(/All sites/)).toBeInTheDocument()
+    expect(within(owner as HTMLElement).getByText('(by role)')).toBeInTheDocument()
+
+    expect(within(manager as HTMLElement).getByText(/All sites/)).toBeInTheDocument()
+    expect(within(manager as HTMLElement).getByText('(not restricted)')).toBeInTheDocument()
+
+    // Never a bare "0": empty grants mean unrestricted, and the opposite reading
+    // is the dangerous one.
+    expect(within(manager as HTMLElement).queryByText('0')).not.toBeInTheDocument()
   })
 
   it('marks the signed-in operator’s own row', async () => {
@@ -177,13 +202,262 @@ describe('an operator cannot escalate or lock out via their own account', () => 
     expect(screen.getByText(/stops the last administrator locking everybody out/)).toBeInTheDocument()
   })
 
-  it('still allows site access and password changes on your own account', async () => {
-    // Neither can lock a company out, and both are legitimate self-service.
+  it('OFFERS NEITHER A PASSWORD RESET NOR SITE ACCESS ON YOUR OWN ACCOUNT', async () => {
+    /*
+      THIS REVERSES WHAT THIS TEST USED TO ASSERT, deliberately, and the reason is
+      not security — neither control can lock a company out, which is why the
+      server permits both and why the three genuine self-protections above are
+      untouched. It is that neither meant anything here.
+
+      RESET PASSWORD was contradicted by the page's own notice forty pixels
+      below it, which says your own password is changed from Settings. Pressing
+      it opened a dialog written about a colleague: "they choose their own
+      password", "you never learn it". An administrator was told they would never
+      learn their own password.
+
+      SITE ACCESS could never do anything. This page is ADMIN-gated, so your own
+      account is always an administrator's or an owner's, and both roles reach
+      every site regardless of what is stored. The dialog opened and said exactly
+      that — a control whose entire content was an explanation of its own
+      inertness.
+    */
     signIn('OWNER')
     renderOperators(`/operators/${SELF_ID}`)
 
+    await screen.findByRole('heading', { name: 'Ops Person', level: 1 })
+    expect(screen.queryByRole('button', { name: 'Reset password' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send invitation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Site access' })).not.toBeInTheDocument()
+  })
+
+  it('sends you to Settings for your own password, rather than naming it', async () => {
+    signIn('OWNER')
+    renderOperators(`/operators/${SELF_ID}`)
+
+    await screen.findByText('This is your own account')
+    const settings = screen.getByRole('link', { name: 'Settings' })
+    expect(settings).toHaveAttribute('href', '/settings')
+  })
+
+  it('KEEPS BOTH CONTROLS ON SOMEBODY ELSE, which is who they were built for', async () => {
+    // The point is that these are administrator-to-colleague operations, not
+    // that they are dangerous. On another account they are unchanged.
+    signIn('OWNER')
+    renderOperators('/operators/operator-unscoped')
+
     expect(await screen.findByRole('button', { name: 'Site access' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Reset password|Send invitation/ }),
+    ).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The reset dialog's audience
+// ---------------------------------------------------------------------------
+
+/**
+ * Mounts a dialog only once the session has arrived.
+ *
+ * These two tests render ResetPasswordDialog DIRECTLY, which is the point of
+ * them: the guard has to hold for a call site that is not the detail page. The
+ * dialog reads an authenticated session on its first render, and
+ * `renderWithSession` mounts its children before GET /auth/me resolves -- so
+ * without this the component throws before it can decide anything.
+ */
+function WhenSignedIn({ children }: { children: ReactNode }) {
+  const { session } = useSession()
+  return session ? <>{children}</> : null
+}
+
+describe('the password reset dialog is written about somebody else', () => {
+  it('REFUSES TO ADDRESS THE SIGNED-IN OPERATOR AS A COLLEAGUE', async () => {
+    /*
+      Every line of that dialog describes an administrator handing a credential
+      to somebody else: "they choose their own password", "you never learn it",
+      "you only pass the link on", "the audit trail records that you set it".
+      Pointed at your own account, all of it is false.
+
+      The detail page no longer offers it there, so this state is not reachable
+      through the UI. THIS IS THE SECOND LOCK, and it is worth having because
+      copy that is only correct for one audience should not depend on every
+      future caller remembering which. Rendered directly, as a new call site
+      would, the dialog declines and points at Settings.
+    */
+    signIn('OWNER')
+    const self = ROSTER.find((operator) => operator.id === SELF_ID)!
+    renderWithSession(
+      <MemoryRouter>
+        <WhenSignedIn>
+          <ResetPasswordDialog open operator={self} onClose={() => {}} />
+        </WhenSignedIn>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('This is your own account')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+
+    // None of the colleague-facing language, and no way to act.
+    expect(screen.queryByText(/you only pass the link on/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/You never learn it/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Issue a reset link/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Set password/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps every word of it for somebody else', async () => {
+    signIn('OWNER')
+    const other = ROSTER.find((operator) => operator.id === 'operator-viewer')!
+    renderWithSession(
+      <MemoryRouter>
+        <WhenSignedIn>
+          <ResetPasswordDialog open operator={other} onClose={() => {}} />
+        </WhenSignedIn>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText(/you only pass the link on/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Issue a reset link' })).toBeInTheDocument()
+    // The security consequence, untouched.
+    expect(screen.getByText(/This signs them out everywhere/i)).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The site picker says nothing until it knows something
+// ---------------------------------------------------------------------------
+
+describe('the site picker does not guess while it is loading', () => {
+  it('DOES NOT CLAIM THE COMPANY HAS NO SITES WHILE THE REQUEST IS IN FLIGHT', async () => {
+    /*
+      `empty` is a statement of FACT about the customer's account, and the group
+      used to make it whenever `options` was short — which includes every moment
+      before the sites request resolved. A company with sites was told "Your
+      company has no sites yet", with no spinner, next to a hint reading
+      "Narrowed to 1 site": two contradictory claims in one dialog.
+
+      Held open here by a request that never resolves, which is the state a slow
+      connection produces.
+    */
+    const user = userEvent.setup()
+    signIn('ADMIN')
+    // Held open rather than merely slow: the assertion is about the state
+    // BEFORE resolution, and a race against a real delay is a flaky test.
+    server.use(http.get('*/api/v1/console/sites', async () => { await delay('infinite') }))
+    renderOperators()
+
+    await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
+
+    expect(await screen.findByText('Loading…')).toBeInTheDocument()
+    expect(screen.queryByText(/no sites yet/i)).not.toBeInTheDocument()
+  })
+
+  it('says so plainly once the request comes back empty', async () => {
+    const user = userEvent.setup()
+    signIn('ADMIN')
+    seed({ sites: [] })
+    renderOperators()
+
+    await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
+
+    expect(await screen.findByText(/Your company has no sites yet/i)).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Where the destructive actions live
+// ---------------------------------------------------------------------------
+
+describe('the actions that stop an account working', () => {
+  it('ARE NOT IN THE PAGE HEADER, so they cannot wrap into it', async () => {
+    /*
+      At 390px the header's five buttons wrapped into two rows with Deactivate
+      and Remove alone on the second — Remove in the destructive fill, at the
+      x-position Change role had held on the row above. Reaching for the leftmost
+      button of a row you have already used once is how an account gets removed
+      instead of re-roled.
+    */
+    signIn('OWNER')
+    renderOperators('/operators/operator-viewer')
+
+    await screen.findByRole('heading', { name: 'Sam Viewer', level: 1 })
+
+    const header = document.querySelector('.page__actions') as HTMLElement
+    expect(within(header).queryByRole('button', { name: 'Deactivate' })).not.toBeInTheDocument()
+    expect(within(header).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+    // The everyday ones stay where they were.
+    expect(within(header).getByRole('button', { name: 'Change role' })).toBeInTheDocument()
+    expect(within(header).getByRole('button', { name: 'Site access' })).toBeInTheDocument()
+  })
+
+  it('are grouped under their own heading, with Remove still destructive', async () => {
+    signIn('OWNER')
+    renderOperators('/operators/operator-viewer')
+
+    await screen.findByRole('heading', { name: 'Sam Viewer', level: 1 })
+    const zone = screen.getByRole('region', { name: 'Account administration' })
+
+    expect(within(zone).getByRole('button', { name: 'Deactivate' })).toBeInTheDocument()
+    const remove = within(zone).getByRole('button', { name: 'Remove' })
+    expect(remove).toHaveClass('button--danger')
+  })
+
+  it('KEEPS EVERY PERMISSION GATE THAT GOVERNED THEM IN THE HEADER', async () => {
+    // Moving a control must not widen who may reach it. An ADMIN may not touch
+    // an OWNER at all, and nobody may deactivate or remove themselves.
+    signIn('ADMIN')
+    const admin = renderOperators('/operators/operator-owner')
+    await screen.findByRole('heading', { name: 'Tobi Owner', level: 1 })
+    expect(
+      screen.queryByRole('region', { name: 'Account administration' }),
+    ).not.toBeInTheDocument()
+    admin.unmount()
+
+    signIn('OWNER')
+    renderOperators(`/operators/${SELF_ID}`)
+    await screen.findByRole('heading', { name: 'Ops Person', level: 1 })
+    expect(
+      screen.queryByRole('region', { name: 'Account administration' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('still requires the email address to remove', async () => {
+    // Unchanged by the move, and non-negotiable.
+    const user = userEvent.setup()
+    signIn('OWNER')
+    renderOperators('/operators/operator-viewer')
+
+    await screen.findByRole('heading', { name: 'Sam Viewer', level: 1 })
+    const zone = screen.getByRole('region', { name: 'Account administration' })
+    await user.click(within(zone).getByRole('button', { name: 'Remove' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('viewer@example.com')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Remove operator' })).toBeDisabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The account creation date
+// ---------------------------------------------------------------------------
+
+describe('the account creation date', () => {
+  it('SHOWS NO TIME OF DAY, which was a timezone artifact rather than a fact', async () => {
+    // The value is whatever moment the row was written, read back in the
+    // viewer's zone: a midnight-UTC creation rendered as "1:00 AM" one zone
+    // east. Nobody created that account at one in the morning.
+    signIn('OWNER')
+    renderOperators('/operators/operator-viewer')
+
+    await screen.findByRole('heading', { name: 'Sam Viewer', level: 1 })
+    const card = screen.getByText('Account created').closest('.card') as HTMLElement
+    const shown = within(card).getByText(/\d{4}/)
+
+    expect(shown.textContent).not.toMatch(/\d{1,2}:\d{2}/)
+    expect(shown.textContent).not.toMatch(/AM|PM/i)
+    // The full instant is still carried for anyone correlating a log.
+    expect(shown).toHaveAttribute('datetime')
+    expect(shown).toHaveAttribute('title')
   })
 })
 
@@ -323,25 +597,44 @@ describe('creating an operator', () => {
     expect(done).toBeEnabled()
   })
 
-  it('says plainly that the platform does not deliver the link', async () => {
-    // There is no transactional email. Somebody has to send it, and doing that
-    // carelessly — or not at all — is the realistic failure.
+  it('SAYS THE LINK IS SHOWN ONCE AND THAT YOU ARE THE ONE SENDING IT', async () => {
+    /*
+      The dialog used to carry a whole InfoNote restating the option description
+      immediately above it. It is one of the two blocks that pushed this form to
+      872px in a 900px viewport and put its submit button below the fold on open.
+
+      WHAT MAY NOT BE LOST IS THE CONSEQUENCE, and it has not been: that the
+      administrator never learns the password, and that the link is shown once
+      and travels by a channel they choose. Both are on the option that carries
+      the decision, which is where somebody choosing between the two reads them.
+    */
     const user = userEvent.setup()
-    signIn()
+    signIn('ADMIN')
     renderOperators()
 
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
-    expect(screen.getByText(/AccessLink does not have email/i)).toBeInTheDocument()
+
+    expect(screen.getByText(/shown once here for you to send/i)).toBeInTheDocument()
+    expect(screen.getByText(/You never learn it/i)).toBeInTheDocument()
   })
 
   it('warns that a chosen password must be handed over out of band', async () => {
+    // Shorter than it was, and the two facts that matter are both still here:
+    // the administrator delivers it, and it cannot be read back.
     const user = userEvent.setup()
-    signIn()
+    signIn('ADMIN')
     renderOperators()
 
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
-    await chooseDirectPassword(user)
-    expect(screen.getByText(/cannot show it to you again/i)).toBeInTheDocument()
+    await user.selectOptions(
+      screen.getByLabelText(/How they get their password/),
+      'PASSWORD',
+    )
+
+    expect(screen.getByText(/You give it to them yourself/i)).toBeInTheDocument()
+    expect(screen.getByText(/cannot be shown again/i)).toBeInTheDocument()
+    // And the consequence of choosing this path, which is not trimmed.
+    expect(screen.getByText(/You will know their credential/i)).toBeInTheDocument()
   })
 
   it('WARNS THAT AN EMPTY SITE SELECTION GRANTS EVERY SITE', async () => {
@@ -351,11 +644,11 @@ describe('creating an operator', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Add an operator' }))
     // Default role is VIEWER, which is scoped by grants.
-    expect(await screen.findByText('This operator will reach every site')).toBeInTheDocument()
+    expect(await screen.findByText('This operator will reach all sites')).toBeInTheDocument()
 
     await user.click(screen.getByLabelText(SITE_A.site_name))
     await waitFor(() =>
-      expect(screen.queryByText('This operator will reach every site')).not.toBeInTheDocument(),
+      expect(screen.queryByText('This operator will reach all sites')).not.toBeInTheDocument(),
     )
   })
 
