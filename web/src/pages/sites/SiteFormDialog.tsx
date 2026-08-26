@@ -114,13 +114,13 @@ export function SiteFormDialog({
       dismissible={!created && !form.submitting}
       onClose={created ? dismissCredential : onClose}
       size={created ? 'wide' : 'default'}
-      description={
-        created
-          ? undefined
-          : editing
-            ? 'A site is a location with terminals at it.'
-            : 'A site is a location with terminals at it — an office, a depot, a campus, a venue.'
-      }
+      /*
+        NO DEFINITION OF A SITE HERE. It was on the list page's lead, in its empty
+        state and in both branches of this line: the same sentence up to three
+        times inside two clicks, the last of them to somebody who had already
+        pressed "Add a site" and did not need convincing what one was.
+      */
+      description={created ? undefined : 'Where terminals will be installed.'}
     >
       {created ? (
         <CredentialPanel
@@ -161,7 +161,7 @@ export function SiteFormDialog({
             onChange={(value) => form.setValue('timezone', value)}
             onBlur={() => form.touch('timezone')}
             placeholder="UTC"
-            hint="IANA zone where the hardware stands, e.g. Europe/Lisbon. Defaults to UTC. This does not change how times are shown to you — those follow your own browser."
+            hint="Where the hardware stands, e.g. Europe/Lisbon. Defaults to UTC. This does not change how times are shown to you — those follow your own browser."
             disabled={form.submitting}
           />
 

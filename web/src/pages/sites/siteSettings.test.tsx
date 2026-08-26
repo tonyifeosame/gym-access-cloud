@@ -134,8 +134,11 @@ describe('guided settings', () => {
     expect(
       await screen.findByText('Settings this console no longer edits'),
     ).toBeInTheDocument()
-    expect(screen.getByText(/firmware does not implement tamper detection/i)).toBeInTheDocument()
-    expect(screen.getByText(/platform refuses a write containing this key/i)).toBeInTheDocument()
+    expect(screen.getByText(/terminals have no tamper detection/i)).toBeInTheDocument()
+    // The grace period's reason points at the policy it belongs to rather than
+    // naming the panel a third time -- the panel is named once, by the policy's
+    // own entry, and only when that key is the one present.
+    expect(screen.getByText(/Belongs to the policy above/i)).toBeInTheDocument()
   })
 
   it('WARNS THAT A SAVE WILL DROP THE KEYS THE PLATFORM REFUSES', async () => {
@@ -193,7 +196,7 @@ describe('guided settings', () => {
     signIn('ADMIN', {})
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     const editor = screen.getByLabelText('Settings JSON')
     await user.clear(editor)
     await user.click(editor)
@@ -204,19 +207,80 @@ describe('guided settings', () => {
     expect(state.requests.some((request) => request.method === 'PUT')).toBe(false)
   })
 
-  it('points at the control that replaced the free-form grace period', async () => {
+  it('POINTS AT THE OUTAGE PANEL ONLY WHEN THERE IS A STALE COPY TO EXPLAIN', async () => {
+    /*
+      The pointer used to be unconditional, and it was made four times over: in
+      the panel header, in both superseded-key reasons, and in the raw editor's
+      error. Three of those reached operators whose site carries no stale copy
+      and who therefore had no idea what they were being warned off.
+
+      A site with a stale key still gets told, because that save really will drop
+      something.
+    */
     signIn('ADMIN', {})
     renderPanel()
 
-    expect(
-      await screen.findByText(/Behaviour during an outage/, { selector: 'p, p *' }),
-    ).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText(/Relay hold time/)).toBeInTheDocument())
+    expect(screen.queryByText(/Behaviour during an outage/)).not.toBeInTheDocument()
   })
 
-  it('says which version it is editing', async () => {
+  it('still points there when the site does carry a stale copy', async () => {
+    signIn('ADMIN', { offline_policy: 'DENY_ALL' })
+    renderPanel()
+
+    await screen.findByText('Settings this console no longer edits')
+    expect(screen.getByText(/Behaviour during an outage/)).toBeInTheDocument()
+  })
+
+  it('DOES NOT SHOW THE PLATFORM VERSION COUNTER', async () => {
+    // `settings_version` is how the platform decides whether a terminal is
+    // behind. It is not a document revision an operator tracks, and printing it
+    // invited being read as one. The form still reseeds on it.
     signIn('ADMIN', { unlock_duration_seconds: 7 })
     renderPanel()
-    expect(await screen.findByText(/Version 3/)).toBeInTheDocument()
+
+    await waitFor(() => expect(screen.getByLabelText(/Relay hold time/)).toBeInTheDocument())
+    expect(screen.queryByText(/Version 3/)).not.toBeInTheDocument()
+  })
+
+  it('SWITCHES EDITORS WITH BUTTONS THAT ANNOUNCE THEIR OWN STATE', async () => {
+    /*
+      NOT AN ARIA TABLIST, and that is a correction rather than a preference.
+
+      It was `role="tablist"` over two `role="tab"` children, which promises a
+      keyboard contract it never kept: the tabs pattern requires arrow-key
+      navigation and a roving tabindex, and neither existed. It also pointed
+      `aria-controls` at a panel id that is only in the document when that panel
+      is the selected one, so every render carried an invalid reference -- an axe
+      violation in every state of this panel.
+
+      Two buttons carrying `aria-pressed` are already in the tab order, already
+      activate on Enter and Space, and announce the state without promising
+      navigation that is not there.
+    */
+    const user = userEvent.setup()
+    signIn('ADMIN', {})
+    renderPanel()
+
+    const guided = await screen.findByRole('button', { name: 'Guided' })
+    const advanced = screen.getByRole('button', { name: 'Advanced' })
+
+    expect(guided).toHaveAttribute('aria-pressed', 'true')
+    expect(advanced).toHaveAttribute('aria-pressed', 'false')
+    // The reference that used to be invalid is simply not made any more.
+    expect(guided).not.toHaveAttribute('aria-controls')
+    expect(advanced).not.toHaveAttribute('aria-controls')
+
+    await user.click(advanced)
+    expect(screen.getByRole('button', { name: 'Advanced' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(screen.getByRole('button', { name: 'Guided' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    )
+    expect(screen.getByLabelText('Settings JSON')).toBeInTheDocument()
   })
 
   it('PRESERVES SETTINGS THIS BUILD DOES NOT RECOGNISE across a guided save', async () => {
@@ -296,7 +360,7 @@ describe('advanced JSON', () => {
     signIn('ADMIN', { unlock_duration_seconds: 5, a_future_setting: 'x' })
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     const editor = screen.getByLabelText('Settings JSON') as HTMLTextAreaElement
     const parsed = JSON.parse(editor.value)
 
@@ -308,7 +372,7 @@ describe('advanced JSON', () => {
     signIn('ADMIN', { unlock_duration_seconds: 5 })
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     const editor = screen.getByLabelText('Settings JSON')
     await user.clear(editor)
     await user.type(editor, '{{"unlock_duration_seconds":12,"brand_new":"value"}')
@@ -324,7 +388,7 @@ describe('advanced JSON', () => {
     signIn('ADMIN', {})
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     const editor = screen.getByLabelText('Settings JSON')
     await user.clear(editor)
     await user.type(editor, 'not json at all')
@@ -341,7 +405,7 @@ describe('advanced JSON', () => {
     signIn('ADMIN', {})
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     const editor = screen.getByLabelText('Settings JSON')
     await user.clear(editor)
     // paste rather than type: user-event reads "[" as the start of a key
@@ -358,7 +422,7 @@ describe('advanced JSON', () => {
     signIn('ADMIN', {})
     renderPanel()
 
-    await user.click(await screen.findByRole('tab', { name: 'Advanced (JSON)' }))
+    await user.click(await screen.findByRole('button', { name: 'Advanced' }))
     expect(screen.getByText(/replaces the whole object/)).toBeInTheDocument()
   })
 })

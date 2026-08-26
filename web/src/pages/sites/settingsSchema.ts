@@ -107,34 +107,25 @@ export const SUPERSEDED_SETTINGS: SupersededSetting[] = [
     label: 'Offline policy',
     disposition: 'refused',
     reason:
-      'The platform refuses a write containing this key. It is a validated field on ' +
-      'the site itself, and a copy here would be ignored — the real value is layered ' +
-      'over this object on its way to a terminal. Set it under “Behaviour during an ' +
-      'outage” above. Saving from this panel will drop the stale copy, which changes ' +
-      'nothing about what your terminals do.',
+      'Set under “Behaviour during an outage” above, where it is validated and reaches ' +
+      'the hardware. This copy was never read.',
   },
   {
     key: 'offline_grace_minutes',
     label: 'Offline grace period',
     disposition: 'refused',
     reason:
-      'The platform refuses a write containing this key, for the same reason as the ' +
-      'policy it belongs to: the real value is a validated field on the site and this ' +
-      'copy was never read. Set it under “Behaviour during an outage” above, where it ' +
-      'is bounded and reaches the hardware. Saving from this panel will drop the stale ' +
-      'copy.',
+      'Belongs to the policy above and is set with it. This copy was never read.',
   },
   {
     key: 'tamper_alarm',
     label: 'Tamper alarm',
     disposition: 'inert',
     reason:
-      'The firmware does not implement tamper detection. There is no tamper input, no ' +
-      'tamper event and nothing that reads this value, so switching it on raised no ' +
-      'alert and switching it off disabled nothing. It is not offered as a control ' +
-      'because presenting unbuilt hardware behaviour as configuration is how a ' +
-      'building ends up relying on protection it does not have. It is left in place ' +
-      'rather than deleted.',
+      'The terminals have no tamper detection, so this value changes nothing. It is not ' +
+      'offered as a control because presenting hardware behaviour that does not exist as ' +
+      'configuration is how a building ends up relying on protection it does not have. ' +
+      'It is left in place rather than deleted.',
   },
 ]
 
