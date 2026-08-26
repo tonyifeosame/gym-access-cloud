@@ -286,6 +286,27 @@ const REASONS: Record<string, ReasonDefinition> = {
   },
 }
 
+/**
+ * What a door event's timestamp is called when the platform cannot vouch for it.
+ *
+ * ---------------------------------------------------------------------------
+ * ONE CONSTANT BECAUSE TWO SURFACES SHOW IT
+ * ---------------------------------------------------------------------------
+ *
+ * The overview's door log and the events page both badge an event whose
+ * `occurred_at_trusted` is false, and they must say the SAME WORDS: a reader
+ * who meets "Time not confirmed" on one screen and something else on the other
+ * has no way to know it is the same condition, and will reasonably assume it is
+ * not. The two used to hold their own copies of the string, and a rename of one
+ * of them is exactly how they came apart.
+ *
+ * The condition itself: a terminal that has never reached NTP sends no time the
+ * platform will stand behind, so what is displayed is the server's arrival
+ * stamp. Presenting that as an unqualified door time would be a quiet lie --
+ * which is why the badge exists rather than the value simply being shown.
+ */
+export const UNCONFIRMED_TIME_LABEL = 'Time not confirmed'
+
 export function describeReason(reason: DecisionReason): ReasonDefinition {
   return (
     REASONS[reason] ?? {
