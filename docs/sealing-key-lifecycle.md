@@ -1,11 +1,31 @@
 # The sealing key: lifecycle and threat model
 
-**Status: AWAITING APPROVAL. No code in this document has been written.**
+**Status: IMPLEMENTED in migration 026 and `database/sealing_keys.go`.** This
+document was written as the gate before that work and is kept as the reasoning
+behind it, so §8 still reads as a list of open decisions -- see "What was
+decided" below for which of them the implementation actually took, and which are
+still open.
 
-This is the gate before the cryptographic material flow of M1
-(`docs/biometric-replication.md` §3, §6). It states exactly what the key is,
-every state it passes through, who can obtain it, and what an attacker gets at
-each position. §8 is the list of things that need a decision.
+It states exactly what the key is, every state it passes through, who can obtain
+it, and what an attacker gets at each position. Read it before changing anything
+about `company_sealing_keys`.
+
+## What was decided
+
+| §8 decision | Outcome |
+|---|---|
+| 1. Key scope | **Per company**, as recommended. One `ACTIVE` key per company, enforced by a partial unique index rather than by the application. |
+| 2. Where `SEALING_MASTER_KEY` lives | **Still open**, and it is a deployment choice rather than a code one. The server reads it from the environment and refuses to start if this installation holds sealing keys it cannot unwrap. |
+| 3. Accepting T7 | **Accepted for M1.** There is no rotation endpoint: a lost or stolen terminal permanently compromises its company's material, and §3 L5 and L7 are the record of what that means. |
+| 4. Correcting the `012` and `models/identity.go` comments | **Done**, in the same commit as the implementation. Both now state the weaker, true claim of §5. |
+
+§3 L6 asks for the startup refusal to be asserted in
+`production_config_test.go`, and it is:
+`TestStartupRefusesOnlyWhenSealingKeysAreUnreadable` covers all four
+combinations of master key and stored keys. Three of them must NOT refuse --
+the dangerous mistake there is not missing the broken state but catching a good
+one, because a server that refuses to boot on an installation which has simply
+not turned this feature on is a self-inflicted outage of the whole API.
 
 ---
 
@@ -149,7 +169,9 @@ Recovery is a new key plus re-enrolling every person.
 Because that damage is silent and permanent, **startup refuses to boot when
 `SEALING_MASTER_KEY` is absent and any `company_sealing_keys` row exists.** A
 loud failure at deploy time is strictly better than a fleet that quietly stops
-replicating. `production_config_test.go` is where that assertion belongs.
+replicating. Asserted by `TestStartupRefusesOnlyWhenSealingKeysAreUnreadable`
+in `production_config_test.go`, over all four combinations of master key and
+stored keys -- including the three that must NOT refuse.
 
 ### L7 — Terminal decommission, loss or theft
 
