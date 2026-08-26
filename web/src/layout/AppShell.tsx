@@ -217,19 +217,13 @@ function SideNav() {
       <div className="sidenav__panel" id="sidenav-panel">
         <NavSection title="Platform" items={platform} />
 
-        {modules.length > 0 ? (
-          <NavSection title="Applications" items={modules} />
-        ) : (
-          // Not an error and not an empty-looking bug: a company that has enabled
-          // no capabilities is using the platform correctly. Saying so is better
-          // than a blank space that reads as something failing to load.
-          <section className="sidenav__section">
-            <h2 className="sidenav__title">Applications</h2>
-            <p className="sidenav__note">
-              No applications are enabled for this company yet.
-            </p>
-          </section>
-        )}
+      {/*
+        No heading when there is nothing under it. `NavSection` renders nothing
+        for an empty list, so a company whose capabilities have no screens gets
+        a navigation of the platform's own resources and no empty section
+        announcing an absence -- which is the ordinary case today.
+      */}
+        <NavSection title="Features" items={modules} />
       </div>
     </nav>
   )

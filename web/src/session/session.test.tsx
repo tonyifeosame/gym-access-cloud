@@ -10,7 +10,6 @@ import { RequireAuth } from '../auth/guards'
 import { AppShell } from '../layout/AppShell'
 import { DashboardPage } from '../pages/DashboardPage'
 import { TerminalsListPage } from '../pages/terminals/TerminalsListPage'
-import { ApplicationPlaceholder } from '../pages/NotImplemented'
 import { SessionProvider } from './SessionProvider'
 import { makeSession, SITE_A, SITE_B } from '../test/fixtures'
 import { resetServerState, state } from '../test/server'
@@ -41,7 +40,6 @@ function renderApp(initialPath = '/') {
             for it in the shell would sit above four screens that ignore it.
           */
           { path: 'terminals', element: <TerminalsListPage /> },
-          { path: 'applications/:slug', element: <ApplicationPlaceholder /> },
         ],
       },
     ],
@@ -130,6 +128,65 @@ describe('operator session', () => {
 })
 
 describe('the console the session describes', () => {
+  it('renders no application navigation for a company with none enabled', async () => {
+    resetServerState(makeSession({ applications: [] }))
+    renderApp()
+
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+
+    // No heading announcing an absence either. An empty "Applications" section
+    // saying nothing is enabled is a sentence about our configuration model, on
+    // every page, for a company that is working perfectly well.
+    const nav = screen.getByRole('navigation', { name: 'Console' })
+    expect(within(nav).queryByText(/no applications are enabled/i)).not.toBeInTheDocument()
+
+    // Platform resources are still there: they are not modules.
+    expect(screen.getByRole('link', { name: 'People' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Terminals' })).toBeInTheDocument()
+  })
+
+  it('gives an enabled capability no navigation entry while it has no screen', async () => {
+    /*
+      Every enabled capability used to add a menu entry pointing at a shared
+      page whose whole content was that its screens had not been written. A
+      company with six capabilities enabled got six of them, and each cost an
+      operator a click to be told about the state of our development.
+
+      The capability is still enabled and terminals can still be assigned to it
+      — this is about the menu, not about the feature.
+    */
+    resetServerState(
+      makeSession({
+        applications: [
+          { code: 'TIME_TRACKING', settings: {} },
+          { code: 'VISITOR_MANAGEMENT', settings: {} },
+        ],
+      }),
+    )
+    renderApp()
+
+    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Console' })
+    expect(within(nav).queryByRole('link', { name: 'Time Tracking' })).not.toBeInTheDocument()
+    expect(
+      within(nav).queryByRole('link', { name: 'Visitor Management' }),
+    ).not.toBeInTheDocument()
+  })
+
+  /*
+   * THE MENU ON A SMALL SCREEN.
+   *
+   * Flattened below 900px, the eleven links sat above the page: on a phone you
+   * scrolled the whole menu to reach the heading of the screen you had just
+   * opened. The panel is now collapsed there.
+   *
+   * WHAT THESE TESTS CAN AND CANNOT SEE. jsdom applies no media queries, so
+   * they cannot prove the panel is hidden at 390px — that is CSS, and the
+   * browser pass is what checks it. What they can prove is the half that would
+   * actually break something: the control exists, it carries its state where
+   * assistive technology can read it, and THE LINKS NEVER LEAVE THE DOM, so
+   * nothing else in this suite has to open a menu to find one.
+   */
   it('offers a menu control that reports whether it is open', async () => {
     const user = userEvent.setup()
     resetServerState(makeSession())
@@ -156,58 +213,6 @@ describe('the console the session describes', () => {
     expect(within(nav).getByRole('link', { name: 'People' })).toBeInTheDocument()
     expect(within(nav).getByRole('link', { name: 'Terminals' })).toBeInTheDocument()
     expect(within(nav).getByRole('link', { name: 'Overview' })).toBeInTheDocument()
-  })
-
-  it('renders no application navigation for a company with none enabled', async () => {
-    resetServerState(makeSession({ applications: [] }))
-    renderApp()
-
-    expect(await screen.findByRole('heading', { name: 'Overview' })).toBeInTheDocument()
-
-    // Said in both places on purpose: the navigation explains the gap, and so
-    // does the page. Scoped so the assertion is about the navigation.
-    const nav = screen.getByRole('navigation', { name: 'Console' })
-    expect(within(nav).getByText(/no applications are enabled/i)).toBeInTheDocument()
-
-    // Platform resources are still there: they are not modules.
-    expect(screen.getByRole('link', { name: 'People' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Terminals' })).toBeInTheDocument()
-  })
-
-  it('builds navigation from the capabilities the company has enabled', async () => {
-    resetServerState(
-      makeSession({
-        applications: [
-          { code: 'TIME_TRACKING', settings: {} },
-          { code: 'VISITOR_MANAGEMENT', settings: {} },
-        ],
-      }),
-    )
-    renderApp()
-
-    expect(await screen.findByRole('link', { name: 'Time Tracking' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Visitor Management' })).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Attendance' })).not.toBeInTheDocument()
-  })
-
-  it('shows a placeholder for an enabled but unbuilt application', async () => {
-    resetServerState(makeSession({ applications: [{ code: 'ATTENDANCE', settings: {} }] }))
-    renderApp('/applications/attendance')
-
-    expect(await screen.findByRole('heading', { name: 'Attendance' })).toBeInTheDocument()
-    expect(screen.getByText(/not built yet/i)).toBeInTheDocument()
-    // The SPECIFIC gap rather than "coming soon". An operator who followed a
-    // navigation entry here has been told the capability is enabled, and a
-    // vague placeholder invites them to assume the work is happening somewhere
-    // and only the screen is missing. Nothing is happening at all.
-    expect(screen.getByText(/Nothing records attendance/i)).toBeInTheDocument()
-  })
-
-  it('says so when a capability is not enabled for the company', async () => {
-    resetServerState(makeSession({ applications: [] }))
-    renderApp('/applications/attendance')
-
-    expect(await screen.findByRole('heading', { name: /not enabled/i })).toBeInTheDocument()
   })
 
   it('hides the operator area from roles below ADMIN', async () => {

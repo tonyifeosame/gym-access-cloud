@@ -8,7 +8,6 @@ import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
 import { Forbidden, NotFound } from './pages/ErrorPage'
-import { ApplicationPlaceholder } from './pages/NotImplemented'
 import { ActivityPage } from './pages/activity/ActivityPage'
 import { SchedulesPage } from './pages/access/SchedulesPage'
 import { EventsPage } from './pages/events/EventsPage'
@@ -34,12 +33,16 @@ import { SitesListPage } from './pages/sites/SitesListPage'
  * Routes.
  *
  * Platform resources have fixed paths because they exist for every deployment.
- * Application modules share ONE parameterised route -- /applications/:slug --
- * because the set of capabilities is configuration, and a route per module would
- * mean a frontend release every time the platform gained one.
  *
- * Phase 1: everything except the overview renders a placeholder. The routes,
- * guards and navigation are what is being built here; the screens come later.
+ * THERE IS NO /applications/:slug ROUTE. Capabilities are configuration, and
+ * every one of them used to resolve to a shared page that said the screens for
+ * it had not been written. A navigation entry leading to that is worse than no
+ * entry: it invites an operator to go looking for a workflow, and then tells
+ * them about the state of our build. A capability appears in the navigation once
+ * it has a screen to appear for -- see `route` in applications/registry.ts.
+ *
+ * Enabling and configuring capabilities is unaffected and lives, as it always
+ * has, under /settings/applications.
  */
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
@@ -156,8 +159,6 @@ export const router = createBrowserRouter([
           </RequireRole>
         ),
       },
-
-      { path: 'applications/:slug', element: <ApplicationPlaceholder /> },
 
       { path: 'forbidden', element: <Forbidden /> },
 

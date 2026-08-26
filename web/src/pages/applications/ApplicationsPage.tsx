@@ -1,20 +1,53 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { MULTI_PURPOSE, type ApplicationCode } from '../../api/types'
 import { describeApplication } from '../../applications/registry'
-import { readinessOf } from '../../applications/readiness'
 import { can } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
 import { useNotifications } from '../../components/Notifications'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
 import { useApplications, useUpdateApplication } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { TurnOffFeatureDialog } from './TurnOffFeatureDialog'
 
 /**
- * Which capabilities this company has switched on.
+ * What this company uses AccessLink for.
  *
- * FOUR CONCEPTS MEET ON THIS SCREEN AND ARE ROUTINELY CONFUSED. Keeping them
- * apart is most of the design:
+ * ---------------------------------------------------------------------------
+ * WHAT THIS SCREEN STOPPED SAYING, AND WHY
+ * ---------------------------------------------------------------------------
+ *
+ * It used to teach the customer a four-state internal model — available,
+ * enabled, configured, operational — and then mark every capability with two
+ * badges, one of which read "Not built yet" or "Partly built". Under each row
+ * it printed a paragraph naming precisely what was unfinished; the Registration
+ * one described how enrolled biometric material is not distributed between
+ * terminals. Beneath that sat the raw platform code, `ACCESS_CONTROL`.
+ *
+ * All of that was accurate and none of it belonged here. It is a development
+ * status report rendered into a settings screen, and its effect on a
+ * non-technical customer is to make a working product look unfinished.
+ *
+ * WHERE THE HONESTY LIVES NOW: docs/market-readiness.md, at the repository
+ * root. That is the document product and sales own, and the right home for
+ * "what we have and have not finished" — a commitment made to a buyer in the
+ * place a buyer is given it, rather than a paragraph a customer trips over
+ * while switching a feature on.
+ *
+ * ONE THING THE OLD COPY DID THAT THIS SCREEN NO LONGER DOES, RECORDED HERE
+ * DELIBERATELY. The badges also warned an owner that switching a capability on
+ * would not make it happen — Attendance can be enabled and no attendance is
+ * recorded. This page no longer distinguishes those, because the module it read
+ * that from no longer reports it. The risk is a real one and it is flagged for
+ * a product decision rather than solved by re-inventing build status here.
+ *
+ * NOTHING WAS REMOVED. Every capability the server offers is still listed, and
+ * every one can still be switched on and off by an owner.
+ *
+ * ---------------------------------------------------------------------------
+ * FOUR CONCEPTS MEET HERE AND ARE ROUTINELY CONFUSED
+ * ---------------------------------------------------------------------------
  *
  *   Platform capability      what AccessLink can do at all. The server's
  *                            `available` list, not a constant in this build.
@@ -26,14 +59,10 @@ import { useSession } from '../../session/useSession'
  *
  * MULTI_PURPOSE IS NOT AN APPLICATION. It is a terminal mode meaning "serve
  * whatever this company has enabled", and the server rejects it as a company
- * capability. It is filtered out defensively below as well, so that a future
- * server which mistakenly listed it could not turn it into a toggle here.
+ * capability. It is filtered out defensively below as well.
  *
  * THE CATALOG COMES FROM THE SERVER. `available` is the authority, so a
- * capability added to the platform appears on this page without a frontend
- * release — described generically if this build has never heard of it, rather
- * than dropped. A console that hard-coded the list would silently hide part of
- * what a customer is paying for.
+ * capability added to the platform appears here without a frontend release.
  */
 export function ApplicationsPage() {
   const { session } = useSession()
@@ -41,16 +70,30 @@ export function ApplicationsPage() {
   const update = useUpdateApplication()
   const notifications = useNotifications()
 
+  /*
+    THE FEATURE WAITING FOR A TURN-OFF TO BE CONFIRMED.
+
+    This list fired the change the moment the button was pressed, while the
+    detail page for the same action asked first and named the consequence. The
+    list is where the toggles are, so the unguarded path was the one nearly
+    everybody used. Both now go through the same dialog, which is a component
+    rather than two copies of the copy.
+
+    Turning ON stays immediate: it takes nothing away, and a question there
+    teaches people to dismiss the one that matters.
+  */
+  const [turningOff, setTurningOff] = useState<ApplicationCode | null>(null)
+
   // Reading is ADMIN in this console. The API itself allows any operator to
   // read, but what a company is FOR is administrative context rather than
-  // day-to-day information, and the write is OWNER either way.
+  // day-to-day information, and the write is OWNER either way. UNCHANGED.
   const mayConfigure = can(session, 'configureApplications')
 
-  if (query.isPending) return <LoadingState label="Loading applications…" />
+  if (query.isPending) return <LoadingState label="Loading features…" />
   if (query.isError) {
     return (
       <div className="page">
-        <PageHeader title="Applications" />
+        <PageHeader title="Features" />
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
       </div>
     )
@@ -67,140 +110,56 @@ export function ApplicationsPage() {
     const label = describeApplication(code).label
     try {
       await update.mutateAsync({ code, body: { enabled: next } })
-      notifications.success(next ? `${label} enabled` : `${label} disabled`)
+      notifications.success(next ? `${label} turned on` : `${label} turned off`)
     } catch (error) {
-      notifications.failure(`Could not ${next ? 'enable' : 'disable'} ${label}.`, error)
+      notifications.failure(`Could not turn ${label} ${next ? 'on' : 'off'}.`, error)
     }
+  }
+
+  function renderCapability(code: ApplicationCode) {
+    return (
+      <Capability
+        key={code}
+        code={code}
+        isEnabled={enabledSet.has(code)}
+        mayConfigure={mayConfigure}
+        busy={update.isPending}
+        onTurnOn={() => void toggle(code, true)}
+        onTurnOff={() => setTurningOff(code)}
+      />
+    )
   }
 
   return (
     <div className="page">
       <PageHeader
-        title="Applications"
-        lead="The capabilities your company has enabled. AccessLink is a general-purpose platform — what it does for you is configuration, not a fixed product."
+        title="Features"
+        lead="What your company uses AccessLink for. Turn a feature on to make it available to your terminals."
       />
-
-      {/*
-        THE MOST IMPORTANT SENTENCE ON THIS PAGE. Nothing in the platform yet
-        acts on an enabled capability: no attendance is computed, no access
-        decision is evaluated, no check-in is recorded. Enabling one changes what
-        the console offers and what a terminal may be assigned to, and nothing
-        else. An owner who reads "Access Control" and expects doors to start
-        behaving differently has been misled, and this is where that would
-        happen.
-      */}
-      <InfoNote tone="warning" title="Enabled is not the same as operational">
-        <p>
-          Four different things are easy to confuse here, and only the last one
-          affects anybody standing at a door:
-        </p>
-        <ul className="capability__legend">
-          <li>
-            <strong>Available</strong> — the platform offers it at all.
-          </li>
-          <li>
-            <strong>Enabled</strong> — your company has switched it on. This
-            decides what the console offers and what a terminal may be assigned
-            to.
-          </li>
-          <li>
-            <strong>Configured</strong> — settings have been stored for it.
-          </li>
-          <li>
-            <strong>Operational</strong> — the platform actually carries out the
-            workflow.
-          </li>
-        </ul>
-        <p>
-          Every capability below is marked with where it stands. Enabling one
-          that is not yet built changes what this console offers and nothing
-          else — no attendance is computed, no access decision is evaluated, no
-          check-in is recorded.
-        </p>
-      </InfoNote>
 
       {!mayConfigure ? (
         <InfoNote title="Read only">
-          You can see what is enabled but not change it. Only an owner decides which
-          capabilities a company has.
+          You can see which features are on but not change them. Only an owner
+          decides what a company uses.
         </InfoNote>
       ) : null}
 
       {catalog.length === 0 ? (
-        <InfoNote title="No capabilities offered">
-          This build of the platform reports no available capabilities.
+        <InfoNote title="No features available">
+          This platform reports no features for your company.
         </InfoNote>
       ) : (
-        <ul className="capability-list">
-          {catalog.map((code) => {
-            const definition = describeApplication(code)
-            const isEnabled = enabledSet.has(code)
-            // A code the server offers that this build cannot describe. It is
-            // still rendered — humanised and marked — rather than hidden.
-            const known = definition.description !== UNKNOWN_DESCRIPTION
-            const readiness = readinessOf(code, query.data)
-
-            return (
-              <li key={code} className="capability" data-enabled={isEnabled}>
-                <div className="capability__main">
-                  <h2 className="capability__title">
-                    <Link to={`/settings/applications/${definition.slug}`}>
-                      {definition.label}
-                    </Link>
-                    {/*
-                      TWO BADGES, NEVER ONE. "Enabled" describes a row in a
-                      database; "operational" describes whether the platform
-                      does the work. An owner who enables Attendance and sees a
-                      single green tick has been told the product records
-                      attendance, and it does not.
-                    */}
-                    {isEnabled ? (
-                      <Badge tone="positive">Enabled</Badge>
-                    ) : (
-                      <Badge>Not enabled</Badge>
-                    )}
-                    {readiness.operational ? (
-                      <Badge tone="positive">Operational</Badge>
-                    ) : readiness.implementation === 'PARTIAL' ? (
-                      <Badge tone="warning">Partly built</Badge>
-                    ) : (
-                      <Badge tone="warning">Not built yet</Badge>
-                    )}
-                    {!known ? <Badge tone="warning">Unrecognised</Badge> : null}
-                  </h2>
-                  <p className="capability__description">{definition.description}</p>
-                  {/*
-                    The specific gap, not a generic disclaimer. "Nothing records
-                    attendance" is actionable in a way that "some features are
-                    in development" is not, and it is what a buyer is entitled
-                    to know before they are sold this.
-                  */}
-                  {readiness.gap ? (
-                    <p className="capability__gap">{readiness.gap}</p>
-                  ) : null}
-                  <p className="capability__meta">
-                    <code className="mono">{code}</code>
-                    {readiness.configured ? ' · configured' : ' · never configured'}
-                  </p>
-                </div>
-
-                {mayConfigure ? (
-                  <div className="capability__action">
-                    <button
-                      type="button"
-                      className={isEnabled ? 'button' : 'button button--primary'}
-                      disabled={update.isPending}
-                      onClick={() => void toggle(code, !isEnabled)}
-                    >
-                      {isEnabled ? 'Disable' : 'Enable'}
-                    </button>
-                  </div>
-                ) : null}
-              </li>
-            )
-          })}
-        </ul>
+        <ul className="capability-list">{catalog.map(renderCapability)}</ul>
       )}
+
+      {turningOff ? (
+        <TurnOffFeatureDialog
+          open
+          label={describeApplication(turningOff).label}
+          onConfirm={() => toggle(turningOff, false)}
+          onClose={() => setTurningOff(null)}
+        />
+      ) : null}
 
       <section className="panel" aria-labelledby="applications-model-heading">
         <div className="panel__header">
@@ -209,16 +168,16 @@ export function ApplicationsPage() {
           </h2>
         </div>
         <p>
-          A capability enabled here becomes available to the whole company. Each
+          A feature turned on here becomes available to the whole company. Each
           terminal is then <strong>assigned</strong> to one of them, or left
           multi-purpose to serve all of them — that assignment is made per terminal
           under <Link to="/terminals">Terminals</Link>.
         </p>
         <p className="field__hint">
-          Multi-purpose is a terminal setting, not a capability, so it does not
-          appear in the list above. Disabling a capability here leaves any terminal
-          assigned to it configured but resolving to nothing, rather than silently
-          reassigning it.
+          Multi-purpose is a terminal setting, not a feature, so it does not appear
+          in the list above. Turning a feature off leaves any terminal assigned to
+          it configured but resolving to nothing, rather than silently reassigning
+          it.
         </p>
       </section>
     </div>
@@ -226,9 +185,53 @@ export function ApplicationsPage() {
 }
 
 /**
- * The description the registry invents for a code it does not know.
+ * One feature: what it is, whether it is on, and the control to change that.
  *
- * Compared against rather than duplicated, so "is this recognised" has one
- * answer and the registry stays the only place that decides it.
+ * ONE BADGE, NOT TWO. The second badge used to report whether the platform had
+ * built the thing. Which list the row is in now carries that, so the row itself
+ * answers only the question the customer asked: is this on?
  */
-export const UNKNOWN_DESCRIPTION = 'This capability is newer than this version of the console.'
+function Capability({
+  code,
+  isEnabled,
+  mayConfigure,
+  busy,
+  onTurnOn,
+  onTurnOff,
+}: {
+  code: ApplicationCode
+  isEnabled: boolean
+  mayConfigure: boolean
+  busy: boolean
+  /** Immediate: turning something on takes nothing away. */
+  onTurnOn: () => void
+  /** Opens the confirmation. Never writes directly — see the dialog. */
+  onTurnOff: () => void
+}) {
+  const definition = describeApplication(code)
+
+  return (
+    <li className="capability" data-enabled={isEnabled}>
+      <div className="capability__main">
+        <h2 className="capability__title">
+          <Link to={`/settings/applications/${definition.slug}`}>{definition.label}</Link>
+          {isEnabled ? <Badge tone="positive">On</Badge> : <Badge>Off</Badge>}
+        </h2>
+        <p className="capability__description">{definition.description}</p>
+      </div>
+
+      {mayConfigure ? (
+        <div className="capability__action">
+          <button
+            type="button"
+            className={isEnabled ? 'button' : 'button button--primary'}
+            disabled={busy}
+            onClick={isEnabled ? onTurnOff : onTurnOn}
+          >
+            {isEnabled ? 'Turn off' : 'Turn on'}
+          </button>
+        </div>
+      ) : null}
+    </li>
+  )
+}

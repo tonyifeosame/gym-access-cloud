@@ -1,4 +1,4 @@
-import type { ApplicationCode, EnabledApplication, Role } from '../api/types'
+import type { ApplicationCode, Role } from '../api/types'
 
 /**
  * The application registry.
@@ -15,8 +15,8 @@ import type { ApplicationCode, EnabledApplication, Role } from '../api/types'
  *     legitimate, fully-working state rather than something to paper over.
  *
  *   * An UNKNOWN code still renders. The API's `available` list is the real
- *     catalog, so a capability added to the platform appears here without a
- *     frontend release -- humanised label, generic route, placeholder page.
+ *     catalog, so a capability added to the platform appears in Applications
+ *     without a frontend release, humanised from its code.
  *
  *   * MULTI_PURPOSE never appears. It is a terminal mode describing a device
  *     that serves whatever its company has enabled, not a capability a company
@@ -28,10 +28,23 @@ export interface ApplicationDefinition {
   /** URL segment under /applications. */
   slug: string
   label: string
-  /** One line, shown on the placeholder and in the module list. */
+  /** One line, shown wherever the capability is listed. */
   description: string
   /** Lowest role that may open the module. */
   minimumRole: Role
+  /**
+   * The console screen this capability owns, if it has one.
+   *
+   * ABSENT MEANS NO NAVIGATION ENTRY, and every definition below is currently
+   * absent. Capabilities used to share one parameterised route that rendered a
+   * page explaining the screens had not been built; a menu item leading there
+   * costs an operator a click to be told about the state of our development, so
+   * a capability now earns its entry by having somewhere to go.
+   *
+   * Setting this is the whole of what it takes to put one back in the
+   * navigation -- `moduleNav` reads it directly.
+   */
+  route?: string
 }
 
 const DEFINITIONS: ApplicationDefinition[] = [
@@ -89,6 +102,19 @@ const DEFINITIONS: ApplicationDefinition[] = [
 const BY_CODE = new Map(DEFINITIONS.map((definition) => [definition.code, definition]))
 const BY_SLUG = new Map(DEFINITIONS.map((definition) => [definition.slug, definition]))
 
+/**
+ * The description given to a code this build has never heard of.
+ *
+ * SINGLE-SOURCED HERE, because two places have to agree on it and they are
+ * compared by identity: `describeApplication` writes it, and the detail page
+ * asks "is this description the invented one" to decide whether to warn that
+ * the console has no copy for the feature. When the same sentence was written
+ * out in both files, editing one of them made that comparison permanently
+ * false -- every unknown feature silently lost its warning, and nothing failed
+ * except a test nobody had run yet. Import it; do not retype it.
+ */
+export const UNKNOWN_DESCRIPTION = 'Recently added to the platform.'
+
 /** Turns AN_UNKNOWN_CODE into "An Unknown Code". */
 function humanise(code: string): string {
   return code
@@ -117,7 +143,7 @@ export function describeApplication(code: ApplicationCode): ApplicationDefinitio
     code,
     slug: slugify(code),
     label: humanise(code),
-    description: 'This capability is newer than this version of the console.',
+    description: UNKNOWN_DESCRIPTION,
     minimumRole: 'VIEWER',
   }
 }
@@ -129,23 +155,4 @@ export function findApplicationBySlug(slug: string): ApplicationDefinition | und
 /** The codes this build can describe. The API's `available` is the real list. */
 export function knownApplications(): ApplicationDefinition[] {
   return [...DEFINITIONS]
-}
-
-export function applicationPath(definition: ApplicationDefinition): string {
-  return `/applications/${definition.slug}`
-}
-
-/**
- * The modules an operator should see: enabled for the company AND permitted by
- * their role. Order follows the API's, which is stable, so navigation does not
- * reshuffle between requests.
- */
-export function visibleApplications(
-  enabled: EnabledApplication[],
-  role: string,
-  roleAtLeast: (role: string | undefined, minimum: Role) => boolean,
-): ApplicationDefinition[] {
-  return enabled
-    .map((application) => describeApplication(application.code))
-    .filter((definition) => roleAtLeast(role, definition.minimumRole))
 }
