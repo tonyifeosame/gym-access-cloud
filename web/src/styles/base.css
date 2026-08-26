@@ -188,6 +188,35 @@ code {
   font-size: var(--font-size-2xl);
 }
 
+/*
+ * THE SCREENS THAT ARE NOT PROSE.
+ *
+ * 1000px is a measure, and it is the right one for every page built out of
+ * forms and explanatory paragraphs -- sign-in, settings, a person, a site's
+ * offline policy. A form field two-thirds the width of a monitor is harder to
+ * use than a narrow one, not easier, and the console explains what disable,
+ * revoke and retire each do at every one of those controls.
+ *
+ * An operations screen is the opposite shape. The overview is a grid of counts,
+ * proportions and a log; it has no measure to protect, and at the cap it spent
+ * roughly 40% of a 1920px canvas on empty space to the right of itself --
+ * left-aligned, so all of it collected on one side, which is what read as
+ * unfinished rather than as spacious.
+ *
+ * SO THIS IS A MODIFIER RATHER THAN A NEW DEFAULT. Widening `.page` itself would
+ * stretch every form in the product to fix one dashboard. Terminals and Events
+ * are the other two screens that are tables inside a measure and are the
+ * obvious next callers; neither is changed here.
+ *
+ * Left-aligned, deliberately, and not centred. Past about 1840px the column
+ * stops growing and the surplus sits to the right of a console whose navigation
+ * is on the left, which is the conventional shape and reads better than an
+ * island with a void on each side.
+ */
+.page--wide {
+  max-width: 1600px;
+}
+
 .page__lead {
   margin: var(--space-1) 0 0;
   color: var(--text-muted);

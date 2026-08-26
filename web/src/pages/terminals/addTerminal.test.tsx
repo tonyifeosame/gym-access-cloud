@@ -413,7 +413,6 @@ describe('the dashboard first step', () => {
     const items = collectAttention({
       fleet,
       terminals: [],
-      inactiveSites: 0,
       applicationCount: 0,
       peopleTotal: 0,
     })
@@ -422,7 +421,7 @@ describe('the dashboard first step', () => {
     expect(ids).toContain('no-terminals')
     // Before applications and people: both are preparation for a door that does
     // not exist yet.
-    expect(ids.indexOf('no-terminals')).toBeLessThan(ids.indexOf('no-applications'))
+    expect(ids.indexOf('no-terminals')).toBeLessThan(ids.indexOf('no-features'))
     expect(ids.indexOf('no-terminals')).toBeLessThan(ids.indexOf('no-people'))
   })
 
@@ -430,7 +429,6 @@ describe('the dashboard first step', () => {
     const items = collectAttention({
       fleet: { ...fleet, total: 2, offline: 1, error: 1 },
       terminals: [makeTerminal()],
-      inactiveSites: 1,
       applicationCount: 1,
       peopleTotal: 4,
       pendingTerminals: 1,
@@ -444,7 +442,6 @@ describe('the dashboard first step', () => {
     const items = collectAttention({
       fleet,
       terminals: [],
-      inactiveSites: 0,
       applicationCount: 1,
       peopleTotal: 1,
       pendingTerminals: 1,

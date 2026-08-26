@@ -1718,6 +1718,21 @@ textarea.field__input {
   color: var(--text-muted);
 }
 
+/*
+  What stands where the action would be, for a role that cannot take it.
+
+  Sized and coloured like a hint rather than a control, so it does not read as
+  something to press. It sits in the same flex slot the button occupied, so the
+  item keeps its shape whichever of the two is rendered.
+*/
+.attention__unavailable {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+  text-align: right;
+}
+
 /* --- settings signposts --------------------------------------------------- */
 
 .settings-links {
@@ -1760,5 +1775,393 @@ textarea.field__input {
 
   .attention .button {
     width: 100%;
+  }
+}
+
+/* ===========================================================================
+ * Overview
+ *
+ * The one screen in the console that is a dashboard rather than a page: a grid
+ * of counts, proportions and a log, scanned at a glance rather than worked
+ * through top to bottom. Everything below is scoped to `.dash` or named for a
+ * piece only this screen builds, so nothing here can reach a form.
+ *
+ * THE ORGANISING CONSTRAINT is that the page must not get emptier as the
+ * deployment gets healthier. The attention list is conditional, so every other
+ * region has to hold the screen on its own when nothing is wrong -- which is why
+ * the meters keep their zero-valued rows and the follow-ups still render when
+ * the answer is "none".
+ * ======================================================================== */
+
+/* The signal band. `.tiles` carries a bottom margin from when it was the last
+ * thing on a page; inside `.page`'s flex gap that is a double space. */
+.dash__band {
+  margin-bottom: 0;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+/*
+ * THE TWO LANES.
+ *
+ * Single column by default and split only where there is room, so the narrow
+ * case is the base rule rather than an override -- a phone then pays for no
+ * desktop layout it will never use, and the order in the markup is the order it
+ * is read in.
+ *
+ * The RATIO widens rather than the column count changing. Two lanes at 1.5:1 and
+ * two lanes at 1.85:1 are the same screen with more room for the door log; a
+ * third lane would be a different screen at a size nobody standardises on.
+ */
+.dash__split {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.dash__lane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+@media (min-width: 1180px) {
+  .dash__split {
+    grid-template-columns: 1.5fr 1fr;
+  }
+}
+
+@media (min-width: 1440px) {
+  .dash__split {
+    grid-template-columns: 1.85fr 1fr;
+  }
+}
+
+/* Context, capabilities and the audit trail. Footer weight: present, last, and
+ * never competing with the numbers above them. */
+
+/*
+ * A card's own border, removed where a table is already drawing one.
+ *
+ * `.table-wrap` is a bordered box because on every other screen it IS the
+ * screen. Inside a panel that is a second frame a millimetre from the first.
+ */
+.dash .table-wrap {
+  border-color: transparent;
+  background: none;
+  border-radius: 0;
+}
+
+/* --- panel header with an escape hatch ------------------------------------
+ *
+ * Every region on this page summarises something that has its own screen, and
+ * the header is where that link belongs: the dashboard is a set of doorways, not
+ * a fourth place to manage terminals.
+ */
+.panel__header--split {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* `.panel__title` carries the margin that separates a header from its body, so
+ * a flex header inherits it and the link must not add another. */
+.panel__header--split .panel__title {
+  margin-bottom: 0;
+}
+
+.panel__link {
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+/* --- proportion meter -----------------------------------------------------
+ *
+ * A bar and its legend. THE BAR IS DECORATION: every value is written out beside
+ * its label underneath, so the card survives a monochrome screen and a reader
+ * who cannot separate the two warm tones. That is the rule the badges keep, and
+ * the reason the track is hidden from assistive technology rather than given an
+ * aria-label restating the list below it.
+ */
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.meter__track {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--surface-sunken);
+}
+
+/* An empty track still draws, so a fleet with nothing in a state reads as a
+ * measured zero rather than as a card that failed to render. */
+.meter__track--empty {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.meter__track--slim {
+  height: 5px;
+}
+
+.meter__part {
+  display: block;
+  min-width: 2px;
+}
+
+.meter__part--positive {
+  background: var(--success);
+}
+
+.meter__part--warning {
+  background: var(--warning);
+}
+
+.meter__part--danger {
+  background: var(--danger);
+}
+
+.meter__part--info {
+  background: var(--accent);
+}
+
+.meter__part--neutral {
+  background: var(--border-strong);
+}
+
+.meter__caption {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.legend__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.legend__swatch--positive {
+  background: var(--success);
+}
+
+.legend__swatch--warning {
+  background: var(--warning);
+}
+
+.legend__swatch--danger {
+  background: var(--danger);
+}
+
+.legend__swatch--info {
+  background: var(--accent);
+}
+
+.legend__swatch--neutral {
+  background: var(--border-strong);
+}
+
+.legend__value {
+  color: var(--text);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- the day's headline ---------------------------------------------------- */
+
+.headline {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.headline__value {
+  font-size: var(--font-size-2xl);
+  font-weight: 650;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.headline__label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  line-height: var(--leading-snug);
+}
+
+/* --- fleet follow-ups -----------------------------------------------------
+ *
+ * The two fleet facts that are not a status. Both render at zero, because their
+ * absence is the good news and an operator should be able to see it is still
+ * true -- a row that disappears when it is fine is a row nobody learns to look
+ * for.
+ */
+.follow-ups {
+  list-style: none;
+  margin: var(--space-4) 0 0;
+  padding: var(--space-4) 0 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.follow-up {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.follow-up__count {
+  font-size: var(--font-size-md);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+}
+
+.follow-up__label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+}
+
+.follow-up__detail {
+  display: block;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+}
+
+/* --- site spread ----------------------------------------------------------
+ *
+ * Where the fleet stands, per site. Both halves of every row come from the
+ * terminal list rather than one from the list and one from the site's own
+ * count, so a row always adds up to itself.
+ */
+.site-spread {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.site-spread__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+}
+
+.site-spread__name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+  font-weight: 550;
+}
+
+.site-spread__count {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The bar spans both columns, on the line below its own label. */
+.site-spread__row .meter__track {
+  grid-column: 1 / -1;
+}
+
+/* --- recent changes -------------------------------------------------------
+ *
+ * The audit trail at a glance. `changes` is deliberately absent: it is
+ * free-form, and a dashboard is the wrong altitude for a diff.
+ */
+.change-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.change {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.change__what {
+  font-size: var(--font-size-sm);
+  font-weight: 550;
+}
+
+.change__who {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* --- misc ------------------------------------------------------------------ */
+
+.event__outcome {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  font-size: var(--font-size-xs);
+}
+
+@media (max-width: 680px) {
+  /*
+   * TWO ACROSS ON A PHONE RATHER THAN ONE.
+   *
+   * At the 190px floor a 390px handset lands on a single column, which turns
+   * five short counts into five full-width cards and roughly 500px of scroll
+   * before the first panel. 140px is the width the longest label and the widest
+   * value actually need, and it keeps the band to two rows -- which is the whole
+   * point of a band.
+   */
+  .dash__band {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+
+  /* The outcome cell is right-aligned in the table and must not stay that way
+   * once the row is a card and its label sits on the left. */
+  .event__outcome {
+    justify-content: flex-start;
+  }
+
+  .follow-up {
+    flex-wrap: wrap;
   }
 }

@@ -38,7 +38,7 @@ const ACTIONS: Record<string, ActionDefinition> = {
   SITE_CREATED: { label: 'Site created', tone: 'notable' },
   SITE_UPDATED: { label: 'Site updated', tone: 'neutral' },
   SITE_RETIRED: { label: 'Site retired', tone: 'destructive' },
-  SITE_KEY_ROTATED: { label: 'Site key rotated', tone: 'destructive' },
+  SITE_KEY_ROTATED: { label: 'Provisioning key rotated', tone: 'destructive' },
   SITE_SETTINGS_UPDATED: { label: 'Site settings updated', tone: 'neutral' },
 
   // Terminals

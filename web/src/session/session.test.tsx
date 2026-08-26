@@ -9,6 +9,7 @@ import { LoginPage } from '../auth/LoginPage'
 import { RequireAuth } from '../auth/guards'
 import { AppShell } from '../layout/AppShell'
 import { DashboardPage } from '../pages/DashboardPage'
+import { TerminalsListPage } from '../pages/terminals/TerminalsListPage'
 import { ApplicationPlaceholder } from '../pages/NotImplemented'
 import { SessionProvider } from './SessionProvider'
 import { makeSession, SITE_A, SITE_B } from '../test/fixtures'
@@ -33,6 +34,13 @@ function renderApp(initialPath = '/') {
         ),
         children: [
           { index: true, element: <DashboardPage /> },
+          /*
+            A SECOND SCREEN, so the site-scope tests can render something that
+            is NOT the overview. That distinction is the whole of what those
+            tests assert: the selection has exactly one reader, and a control
+            for it in the shell would sit above four screens that ignore it.
+          */
+          { path: 'terminals', element: <TerminalsListPage /> },
           { path: 'applications/:slug', element: <ApplicationPlaceholder /> },
         ],
       },
@@ -185,16 +193,98 @@ describe('the console the session describes', () => {
 })
 
 describe('site context', () => {
-  it('offers all sites when the operator is unscoped', async () => {
+  /*
+    THE OWNER'S CASE, WHICH IS EVERY OWNER OF EVERY COMPANY.
+
+    `all_sites` is true by role and `sites` is empty, because an owner holds no
+    explicit grants -- so the switcher's options came to exactly one, and the
+    shell rendered a select box offering "All sites" and nothing else in the top
+    bar of every screen. On Terminals that sat above the toolbar's own Site
+    filter, which does narrow that page's rows: two controls with the same
+    label, and the inert one both higher and more prominent.
+
+    The SELECTION is unchanged and still defaults to every site -- the overview
+    reads it and must keep working. What is gone is a control for a choice that
+    was never a choice.
+  */
+  it('renders no site control for an operator with nothing to choose between', async () => {
     resetServerState(makeSession({ all_sites: true, sites: [] }))
     renderApp()
 
     await screen.findByRole('heading', { name: 'Overview' })
-    const switcher = screen.getByRole('combobox')
-    expect(switcher).toHaveValue('ALL')
-    // Scoped to the switcher: the dashboard also reports "All sites" as the
-    // current scope, which is the same fact stated in a different place.
-    expect(within(switcher).getByRole('option', { name: 'All sites' })).toBeInTheDocument()
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'All sites' })).not.toBeInTheDocument()
+  })
+
+  /*
+    ---------------------------------------------------------------------------
+    THE SCOPE CONTROL SITS ON THE SCREEN IT SCOPES
+    ---------------------------------------------------------------------------
+
+    `SiteContext.selected` has exactly ONE reader in the application: the
+    overview. Every other screen ignores it. So a select in the shell's top bar
+    -- above the navigation, on every page -- made a claim the product could not
+    honour: an operator picked a site, opened Terminals, People, Events or
+    Activity, and saw the whole company with the name of one site still sitting
+    at the top of the page.
+
+    That failure is silent and confident, which is what makes it worth a test.
+    Nothing errors and every page renders; the figures are simply about a
+    different set of doors than the reader believes. On Events that is a safety
+    question -- "was anybody refused here today" -- answered over every site.
+
+    IT WAS NOT MADE GLOBAL INSTEAD because it cannot honestly be: people carry
+    no site on this platform, the audit endpoint takes no site, and the two
+    screens that CAN be narrowed already have their own site filter in their own
+    toolbars. The two tests below are the two halves of the property.
+  */
+  it('KEEPS THE SITE SELECT OFF THE SHELL, which spans screens that ignore it', async () => {
+    resetServerState(makeSession({ role: 'MANAGER', all_sites: false, sites: [SITE_A, SITE_B] }))
+    renderApp()
+
+    await screen.findByRole('heading', { name: 'Overview' })
+
+    // The choice is real for this operator -- two grants -- so the control does
+    // render. It renders inside the page, not in the banner.
+    const banner = screen.getByRole('banner')
+    expect(within(banner).queryByRole('combobox')).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox')).toBeInTheDocument()
+  })
+
+  it('OFFERS NO SITE SCOPE ON A SCREEN THAT DOES NOT READ ONE', async () => {
+    /*
+      Terminals has its own Site filter, over its own rows, backed by the list
+      endpoint. What must not be here is a SECOND site control in the chrome
+      above it -- which is what the top bar used to supply, inert, and more
+      prominent than the one that worked.
+    */
+    resetServerState(makeSession({ role: 'MANAGER', all_sites: false, sites: [SITE_A, SITE_B] }))
+    renderApp('/terminals')
+
+    await screen.findByRole('heading', { name: 'Terminals' })
+
+    const banner = screen.getByRole('banner')
+    expect(within(banner).queryByRole('combobox')).not.toBeInTheDocument()
+    expect(within(banner).queryByText('Showing')).not.toBeInTheDocument()
+
+    // The page's own filter is untouched and still the one working control.
+    expect(screen.getByLabelText('Site')).toBeInTheDocument()
+  })
+
+  it('still states the site of an operator who has exactly one, on every screen', async () => {
+    /*
+      NOT A CONTROL, AND THEREFORE NOT MISLEADING. An operator holding one grant
+      has no scope to set, but every screen they open genuinely IS that site --
+      the API enforces the grant on every request. Stating it in the chrome is
+      true everywhere, which is precisely what the select was not.
+    */
+    resetServerState(makeSession({ role: 'MANAGER', all_sites: false, sites: [SITE_A] }))
+    renderApp('/terminals')
+
+    await screen.findByRole('heading', { name: 'Terminals' })
+    const banner = screen.getByRole('banner')
+    expect(within(banner).getByText(SITE_A.site_name)).toBeInTheDocument()
+    expect(within(banner).queryByRole('combobox')).not.toBeInTheDocument()
   })
 
   it('remembers the selected site per company', async () => {
@@ -227,6 +317,9 @@ describe('site context', () => {
   })
 
   it('does not offer "all sites" to a scoped operator', async () => {
+    // AUTHORIZATION IS UNCHANGED BY THE MOVE. The options are still built from
+    // the operator's own grants, and "all sites" is still offered only to
+    // somebody who reaches all of them.
     resetServerState(makeSession({ role: 'MANAGER', all_sites: false, sites: [SITE_A, SITE_B] }))
     renderApp()
 

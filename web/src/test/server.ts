@@ -2064,6 +2064,23 @@ export const handlers = [
     const limit = Number(url.searchParams.get('limit') ?? 50)
     const offset = Number(url.searchParams.get('offset') ?? 0)
 
+    /*
+      SITE NARROWING IS SERVER-SIDE AND HAS TO BE MOCKED AS SUCH.
+
+      A FieldEvent carries a site NAME and no id, so a client cannot narrow the
+      trail itself even if it wanted to — `site_id` on the request is the only
+      way to ask for one site's events. Resolving the id to a site here, and
+      matching on that site's name, is what the store does with a subquery.
+
+      Handled rather than ignored because a mock that silently drops a filter
+      lets a screen claim to be showing one site while showing all of them, and
+      the test would pass.
+    */
+    const siteId = url.searchParams.get('site_id') ?? ''
+    const siteName = siteId
+      ? (state.sites.find((site) => site.id === siteId)?.name ?? 'no such site')
+      : ''
+
     // FILTERED HERE, as the API does it, so a console that narrowed a fetched
     // page in the browser would fail against this mock exactly as it would
     // against the server.
@@ -2071,6 +2088,7 @@ export const handlers = [
       if (decision && event.decision !== decision) return false
       if (eventType && event.event_type !== eventType) return false
       if (serial && event.device_serial !== serial) return false
+      if (siteName && event.site_name !== siteName) return false
       if (from && event.occurred_at < from) return false
       if (to && event.occurred_at > to) return false
       if (search) {

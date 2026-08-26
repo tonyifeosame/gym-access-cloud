@@ -5,11 +5,11 @@ import { ErrorBoundary } from '../components/ErrorBoundary'
 import { SiteProvider } from '../context/SiteContext'
 import { useAuthenticatedSession, useSession } from '../session/useSession'
 import { navigationFor, type NavItem } from './navigation'
-import { SiteSwitcher } from './SiteSwitcher'
+import { SiteIndicator } from './SiteSwitcher'
 
 /**
- * The authenticated frame: identity and site context along the top, navigation
- * down the side, the routed page in the middle.
+ * The authenticated frame: identity along the top, navigation down the side,
+ * the routed page in the middle.
  *
  * The side navigation is built from the session, so what an operator sees is a
  * function of their company's enabled capabilities and their own role -- not of
@@ -37,11 +37,10 @@ export function AppShell() {
           <main className="shell__main" id="main" tabIndex={-1}>
             {/*
               THE BOUNDARY GOES INSIDE THE SHELL, not around it. A rendering
-              failure on one screen then leaves the navigation, the site
-              switcher and the sign-out button working — so an operator can go
-              somewhere else, or leave, without reloading. A boundary wrapped
-              around the whole shell would take all of that down with the page
-              that broke.
+              failure on one screen then leaves the navigation and the sign-out
+              button working — so an operator can go somewhere else, or leave,
+              without reloading. A boundary wrapped around the whole shell would
+              take all of that down with the page that broke.
 
               Keyed on the path, so navigating away clears it. Without that, one
               broken screen would keep showing its error for the rest of the
@@ -148,8 +147,19 @@ function TopBar() {
         <span className="topbar__company">{session.company.name}</span>
       </div>
 
+      {/*
+        WHERE THIS OPERATOR IS, NOT A CONTROL OVER WHERE THEY ARE LOOKING.
+
+        The site SELECT used to live here, and its position made a claim the
+        product could not honour: only the overview reads the selection, so
+        every other screen ignored it while it sat above them naming one site.
+        It now lives on the overview, which is the screen it governs. What is
+        left here is the read-only fact for an operator granted exactly one site
+        -- true on every screen, because the API enforces the grant on every
+        request -- and nothing at all for anybody else.
+      */}
       <div className="topbar__context">
-        <SiteSwitcher />
+        <SiteIndicator />
       </div>
 
       <div className="topbar__account">
