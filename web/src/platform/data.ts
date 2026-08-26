@@ -11,6 +11,7 @@ import type {
   CreateCompanyRequest,
   FirstOperatorRequest,
   FirstOperatorResponse,
+  OwnerRecoveryResponse,
   PlatformCompaniesResponse,
   PlatformCompany,
   UpdateCompanyRequest,
@@ -102,5 +103,24 @@ export function useCreateFirstOperator(
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: platformKeys.companies.all })
     },
+  })
+}
+
+/**
+ * Issues recovery for a tenant's sole locked-out administrator.
+ *
+ * NOTHING IS INVALIDATED, and that is not an omission. This changes no field the
+ * company detail shows — no count moves, no state changes — so refetching would
+ * redraw the page to prove nothing happened. What DID happen is a one-time link,
+ * and it lives in the panel this returns to and nowhere else.
+ *
+ * As with the invitation, the token is never written into the query cache: the
+ * caller renders it once and resets the mutation on dismiss.
+ */
+export function useIssueOwnerRecovery(
+  companyId: string,
+): UseMutationResult<OwnerRecoveryResponse, Error, void> {
+  return useMutation({
+    mutationFn: () => platform.issueOwnerRecovery(companyId),
   })
 }

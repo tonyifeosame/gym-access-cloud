@@ -9,6 +9,7 @@ import {
   CompanyActivationDialog,
   EditCompanyDialog,
   FirstOperatorDialog,
+  OwnerRecoveryDialog,
 } from './CompanyDialogs'
 import { useCompany } from './data'
 
@@ -35,6 +36,7 @@ export function CompanyDetailPage() {
   const [editing, setEditing] = useState(false)
   const [changingActive, setChangingActive] = useState(false)
   const [issuingOwner, setIssuingOwner] = useState(false)
+  const [recovering, setRecovering] = useState(false)
 
   if (query.isPending) return <LoadingState label="Loading company…" />
 
@@ -202,7 +204,7 @@ export function CompanyDetailPage() {
                 {company.terminal_count > 0
                   ? `${company.terminal_count} terminal${company.terminal_count === 1 ? '' : 's'} registered.`
                   : 'No terminals yet.'}{' '}
-                Hardware registers itself at the door using its site&apos;s
+                Hardware registers itself in the field using its site&apos;s
                 provisioning key — neither console can do it on the device&apos;s
                 behalf.
               </p>
@@ -226,6 +228,53 @@ export function CompanyDetailPage() {
           </li>
         </ol>
       </section>
+
+      {/* --- support -------------------------------------------------------- */}
+      {/*
+        SHOWN ONLY ONCE A COMPANY HAS AN OPERATOR, because a company with none
+        is an onboarding problem and the checklist above already offers the
+        invitation that solves it.
+
+        NOT PREDICTED HERE. `operator_count` counts every account including
+        managers and viewers, while the server's rule is about owners and
+        administrators — so the console cannot tell in advance whether a
+        particular company qualifies, and a disabled button derived from the
+        wrong number would refuse somebody who is entitled to this. The control
+        is offered, the dialog states the rule, and the server's 409 is shown as
+        the ordinary answer it is. Same reasoning as the schedule delete in the
+        tenant console.
+      */}
+      {hasOwner ? (
+        <section className="panel" aria-labelledby="support-heading">
+          <div className="panel__header">
+            <h2 className="panel__title" id="support-heading">
+              Support
+            </h2>
+            <p className="field__hint">
+              For a customer who cannot get into their own console.
+            </p>
+          </div>
+
+          <ul className="settings-links">
+            <li>
+              <button
+                type="button"
+                className="button"
+                onClick={() => setRecovering(true)}
+              >
+                Issue a recovery link
+              </button>
+              <span>
+                A customer whose company has only one owner or administrator has
+                nobody to reset their password for them, and AccessLink cannot email
+                them the link that &ldquo;Forgotten your password?&rdquo; mints. This
+                issues that link here instead, once, for you to pass on. A company
+                with a second administrator is refused — they can do it themselves.
+              </span>
+            </li>
+          </ul>
+        </section>
+      ) : null}
 
       {/* --- details -------------------------------------------------------- */}
       <section className="panel" aria-labelledby="company-details-heading">
@@ -297,6 +346,10 @@ export function CompanyDetailPage() {
       ) : null}
       {issuingOwner ? (
         <FirstOperatorDialog open company={company} onClose={() => setIssuingOwner(false)} />
+      ) : null}
+
+      {recovering ? (
+        <OwnerRecoveryDialog open company={company} onClose={() => setRecovering(false)} />
       ) : null}
     </div>
   )

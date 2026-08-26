@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { getCsrfToken, setCsrfToken } from '../api/csrf'
 import { makePlatformCompany, makePlatformSession, makeSession } from '../test/fixtures'
 import { makeTestQueryClient, renderWithQuery } from '../test/render'
+import { expectNoDoorWording } from '../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../test/server'
 import { CompaniesPage } from './CompaniesPage'
 import { CompanyDetailPage } from './CompanyDetailPage'
@@ -161,6 +162,34 @@ describe('platform administration is a separate identity', () => {
     await screen.findByRole('heading', { name: 'AccessLink' })
     expect(screen.getByText(/It is not the operator console/i)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /the console/i })).toHaveAttribute('href', '/login')
+  })
+})
+
+/*
+  THE STAFF SURFACE USES THE SAME VOCABULARY AS THE CUSTOMER ONE.
+
+  Two sentences here described a customer's estate as doors: the sign-in note
+  that sends operators to the right console, and the checklist line explaining
+  that hardware enrols itself. Both are read by AccessLink staff about customers
+  who may have no doors at all, and the login page is publicly reachable.
+*/
+describe('the platform console avoids door vocabulary too', () => {
+  it('sends operators to their own console without naming doors', async () => {
+    resetServerState(null)
+    renderPlatform()
+
+    await screen.findByRole('heading', { name: 'AccessLink' })
+    expect(screen.getByText(/access points, people or terminals/)).toBeInTheDocument()
+    expectNoDoorWording('The platform sign-in page', document.body.textContent ?? '')
+  })
+
+  it('says hardware enrols itself in the field', async () => {
+    signInAsPlatform()
+    renderPlatform('/platform/companies/company-2')
+
+    await screen.findByRole('heading', { name: 'Onboarding' })
+    expect(screen.getByText(/registers itself in the field/)).toBeInTheDocument()
+    expectNoDoorWording('The company onboarding checklist', document.body.textContent ?? '')
   })
 })
 
@@ -347,6 +376,110 @@ describe('the onboarding checklist', () => {
     // error that means nothing to whoever pressed it.
     expect(screen.queryByRole('button', { name: 'Issue an invitation' })).not.toBeInTheDocument()
     expect(screen.getByText(/this surface cannot add another/i)).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Recovery of last resort (P0-1)
+// ---------------------------------------------------------------------------
+
+/*
+  THE DEAD END THIS CLOSES. Self-service signup creates a company with exactly
+  one account, an OWNER. If that person forgets their password, nobody inside
+  their company can reset it -- the console's own reset is ADMIN-gated and needs
+  a second administrator -- and AccessLink cannot email them the link that
+  "Forgotten your password?" mints. Before this control existed the only way back
+  was somebody reading a token out of a production log.
+
+  The tests below are mostly about the BOUNDARY rather than the happy path,
+  because a vendor credential that resets a customer's owner account is the
+  sharpest thing on this surface. It has to work for the company of one and stop
+  working the moment the company can help itself.
+*/
+describe('recovering a locked-out customer', () => {
+  it('offers recovery for a company that has an operator', async () => {
+    signInAsPlatform()
+    renderPlatform('/platform/companies/company-1')
+
+    await screen.findByRole('heading', { name: 'Support' })
+    expect(
+      screen.getByRole('button', { name: 'Issue a recovery link' }),
+    ).toBeInTheDocument()
+  })
+
+  it('does NOT offer it for a company nobody can sign in to yet', async () => {
+    // That is an onboarding problem, and the checklist above already offers the
+    // invitation that solves it. Two controls for two different problems.
+    signInAsPlatform()
+    renderPlatform('/platform/companies/company-2')
+
+    await screen.findByRole('heading', { name: 'Onboarding' })
+    expect(screen.queryByRole('heading', { name: 'Support' })).not.toBeInTheDocument()
+  })
+
+  it('states the rule and the audit consequence before doing anything', async () => {
+    const user = userEvent.setup()
+    signInAsPlatform()
+    renderPlatform('/platform/companies/company-1')
+
+    await user.click(await screen.findByRole('button', { name: 'Issue a recovery link' }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(
+      within(dialog).getByText(/only when they cannot do it themselves/i),
+    ).toBeInTheDocument()
+    // The customer sees it happened. A recovery visible only to the party using
+    // it is one nobody can hold to account.
+    expect(
+      within(dialog).getByText(/customer will see that you did this/i),
+    ).toBeInTheDocument()
+    // And the vendor never learns the password.
+    expect(within(dialog).getByText(/they set it themselves from the link/i)).toBeInTheDocument()
+  })
+
+  it('shows the link ONCE for a company of one', async () => {
+    const user = userEvent.setup()
+    signInAsPlatform()
+    // The company signup creates: one owner, nobody else. The mock defaults to
+    // exactly this, which is the point -- it is the ordinary case.
+    renderPlatform('/platform/companies/company-1')
+
+    await user.click(await screen.findByRole('button', { name: 'Issue a recovery link' }))
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Issue recovery link',
+      }),
+    )
+
+    expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
+    // Named, so it cannot be sent to the wrong person.
+    expect(screen.getByText(/password reset link for/i)).toBeInTheDocument()
+  })
+
+  it('REPORTS THE REFUSAL for a company that can recover itself', async () => {
+    // The predicate that stops this being a standing way into every customer.
+    // The server's own sentence is shown, because it distinguishes "they have a
+    // second administrator" from "they have none at all".
+    const user = userEvent.setup()
+    signInAsPlatform()
+    state.administratorCount['company-1'] = 3
+    renderPlatform('/platform/companies/company-1')
+
+    await user.click(await screen.findByRole('button', { name: 'Issue a recovery link' }))
+    await user.click(
+      within(screen.getByRole('dialog')).getByRole('button', {
+        name: 'Issue recovery link',
+      }),
+    )
+
+    // The SERVER'S own sentence, matched on the half that appears nowhere else
+    // on the screen — the dialog's own description mentions the rule too, and
+    // asserting on that would pass whether or not the refusal was reported.
+    expect(
+      await screen.findByText(/single administrator is locked out/i),
+    ).toBeInTheDocument()
+    // And no credential was produced.
+    expect(screen.queryByText(/shown once and cannot be recovered/i)).not.toBeInTheDocument()
   })
 })
 

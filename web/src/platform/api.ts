@@ -4,6 +4,7 @@ import type {
   CreateCompanyRequest,
   FirstOperatorRequest,
   FirstOperatorResponse,
+  OwnerRecoveryResponse,
   PlatformCompaniesResponse,
   PlatformCompany,
   PlatformSession,
@@ -125,6 +126,29 @@ export function createFirstOperator(
   return api.post<FirstOperatorResponse>(
     `/api/v1/platform/companies/${encodeURIComponent(companyId)}/operators`,
     body,
+    SCOPE,
+  )
+}
+
+/**
+ * Recovery of last resort for a tenant whose administration is locked out.
+ *
+ * ONLY FOR A COMPANY WITH ONE OWNER-OR-ADMIN, refused with 409 otherwise, by a
+ * query predicate rather than a check. That is the rule that keeps this from
+ * being a standing way into every customer: the moment a tenant has a second
+ * administrator, one of their own people issues the reset from their own
+ * console and this route stops working for them.
+ *
+ * It exists because self-service signup creates a company of ONE, and a company
+ * of one had no route back in at all — this platform cannot deliver the token
+ * that forgot-password mints, and the console's own reset needs a colleague.
+ *
+ * The link comes back once and is never written into the query cache.
+ */
+export function issueOwnerRecovery(companyId: string): Promise<OwnerRecoveryResponse> {
+  return api.post<OwnerRecoveryResponse>(
+    `/api/v1/platform/companies/${encodeURIComponent(companyId)}/recovery`,
+    undefined,
     SCOPE,
   )
 }

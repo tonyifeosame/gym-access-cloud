@@ -308,6 +308,17 @@ function guardTerminal(
   return null
 }
 
+/** A day after the newest entry already in the catalogue. See the note below. */
+function nextPublishDate(): string {
+  const newest = state.firmware
+    .map((entry) => entry.published_at ?? entry.created_at)
+    .sort()
+    .pop()
+  const base = newest ? new Date(newest) : new Date('2026-01-01T00:00:00Z')
+  base.setUTCDate(base.getUTCDate() + 1)
+  return base.toISOString()
+}
+
 export const handlers = [
   // --- auth ---------------------------------------------------------------
 
@@ -646,6 +657,58 @@ export const handlers = [
     return json(response, 201)
   }),
 
+  /*
+    Recovery of last resort, for a tenant whose administration is locked out.
+
+    THE PREDICATE IS REPRODUCED HERE RATHER THAN ASSUMED. The server refuses
+    unless the target is the company's ONLY owner-or-administrator, and that
+    refusal is the whole safety argument for the route existing at all -- so the
+    mock refuses too, and a console that shipped offering this for a healthy
+    multi-admin tenant would fail here rather than in production.
+  */
+  http.post('*/api/v1/platform/companies/:companyId/recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const companyId = String(params.companyId)
+    const company = state.companies.find((entry) => entry.id === companyId)
+    if (!company) return json({ error: 'Company not found' }, 404)
+
+    const administrators = state.administratorCount[companyId] ?? 1
+    if (administrators > 1) {
+      return json(
+        {
+          error:
+            'That company has more than one administrator, so one of them can ' +
+            'issue the reset from their own console. This route is only for a ' +
+            'company whose single administrator is locked out.',
+        },
+        409,
+      )
+    }
+    if (administrators < 1) {
+      return json(
+        { error: 'That company has no active owner or administrator to recover.' },
+        409,
+      )
+    }
+
+    return json(
+      {
+        operator: {
+          id: 'operator-owner-1',
+          email: company.contact_email || 'owner@example.com',
+          full_name: 'Company Owner',
+          role: 'OWNER',
+        },
+        reset: makeCredentialToken({ purpose: 'RESET' }),
+        delivery: DELIVERY_NOTICE,
+      },
+      201,
+    )
+  }),
+
   // --- company ------------------------------------------------------------
 
   http.get('*/api/v1/console/company', ({ request }) => {
@@ -700,6 +763,16 @@ export const handlers = [
 
   // --- sites --------------------------------------------------------------
 
+  /*
+    SEARCHED HERE, AS THE API SEARCHES IT.
+
+    A mock that ignored `q` would answer every request identically, so a test
+    that typed into the search box and asserted on the result would pass whether
+    or not the console sent the parameter at all — and would keep passing if the
+    server-side predicate were removed. The scope filter is applied FIRST and
+    unconditionally, mirroring the single statement the store uses: a term
+    narrows within a grant and can never widen it.
+  */
   http.get('*/api/v1/console/sites', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
@@ -1004,8 +1077,8 @@ export const handlers = [
     if (failure) return json({ error: 'Failed to rotate the site key' }, failure)
 
     const key = `ats_${'ff99ee88'.repeat(8)}`
-    // Nothing is written back onto the stored site: a rotation changes no
-    // field any read endpoint returns. See the note on site creation above.
+    // Nothing is written back onto the stored site: a rotation changes no field
+    // any read endpoint returns. See the note on site creation above.
 
     // Terminals with no device credential of their own still depend on the
     // site key; the server reports them and so does this.
@@ -2291,6 +2364,23 @@ export const handlers = [
       device_type: deviceType,
       release_channel: channel,
       is_current: false,
+      /*
+        STAMPED AS THE NEWEST THING IN THE CATALOGUE, which is what publishing a
+        build actually produces.
+
+        `makeFirmwareVersion` defaults `created_at` to 2026-01-01 and this
+        handler did not override it, so a build "published" during a test landed
+        dated months BEFORE the entries it was published after. That was
+        invisible while the console rendered one neutral badge for everything
+        that was not the current target; it stopped being invisible the moment
+        the page began distinguishing a newer build from an older one, and it
+        would have had the console call a just-published build "Older".
+
+        Derived from the existing rows rather than the clock so the result is
+        deterministic: a test that depends on the real date fails on a different
+        day.
+      */
+      created_at: nextPublishDate(),
     })
     state.firmware = [...state.firmware, created]
     return json(created, 201)

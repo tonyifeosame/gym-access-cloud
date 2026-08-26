@@ -10,7 +10,12 @@ import { HandoverLinkPanel } from '../components/HandoverLinkPanel'
 import { useNotifications } from '../components/Notifications'
 import { InfoNote } from '../components/states'
 import { submitErrorMessage, useForm, validators } from '../components/useForm'
-import { useCreateCompany, useCreateFirstOperator, useUpdateCompany } from './data'
+import {
+  useCreateCompany,
+  useCreateFirstOperator,
+  useIssueOwnerRecovery,
+  useUpdateCompany,
+} from './data'
 import type { PlatformCompany } from './types'
 
 /**
@@ -607,6 +612,148 @@ export function FirstOperatorDialog({
           </button>
         </FormActions>
       </form>
+    </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Recovery of last resort
+// ---------------------------------------------------------------------------
+
+/**
+ * Getting a locked-out customer back into their own console.
+ *
+ * THE CASE THIS EXISTS FOR. Self-service signup creates a company with exactly
+ * one account, an OWNER. If that person forgets their password there is nothing
+ * they can do: this platform cannot deliver the link that "Forgotten your
+ * password?" mints, and the console's own reset needs a SECOND administrator to
+ * issue it. Before this control existed, the only way back was somebody reading
+ * a token out of a production log by hand.
+ *
+ * IT IS NOT A GENERAL RESET AND MUST NOT BE PRESENTED AS ONE. The server refuses
+ * unless the target is the company's only owner-or-administrator — the one case
+ * where nobody inside the company can do it instead. A customer with two
+ * administrators recovers themselves, and the 409 that says so is reported as
+ * the ordinary answer it is rather than as a failure.
+ *
+ * A PLAIN DIALOG RATHER THAN ConfirmDialog, and the reason is structural: that
+ * component closes itself the moment `onConfirm` resolves, which is exactly when
+ * the one-time link arrives. The panel would be unmounted before it rendered.
+ * Two steps in one dialog, like the first-operator flow above.
+ */
+export function OwnerRecoveryDialog({
+  open,
+  company,
+  onClose,
+}: {
+  open: boolean
+  company: PlatformCompany
+  onClose: () => void
+}) {
+  const issue = useIssueOwnerRecovery(company.id)
+  const [issued, setIssued] = useState<{ token: CredentialToken; name: string } | null>(null)
+
+  function dismiss() {
+    issue.reset()
+    setIssued(null)
+    onClose()
+  }
+
+  async function confirm() {
+    try {
+      const result = await issue.mutateAsync()
+      setIssued({
+        token: result.reset,
+        name: result.operator.full_name || result.operator.email,
+      })
+    } catch {
+      // Held on the mutation and rendered below. The dialog stays open so
+      // whoever pressed it can read why and stop, rather than being returned to
+      // the page with nothing said.
+    }
+  }
+
+  if (issued) {
+    return (
+      <Dialog
+        open={open}
+        title="Recovery link issued"
+        size="wide"
+        dismissible={false}
+        onClose={dismiss}
+      >
+        <HandoverLinkPanel
+          token={issued.token}
+          operatorName={issued.name}
+          onDismiss={dismiss}
+        />
+      </Dialog>
+    )
+  }
+
+  const error = issue.error
+  const conflict = error instanceof ApiError && error.status === 409
+
+  return (
+    <Dialog
+      open={open}
+      title={`Issue a recovery link for ${company.name}?`}
+      description="For a customer who cannot recover themselves. This does not work for a company that has more than one administrator."
+      dismissible={!issue.isPending}
+      onClose={dismiss}
+      size="wide"
+      footer={
+        <>
+          <button
+            type="button"
+            className="button button--quiet"
+            onClick={dismiss}
+            disabled={issue.isPending}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="button button--danger"
+            onClick={() => void confirm()}
+            disabled={issue.isPending}
+          >
+            {issue.isPending ? 'Issuing…' : 'Issue recovery link'}
+          </button>
+        </>
+      }
+    >
+      <InfoNote title="What this does">
+        It mints a <strong>single-use password reset link</strong> for that
+        company&apos;s only owner or administrator and shows it here once. Any reset
+        link already outstanding for that account stops working, so somebody
+        holding an older one can no longer use it.
+      </InfoNote>
+
+      <InfoNote tone="warning" title="Only when they cannot do it themselves">
+        A company with a second owner or administrator is refused — one of their own
+        people issues the reset from their own console, where the role matrix
+        applies. This route exists for the company of one that signup creates, which
+        has nobody to ask.
+      </InfoNote>
+
+      <InfoNote title="The customer will see that you did this">
+        It is written into their own activity trail, marked as having come from
+        AccessLink rather than from somebody inside their company. You never learn
+        their password — they set it themselves from the link.
+      </InfoNote>
+
+      <FormError
+        message={
+          conflict
+            ? // The server's own sentence. It distinguishes "they have a second
+              // administrator" from "they have none at all", and those send
+              // whoever is reading this to two different places.
+              (error as ApiError).message
+            : submitErrorMessage(error)
+        }
+        requestId={error instanceof ApiError ? error.requestId : null}
+      />
     </Dialog>
   )
 }

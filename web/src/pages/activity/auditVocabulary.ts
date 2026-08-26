@@ -93,6 +93,18 @@ const ACTIONS: Record<string, ActionDefinition> = {
   COMPANY_REACTIVATED: { label: 'Company reactivated', tone: 'notable' },
   COMPANY_FIRST_OPERATOR_CREATED: { label: 'First operator created', tone: 'notable' },
 
+  // AccessLink issuing a password reset for a company whose single administrator
+  // was locked out. Written by the PLATFORM surface, like the four above.
+  //
+  // NAMED FOR WHO DID IT, not for what it is. "Password reset link issued" is
+  // already taken by the administrator-issued reset inside the company, and an
+  // owner scanning their trail for "did our vendor touch our account" must be
+  // able to tell the two apart. DESTRUCTIVE tone because it is the entry
+  // somebody looking for exactly that would come here to find.
+  COMPANY_OWNER_RECOVERY_ISSUED: {
+    label: 'Recovery link issued by AccessLink',
+    tone: 'destructive',
+  },
 }
 
 export function describeAction(action: string): ActionDefinition {
