@@ -35,6 +35,24 @@ export interface ConfirmDialogProps {
   cancelLabel?: string
   /** Exact text the operator must type. Reserve for the irreversible. */
   confirmPhrase?: string
+  /**
+   * Why this action cannot be taken right now. Present means REFUSED.
+   *
+   * FOR WHEN THE CONSOLE CANNOT ESTABLISH WHAT THE ACTION WOULD DO — not for a
+   * permission, which should not have offered the control at all, and not for a
+   * validation error, which belongs on the field.
+   *
+   * The case this exists for is the firmware rollout: its confirmation counts
+   * the terminals a promotion would reach, and that count comes from a separate
+   * request. When that request fails, "0 affected" and "we do not know" are the
+   * same value — and the second must never be confirmable, because the operator
+   * would be agreeing to something nobody has described to them.
+   *
+   * Rendered where the typed phrase would be and disables the confirm button, so
+   * a blocked dialog still says what the action WOULD do; it simply will not let
+   * it happen yet.
+   */
+  blocked?: ReactNode
   tone?: 'danger' | 'default'
   /**
    * Extra input the action itself needs — a reason for the audit trail, most
@@ -61,6 +79,7 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   confirmPhrase,
+  blocked,
   tone = 'danger',
   children,
   onConfirm,
@@ -83,7 +102,9 @@ export function ConfirmDialog({
   }, [open])
 
   const phraseSatisfied = !confirmPhrase || typed.trim() === confirmPhrase
-  const canConfirm = phraseSatisfied && !pending
+  // `blocked` outranks everything, including a correctly typed phrase: it means
+  // the console cannot describe the action, and a phrase confirms a description.
+  const canConfirm = phraseSatisfied && !pending && !blocked
 
   async function confirm() {
     if (!canConfirm) return
@@ -132,6 +153,13 @@ export function ConfirmDialog({
       {detail ? <p className="confirm__detail">{detail}</p> : null}
 
       {children}
+
+      {blocked ? (
+        <div className="notice notice--danger" role="status">
+          <h3 className="notice__title">This cannot be confirmed yet</h3>
+          <div>{blocked}</div>
+        </div>
+      ) : null}
 
       {confirmPhrase ? (
         <div className="field">

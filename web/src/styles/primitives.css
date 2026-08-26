@@ -86,6 +86,21 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
+/*
+  A <summary> IS FOCUSABLE AND MATCHED NONE OF THE ABOVE.
+
+  It is natively keyboard-focusable and is not an <a>, a <button> or a
+  [tabindex], so it fell through this list and drew Chrome's own 1px `auto`
+  outline while every control beside it drew the console's 2px accent ring.
+  Measured on the Firmware screen, where four disclosures sit in the tab order
+  directly before the primary action -- and true of the terminal page's
+  technical details and the site page's advanced panel all along.
+
+  Not a rule violation; a keyboard user could see where they were. It is the
+  kind of inconsistency that reads as "this control is different somehow", on
+  exactly the controls that hide the rest of the page's detail.
+*/
+summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -883,6 +898,148 @@ textarea.field__input {
   margin-bottom: var(--space-4);
 }
 
+/* --- disclosure -----------------------------------------------------------
+ *
+ * A <details> INSIDE A PANEL, which until now had no styling of its own at all.
+ * The only styled disclosures in the console were `.technical > summary` on the
+ * terminal page and the one inside the credential panel, so the site page's
+ * "Advanced: pre-authorise a terminal" rendered with the browser's default
+ * marker, default cursor and no spacing — a raw black triangle sitting in an
+ * otherwise designed surface, which reads as unfinished rather than as quiet.
+ *
+ * The marker is replaced rather than removed: a disclosure with no affordance is
+ * a heading nobody presses. It rotates on open, and it is a MARGIN-side glyph so
+ * the summary text stays on one alignment with the panel titles above it.
+ */
+
+.disclosure__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--text);
+  /* The default triangle, replaced below. Safari needs the -webkit- form. */
+  list-style: none;
+  /* A comfortable press target on a phone without changing the visual weight. */
+  min-height: 24px;
+}
+
+.disclosure__summary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosure__summary::before {
+  content: '';
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 6px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  transition: transform 120ms ease;
+}
+
+/* `prefers-reduced-motion` is honoured globally, but the rotation is stated
+   here too because it is the only transform in this block. */
+@media (prefers-reduced-motion: reduce) {
+  .disclosure__summary::before {
+    transition: none;
+  }
+}
+
+.disclosure[open] > .disclosure__summary::before {
+  transform: rotate(90deg);
+}
+
+.disclosure__summary:hover {
+  color: var(--accent);
+}
+
+.disclosure__body {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+/* --- the site's administrative actions ------------------------------------
+ *
+ * The three site operations that stop hardware working, grouped at the end of
+ * the page rather than sitting in its header looking like Edit. The border is
+ * the whole point: it says "these are not the same kind of thing as everything
+ * above" before any label is read.
+ *
+ * ON A PHONE THE BUTTONS STACK FULL WIDTH. Wrapping them, which is what the page
+ * header did, is how Retire ends up occupying the position Deactivate held a
+ * moment earlier at a slightly different viewport width.
+ */
+
+.panel--danger {
+  border-color: var(--border-strong);
+}
+
+.danger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+@media (max-width: 680px) {
+  .danger-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* --- a panel's own actions ------------------------------------------------
+ *
+ * The button that belongs to a panel rather than to the page header. The
+ * Firmware screen's "Update N terminals to X" is the first of these: it is the
+ * whole point of the card it sits in, and putting it in the page header --
+ * where "Publish a build" used to be -- would separate the decision from the
+ * numbers it is being taken on.
+ *
+ * STACKS FULL WIDTH ON A PHONE, exactly as `.danger-actions` does. A primary
+ * action that shrinks to fit its label is one a thumb misses; these two sets of
+ * rules are separate only because their tone and placement differ. */
+.panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-start: var(--space-4);
+}
+
+@media (max-width: 680px) {
+  .panel__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* --- a panel inside a panel -----------------------------------------------
+ *
+ * One catalogue group, inside the Advanced disclosure. It needs the grouping a
+ * panel gives it and NOT the panel's own surface: a white card on a white card
+ * reads as a rendering fault, and three of them nested inside a fourth reads as
+ * a form that has gone wrong. So it keeps the spacing and the heading and drops
+ * the background, the border and the shadow. */
+.panel--nested {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding-inline: 0;
+  padding-block: var(--space-4) 0;
+  border-block-start: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.panel--nested:first-of-type {
+  border-block-start: 0;
+}
+
 /* --- editor tabs --------------------------------------------------------- */
 
 .tabs {
@@ -1101,6 +1258,29 @@ textarea.field__input {
 .detail-list dd {
   margin: 0;
   font-size: var(--font-size-sm);
+}
+
+/* Identifiers kept out of the way of the answer somebody came for: release
+   channel, hardware revision, build number and the rest are what gets read to a
+   support engineer, not what an operator opened the page to see. */
+.technical {
+  margin-block-start: var(--space-4);
+  font-size: var(--font-size-sm);
+}
+
+.technical > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  margin-block-end: var(--space-3);
+  /*
+    24px, the WCAG 2.2 (2.5.8, AA) target minimum. A summary's box is its line
+    box, which at this size measured 20px -- caught the moment the firmware rows
+    grew a disclosure of their own, and true of the terminal page's technical
+    details all along. `display: list-item` is kept so the browser's own marker
+    stays; only the box grows.
+  */
+  min-height: 24px;
+  padding-block: 2px;
 }
 
 @media (max-width: 680px) {
@@ -1511,6 +1691,25 @@ textarea.field__input {
   display: flex;
   gap: var(--space-2);
   flex: 0 0 auto;
+  /* Wraps so an action can carry a line explaining why it is unavailable. With a
+     single control that fits, this changes nothing for the existing callers. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.rule__actions .field__hint {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: end;
+  max-width: 24ch;
+}
+
+/* A digest or a download address inside the image-details disclosure.
+ *
+ * 64 hexadecimal characters and a 127-character URL have no spaces to break at,
+ * so without this they set the width of the row and push the panel sideways. */
+.rule__code {
+  overflow-wrap: anywhere;
 }
 
 .window-list {
