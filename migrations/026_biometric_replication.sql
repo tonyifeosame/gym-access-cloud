@@ -55,7 +55,18 @@ BEGIN;
 -- will look first: an attacker who holds the running server -- its environment
 -- or its process memory -- and this database can decrypt every template in it.
 -- The claim in 012 that material is sealed "under a key the server never holds"
--- is FALSE as of this migration, and is corrected there in the same commit.
+-- is FALSE, and 012 STILL SAYS IT. That is deliberate: 012 is applied in
+-- production and its checksum is recorded in schema_migrations, so editing it
+-- would make deploy/migrate.sh refuse to run -- it hashes the whole file and
+-- cannot tell a comment from a statement. An applied migration is a historical
+-- record of what was run, not a document to keep current.
+--
+-- So the correction lives HERE, in the migration that makes the claim false,
+-- and in models/identity.go and docs/sealing-key-lifecycle.md. A reader who
+-- starts at 012 is one grep from this file; a reader who starts here has the
+-- truth immediately. THE TRUE STATEMENT: the database alone yields nothing;
+-- the database plus the master key in the server's environment yields
+-- everything.
 CREATE TABLE IF NOT EXISTS company_sealing_keys (
     id         BIGSERIAL PRIMARY KEY,
     public_id  UUID NOT NULL DEFAULT gen_random_uuid(),

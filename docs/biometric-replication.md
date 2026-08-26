@@ -69,10 +69,17 @@ What is achievable now, and what §3 delivers:
 
 That is still exactly the threat the migration set out to defeat — a backup, a
 replica, a support engineer with `SELECT`, an injection on a query touching
-`credentials`. It is a smaller claim than the one written down, and the comment
-must be corrected to it in the same commit that adds the key. This codebase's
-comments are load-bearing; leaving a stronger claim standing than the code
-delivers is the one outcome worse than the weaker guarantee.
+`credentials`. It is a smaller claim than the one written down, and this
+codebase's comments are load-bearing: leaving a stronger claim standing than the
+code delivers is the one outcome worse than the weaker guarantee.
+
+**Where the correction actually went.** `models/identity.go` was corrected.
+`migrations/012` was NOT, and must not be: it is applied in production and its
+checksum is recorded in `schema_migrations`, so editing it makes
+`deploy/migrate.sh` refuse to apply anything at all — it hashes the whole file
+and cannot tell a comment from a statement. An applied migration records what
+was run. So the correction lives in `026`, the migration that makes the claim
+false, and in `docs/sealing-key-lifecycle.md` §5.
 
 The stronger property (per-terminal public keys, the server as a blind relay,
 a re-wrap job when a new terminal joins) is a clean later step —

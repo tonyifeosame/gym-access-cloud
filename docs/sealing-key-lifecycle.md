@@ -17,7 +17,7 @@ about `company_sealing_keys`.
 | 1. Key scope | **Per company**, as recommended. One `ACTIVE` key per company, enforced by a partial unique index rather than by the application. |
 | 2. Where `SEALING_MASTER_KEY` lives | **Still open**, and it is a deployment choice rather than a code one. The server reads it from the environment and refuses to start if this installation holds sealing keys it cannot unwrap. |
 | 3. Accepting T7 | **Accepted for M1.** There is no rotation endpoint: a lost or stolen terminal permanently compromises its company's material, and §3 L5 and L7 are the record of what that means. |
-| 4. Correcting the `012` and `models/identity.go` comments | **Done**, in the same commit as the implementation. Both now state the weaker, true claim of §5. |
+| 4. Correcting the `012` and `models/identity.go` comments | **Partly.** `models/identity.go` states the weaker, true claim of §5. `012` is left exactly as applied -- its checksum is in `schema_migrations`, and editing it stops `deploy/migrate.sh` applying anything. The correction lives in `026` instead. |
 
 §3 L6 asks for the startup refusal to be asserted in
 `production_config_test.go`, and it is:
@@ -226,11 +226,18 @@ in M1.
 verify the AAD binding; produce material for a terminal that has no placement
 for it.
 
-`migrations/012` and `models/identity.go` currently say the material is sealed
-*"under a key the server never holds"*. **That sentence is false under this
-design and must be corrected in the same commit that adds the key**, to the
-weaker and true statement: the database alone yields nothing; the database plus
-the master key yields everything.
+`migrations/012` and `models/identity.go` say the material is sealed *"under a
+key the server never holds"*. **That sentence is false under this design.** The
+weaker and true statement is: the database alone yields nothing; the database
+plus the master key yields everything.
+
+`models/identity.go` was corrected. **`migrations/012` was not, and deliberately
+so.** It is applied in production and its checksum is recorded in
+`schema_migrations`; `deploy/migrate.sh` hashes the whole file and cannot tell a
+comment from a statement, so editing it makes the runner refuse to apply
+anything -- including 026. An applied migration is a record of what was run, not
+a document to keep current. The correction therefore lives in `026`, which is
+the migration that makes the claim false, in `models/identity.go`, and here.
 
 ---
 
@@ -284,4 +291,5 @@ per-placement wrapped keys are an added column, not a migration rewrite.
    acceptable, a rotation endpoint has to come into M1 scope, and firmware has
    to be able to hold more than one key.
 4. **Correcting the `migrations/012` and `models/identity.go` comments** to the
-   true, weaker claim (§5).
+   true, weaker claim (§5). Only `models/identity.go` could be corrected -- see
+   §5 for why 012 must be left exactly as it was applied.

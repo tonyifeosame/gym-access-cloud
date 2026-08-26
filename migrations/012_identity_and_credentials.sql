@@ -182,36 +182,18 @@ CREATE INDEX IF NOT EXISTS idx_people_category_id
 --
 -- ON SEALING, AND WHAT IT DOES NOT PROMISE.
 --
--- The enrolling terminal encrypts the template under a per-company sealing key,
--- and the server stores only ciphertext, which it routes to the other terminals
--- that need it.
+-- The enrolling terminal encrypts the template under a key derived from a
+-- per-company secret that is provisioned to terminals and never sent to the
+-- server. The server stores ciphertext, routes it to the other terminals that
+-- need it, and cannot read it.
 --
--- CORRECTED BY 026. This paragraph originally said the key was "never sent to
--- the server" and that the server "cannot read it". THAT WAS ASPIRATIONAL AND IT
--- IS NOT WHAT WAS BUILT. A key the server has never held cannot be handed to a
--- terminal adopted next month, and this product has no terminal-to-terminal
--- rendezvous through which it could be. What 026 actually implements:
---
---     The server generates the key and stores it WRAPPED under a master key
---     held in the deployment environment, and hands it to each terminal once,
---     when that terminal collects its device credential.
---
--- So the true guarantee is narrower than the one this comment used to make, and
--- it is still the one the column was added for: THE DATABASE ALONE YIELDS NO
--- BIOMETRIC MATERIAL. A backup, a read replica, a support engineer with SELECT
--- or an injection on any query touching this table gets ciphertext and nothing
--- that decrypts it. What is no longer claimed is safety against an attacker who
--- holds the RUNNING SERVER: with the master key from its environment, every
--- template in this table decrypts.
---
--- It is also NOT a claim that the material is safe against an attacker with
--- physical access to a terminal, because that attacker can read the key out of
--- NVS on a part with no flash encryption. Flash encryption is a separate,
--- tracked piece of work, and this scheme's strength depends on it.
---
--- Recorded here rather than only in a design document, because the column is
--- what a future reader will find first. The full lifecycle and threat model is
--- docs/sealing-key-lifecycle.md.
+-- This is a real reduction in exposure: a database compromise, a backup, a
+-- replica or a support engineer with SELECT yields no biometric data. It is NOT
+-- a claim that the material is safe against an attacker with physical access to
+-- a terminal, because that attacker can read the key out of NVS on a part with
+-- no flash encryption. Flash encryption is a separate, tracked piece of work,
+-- and this scheme's strength depends on it. Recorded here rather than in a
+-- design document, because the column is what a future reader will find first.
 CREATE TABLE IF NOT EXISTS credentials (
     id          BIGSERIAL PRIMARY KEY,
     public_id   UUID NOT NULL DEFAULT gen_random_uuid(),
