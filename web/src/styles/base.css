@@ -206,10 +206,6 @@ code {
   gap: var(--space-5);
 }
 
-.page__header h1 {
-  font-size: var(--font-size-2xl);
-}
-
 /*
  * THE SCREENS THAT ARE NOT PROSE.
  *
@@ -237,6 +233,10 @@ code {
  */
 .page--wide {
   max-width: 1600px;
+}
+
+.page__header h1 {
+  font-size: var(--font-size-2xl);
 }
 
 .page__lead {

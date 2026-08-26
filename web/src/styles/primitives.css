@@ -881,8 +881,18 @@ textarea.field__input {
     font-weight: 600;
   }
 
-  /* Detail that does not earn space on a phone. */
-  .table__cell--secondary {
+  /*
+   * Detail that does not earn space on a phone.
+   *
+   * QUALIFIED BY `td`/`th`, AND THAT IS NOT DECORATION. The card conversion
+   * above sets `display: flex` via `.table td`, which is one element more
+   * specific than a lone class -- so this rule lost every time and `secondary`
+   * silently hid nothing at any width. Every column marked secondary was still
+   * on every card. Matching that specificity, and coming after it, is what
+   * makes the flag mean something.
+   */
+  .table td.table__cell--secondary,
+  .table th.table__cell--secondary {
     display: none;
   }
 
@@ -917,10 +927,66 @@ textarea.field__input {
   color: var(--accent);
   font-weight: 600;
   text-decoration: none;
+  /*
+    TALL ENOUGH TO HIT. A link's box is its line box, which at this size is 19px
+    -- under the 24px WCAG 2.2 (2.5.8, AA) minimum, and the browser pass caught
+    exactly that the moment the terminals table gained its links. It applies to
+    every table's primary column, where the same link had always been the
+    keyboard and touch route into a row.
+
+    inline-flex rather than a padding bump so the cell's own vertical rhythm is
+    unchanged: the box grows to the floor and stops.
+  */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
 }
 
 .table__link:hover {
   text-decoration: underline;
+}
+
+/* A link inside a hint, tall enough to hit.
+ *
+ * SAME 24px FLOOR AS `.table__link` ABOVE, reached a different way and for a
+ * reason worth recording. A hint's line box is 17px at this size, which the
+ * browser pass measured on the Operators footer -- "managed under People" was a
+ * 39x17 target, the only one under the WCAG 2.2 (2.5.8, AA) minimum anywhere in
+ * that section.
+ *
+ * NOT `inline-flex`, which is what the table link uses. These links sit INSIDE
+ * FLOWING SENTENCES and some of them are several words long ("the Terminals
+ * page"); making them flex containers stops them breaking across lines, which
+ * turns a wrapped phrase into an overflow on a narrow screen. Vertical padding
+ * on an inline box grows the hit area without taking it out of the flow or
+ * changing where the line sits, so the sentence wraps exactly as before and the
+ * target clears the floor.
+ *
+ * `.notice a` IS HERE FOR THE SAME REASON, found the same way. The cross-links
+ * between the two trails -- "…is in Activity", "…is in Events" -- sit in a
+ * notice rather than a hint, and measured 45x19 at 390px. They are the one
+ * control on those pages whose whole job is to catch somebody who is on the
+ * wrong screen, so being hard to hit is the last thing they should be.
+ *
+ * `.panel p a` IS THE LAST OF THEM, and it is the one that shows why this list
+ * kept growing: the cross-link in "How this relates to your terminals" sits in
+ * ordinary panel prose rather than in a hint or a notice, so it was 58x19 after
+ * every other selector here had been added. Links in flowing text all need the
+ * same floor, wherever the paragraph happens to live.
+ *
+ * THE THREE BEFORE IT CLOSE THE SAME GAP ELSEWHERE, measured at
+ * 390px: every feature name on the Features list (20px), all four "Configured
+ * elsewhere" links on Settings (20px), and the breadcrumb back out of a feature
+ * (17px). Thirteen sub-minimum targets between them, all links in flowing text
+ * or headings, all fixed the same way for the same reason.
+ */
+.field__hint a,
+.notice a,
+.settings-links a,
+.capability__title a,
+.page__breadcrumb a,
+.panel p a {
+  padding-block: 4px;
 }
 
 .mono {
@@ -1847,6 +1913,77 @@ textarea.field__input {
 
 /* A role or target type beside a name. Small and quiet: it qualifies the value
  * next to it rather than competing with it. */
+/* Both ends of a date range as ONE grid item.
+ *
+ * `.filter-grid` is `auto-fit`, so a fifth filter at 1440px dropped "To" onto a
+ * row by itself beside a wide gap -- the two halves of one range separated. This
+ * keeps them together at every width, and stacks them as a pair on a phone
+ * rather than as two unrelated fields. */
+.filter-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+@media (max-width: 680px) {
+  .filter-range {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* An audit record's time, both ways at once.
+ *
+ * Relative for scanning, absolute underneath for the question an audit trail is
+ * usually open to answer. The absolute line is quiet because it is the reference
+ * rather than the thing being scanned. */
+.audit__when {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.audit__when-absolute {
+  font-size: var(--font-size-2xs);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+/* A site's own name, in a row that also carries codes.
+ *
+ * Muted so it reads as context beside the terminal it belongs to, but NOT
+ * uppercased or letterspaced the way `.audit__role` is: that treatment is for
+ * enum values, and a customer's name for a place is not one. */
+.event__site {
+  font-size: var(--font-size-2xs);
+  color: var(--text-muted);
+}
+
+/* Why a door event went the way it did.
+ *
+ * The meaning used to live in a `title`, which is unreachable on touch, from the
+ * keyboard, and unreliably announced. It is on the page now: the label stays the
+ * scannable line and the explanation sits under it, quiet enough not to compete
+ * with the outcome badge beside it. */
+.event__why {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.event__why-label {
+  font-weight: 600;
+}
+
+.event__why-meaning {
+  font-size: var(--font-size-2xs);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+  /* Kept to a readable measure: this sits in a table cell that would otherwise
+     stretch the column to the length of the longest sentence. */
+  max-width: 34ch;
+}
+
 .audit__role {
   font-size: var(--font-size-3xs);
   letter-spacing: 0.04em;
