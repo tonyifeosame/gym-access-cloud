@@ -693,6 +693,22 @@ func NewRouter() *gin.Engine {
 		// permits in any case.
 		deviceAPI.GET("/credentials/pending", handlers.GetPendingCredentials)
 		deviceAPI.POST("/credentials/placement", handlers.ReportCredentialPlacement)
+
+		// Sealed biometric material (026). SINGLE-ENROLMENT REPLICATION: a
+		// person presents a finger once and every door they are admitted to
+		// learns them.
+		//
+		// THE FETCH IS THE ONLY ROUTE BY WHICH BIOMETRIC MATERIAL LEAVES THIS
+		// PLATFORM. That is why it is a route of its own rather than a field on
+		// /credentials/pending -- one place to audit, one place to rate limit,
+		// one place to test, and a work-list response that demonstrably carries
+		// no material.
+		//
+		// Both are DEVICE-authenticated and take the terminal from the
+		// credential, never from a parameter. A terminal cannot upload on
+		// another's behalf and cannot fetch what it has not been told to hold.
+		deviceAPI.POST("/credentials/material", handlers.UploadCredentialMaterial)
+		deviceAPI.GET("/credentials/:id/material", handlers.FetchCredentialMaterial)
 	}
 
 	return r

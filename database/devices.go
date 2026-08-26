@@ -386,7 +386,26 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bo
 		           WHEN $10::jsonb IS NOT NULL
 		            AND $10::jsonb IS DISTINCT FROM capabilities
 		           THEN CURRENT_TIMESTAMP
-		           ELSE capabilities_reported_at END
+		           ELSE capabilities_reported_at END,
+
+		       -- WHICH FINGERPRINT MODULE IS ACTUALLY FITTED (026). Same
+		       -- COALESCE discipline again: an absent value means unchanged, so
+		       -- a build that does not report it cannot silently make this
+		       -- terminal ineligible to receive templates it was receiving
+		       -- yesterday.
+		       --
+		       -- NULL here is never treated as compatible with anything. A
+		       -- terminal that has never reported its module is not a
+		       -- replication target, which is the fail-closed answer: the
+		       -- alternative is guessing that an unknown sensor can read another
+		       -- sensor's proprietary template, and that guess has never been
+		       -- tested on hardware.
+		       sensor_profile = COALESCE(NULLIF($11, ''), sensor_profile),
+		       sensor_profile_reported_at = CASE
+		           WHEN NULLIF($11, '') IS NOT NULL
+		            AND NULLIF($11, '') IS DISTINCT FROM sensor_profile
+		           THEN CURRENT_TIMESTAMP
+		           ELSE sensor_profile_reported_at END
 		 WHERE id = $8 AND deleted_at IS NULL`,
 		reported, req.FirmwareVersion, req.HardwareRevision, req.BuildNumber,
 		req.BootCount, req.IPAddress, req.Error, deviceID,
@@ -395,7 +414,8 @@ func RecordHeartbeat(deviceID int64, req models.DeviceHeartbeatRequest) (int, bo
 		// constraint would refuse it anyway -- as a 500 on the heartbeat, which
 		// is not how a garbage field should take a door offline.
 		positiveCapacity(req.MemberCapacity),
-		capabilityJSON(req.Capabilities))
+		capabilityJSON(req.Capabilities),
+		strings.TrimSpace(req.SensorProfile))
 	if err != nil {
 		return 0, false, err
 	}

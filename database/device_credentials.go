@@ -29,16 +29,28 @@ import (
 //
 // The pending list carries a person, a credential id and a TYPE. It does not
 // carry `sealed_material`, `material_digest`, `sealed_key_id` or an identifier,
-// and the queries below do not select those columns -- so there is no field a
-// future edit could accidentally populate, and a reviewer checking this
-// property only has to read the SELECT lists.
+// and a reviewer checking this property only has to read the SELECT lists.
 //
-// This is not a limitation being worked around; it is what the fitted hardware
-// permits. The sensor matches on-module and its driver implements template
-// EXPORT but not import, so a template captured at one door cannot be installed
-// at another by this firmware at all. What the platform can usefully say is
-// "this person should be enrolled here and is not", which turns a member who
-// silently does not work at one door into a visible task list.
+// ONE THING IN THOSE SELECT LISTS NEEDS READING CAREFULLY, since 026 added it:
+//
+//	(c.sealed_material IS NOT NULL) AS material_available
+//
+// That is a PREDICATE OVER the column, not the column. It yields one bit --
+// "there is a template for this person somewhere" -- which is the same bit the
+// console already renders as `has_material`, and which the terminal needs in
+// order to know whether to ask for the template at all. The bytes themselves
+// have their own endpoint, their own authorisation rules and their own tests:
+// database/credential_material.go. Keeping them there rather than widening this
+// response is deliberate -- it means material leaves the platform by exactly one
+// route, and this route stays one a reviewer can clear at a glance.
+//
+// WHY THIS SPLIT EXISTS AT ALL. Until 026 a template captured at one door could
+// not be installed at another, so the platform could only say "this person
+// should be enrolled here and is not" -- a work list, which turns a member who
+// silently does nothing at one door into a visible task. That work list is still
+// the whole story for any terminal that has not reported the biometric_import
+// capability, and for every unit already in the field. Replication is additive
+// on top of it, not a replacement for it.
 //
 // ---------------------------------------------------------------------------
 // WHAT "AUTHORIZED TO RECEIVE" MEANS
@@ -82,6 +94,20 @@ type PendingPlacement struct {
 	// echoes it back so a placement written before a sensor wipe can be told
 	// from one written after.
 	Generation int
+
+	// MaterialAvailable is one bit: the platform holds a sealed template for
+	// this credential. NOT the template, and not a digest of it -- see the note
+	// at the top of this file about why that distinction is worth keeping.
+	//
+	// A terminal that can import fetches the material separately; one that
+	// cannot ignores this and works the entry as a re-enrolment task.
+	MaterialAvailable bool
+
+	// SensorProfile is the module the template was captured on, empty when
+	// there is no material. A terminal can see for itself that a template it is
+	// being offered came off a module unlike its own -- though the platform
+	// refuses that pairing anyway, in the query rather than on trust.
+	SensorProfile string
 }
 
 // Bounds on the pending list. A terminal has a small parse buffer and an 8 KB
@@ -109,8 +135,8 @@ func PendingPlacementsFor(deviceID int64, limit int) ([]PendingPlacement, error)
 
 	// The SELECT list is the security boundary and is worth reading as one: a
 	// person's external id and name, a credential's public id, its type, format
-	// and vendor, and the placement's own bookkeeping. No sealed material, no
-	// digest, no identifier, no key id.
+	// and vendor, the placement's own bookkeeping, and ONE BIT saying whether a
+	// template exists. No sealed material, no digest, no identifier, no key id.
 	rows, err := DB.Query(`
 		SELECT c.public_id,
 		       COALESCE(pl.public_id::text, ''),
@@ -122,7 +148,9 @@ func PendingPlacementsFor(deviceID int64, limit int) ([]PendingPlacement, error)
 		       COALESCE(pl.state, 'PENDING'),
 		       COALESCE(pl.attempts, 0),
 		       COALESCE(pl.last_error, ''),
-		       d.placement_generation
+		       d.placement_generation,
+		       (c.sealed_material IS NOT NULL),
+		       COALESCE(c.sensor_profile, '')
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		  JOIN people p ON p.company_id = s.company_id
@@ -167,7 +195,8 @@ func PendingPlacementsFor(deviceID int64, limit int) ([]PendingPlacement, error)
 		var item PendingPlacement
 		if err := rows.Scan(&item.CredentialID, &item.PlacementID, &item.ExternalID,
 			&item.FullName, &item.CredentialType, &item.TemplateFormat, &item.Vendor,
-			&item.State, &item.Attempts, &item.LastError, &item.Generation); err != nil {
+			&item.State, &item.Attempts, &item.LastError, &item.Generation,
+			&item.MaterialAvailable, &item.SensorProfile); err != nil {
 			return nil, err
 		}
 		placements = append(placements, item)
@@ -211,6 +240,16 @@ type PlacementReport struct {
 	// Error is the device's own words -- "sensor full" -- so an operator sees
 	// why rather than just that.
 	Error string
+
+	// AppliedDigest is SHA-256 of the plaintext template the device says it just
+	// wrote, present only when it installed replicated material.
+	//
+	// THE SERVER CANNOT VERIFY THIS. It holds no key on this path and cannot
+	// decrypt the material to check. It stores the value and compares it to
+	// credentials.material_digest, so a template that arrived corrupted or was
+	// applied against the wrong person is VISIBLE. Agreement here is two devices
+	// agreeing; it is not the platform attesting to anything.
+	AppliedDigest string
 }
 
 // Validate checks a report before it reaches the database.
@@ -228,6 +267,9 @@ func (r PlacementReport) Validate() error {
 	}
 	if r.CredentialType != "" && !models.IsCredentialType(r.CredentialType) {
 		return models.ErrCredentialTypeInvalid
+	}
+	if r.AppliedDigest != "" && !models.IsMaterialDigest(r.AppliedDigest) {
+		return models.ErrMaterialDigestInvalid
 	}
 	return nil
 }
@@ -299,14 +341,14 @@ func RecordPlacement(deviceID int64, report PlacementReport) (*PendingPlacement,
 	err = tx.QueryRow(`
 		INSERT INTO credential_placements
 		    (credential_id, device_id, slot, state, last_error, attempts,
-		     placed_at, removed_at, generation)
+		     placed_at, removed_at, generation, applied_digest)
 		-- $4 is cast at every use. Without it PostgreSQL sees the same
 		-- parameter as a column value in one position and as a comparison
 		-- operand in another, and refuses to deduce one type for it (42P08).
 		VALUES ($1, $2, $3, $4::text, NULLIF($5, ''), 1,
 		        CASE WHEN $6::text IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,
 		        CASE WHEN $4::text = 'REMOVED' THEN CURRENT_TIMESTAMP ELSE NULL END,
-		        $7)
+		        $7, NULLIF($8, ''))
 		ON CONFLICT (credential_id, device_id) DO UPDATE
 		   SET slot       = EXCLUDED.slot,
 		       state      = EXCLUDED.state,
@@ -315,10 +357,16 @@ func RecordPlacement(deviceID int64, report PlacementReport) (*PendingPlacement,
 		       placed_at  = COALESCE(EXCLUDED.placed_at, credential_placements.placed_at),
 		       removed_at = EXCLUDED.removed_at,
 		       generation = EXCLUDED.generation,
+		       -- COALESCE, not overwrite: a later FAILED or REMOVED report
+		       -- carries no digest, and blanking the record of what was once
+		       -- successfully written would erase the only evidence that the
+		       -- right template ever reached this door.
+		       applied_digest = COALESCE(EXCLUDED.applied_digest,
+		                                 credential_placements.applied_digest),
 		       updated_at = CURRENT_TIMESTAMP
 		RETURNING public_id`,
 		credentialID, deviceID, slot, report.State, report.Error,
-		placedAt, generation).Scan(&placementPublicID)
+		placedAt, generation, report.AppliedDigest).Scan(&placementPublicID)
 	if err != nil {
 		return nil, err
 	}

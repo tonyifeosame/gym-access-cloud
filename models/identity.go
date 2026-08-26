@@ -159,9 +159,20 @@ const (
 	// the substance check in migration 020.
 	TemplateFormatSensorLocal = "SENSOR_LOCAL"
 
-	// TemplateFormatVendorTemplate is a template read off a sensor that could,
-	// in principle, be written to another of the same family. NOT PRODUCED by
-	// the current firmware: the fitted driver implements export but not import.
+	// TemplateFormatVendorTemplate is a template read off a sensor that could be
+	// written to another of the same family. This is what replication moves.
+	//
+	// NOT YET PRODUCED BY ANY FIRMWARE. The platform side (026) accepts, stores
+	// and routes it; the terminal side does not exist yet. The fitted Adafruit
+	// driver implements NEITHER half properly -- getModel() sends UpChar and
+	// never reads the returned data packets, and DownChar (0x09) is not defined
+	// at all -- so both directions have to be written against the driver's public
+	// packet primitives before anything emits this format.
+	//
+	// "Of the same family" is enforced, not assumed: material moves only between
+	// byte-equal devices.sensor_profile values (026). Whether two different
+	// modules actually interoperate is a HARDWARE FACT THAT HAS NOT BEEN TESTED
+	// and is claimed nowhere.
 	TemplateFormatVendorTemplate = "VENDOR_TEMPLATE"
 
 	// TemplateFormatIdentifier is a non-secret value -- a card number, a QR
@@ -336,17 +347,31 @@ type CredentialPlacement struct {
 // SealedCredentialMaterial is biometric material as it moves between a device
 // and the database. It never reaches a browser.
 //
-// The server cannot read Ciphertext and holds no key that could. It routes the
-// bytes to the terminals that need them and can prove which plaintext they
-// correspond to, via Digest, without ever recovering a biometric.
+// The server routes these bytes to the terminals that need them, and no code
+// path that handles material ever decrypts one -- upload, fetch and fan-out are
+// byte pipes with authorisation checks and no key.
 //
 // WHAT THIS DOES NOT PROMISE, stated here rather than only in the migration
-// because this is the type a future reader will find first: it protects against
-// a database compromise, a backup, a replica or a support engineer with SELECT.
-// It does NOT protect against an attacker with physical possession of a
-// terminal, who can read the sealing key out of NVS on a part without flash
-// encryption. That is a separate, tracked piece of work and this scheme's
-// strength depends on it.
+// because this is the type a future reader will find first:
+//
+//   - It protects against a database compromise, a backup, a replica, a support
+//     engineer with SELECT, or an injection on any query touching credentials.
+//     Those yield ciphertext and nothing that decrypts it.
+//
+//   - It does NOT protect against an attacker holding the RUNNING SERVER. This
+//     comment used to say the server "cannot read Ciphertext and holds no key
+//     that could"; that was never built and is not true. The server generates
+//     the per-company sealing key and stores it wrapped under a master key from
+//     its own environment, because it has to hand that key to each terminal
+//     when the terminal collects its credential. Environment plus database
+//     decrypts everything.
+//
+//   - It does NOT protect against an attacker with physical possession of a
+//     terminal, who can read the sealing key out of NVS on a part without flash
+//     encryption. That is a separate, tracked piece of work and this scheme's
+//     strength depends on it.
+//
+// Full lifecycle and threat model: docs/sealing-key-lifecycle.md.
 type SealedCredentialMaterial struct {
 	// Ciphertext is opaque. Base64 on the wire, bytes in the column.
 	Ciphertext []byte `json:"ciphertext"`
@@ -420,4 +445,117 @@ type CredentialRequest struct {
 // CredentialRevokeRequest is the body of a console credential revoke.
 type CredentialRevokeRequest struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Biometric replication (026)
+// ---------------------------------------------------------------------------
+//
+// The device-facing material contract. docs/biometric-replication.md §6, and
+// docs/sealing-key-lifecycle.md for what the key does and does not protect.
+//
+// NOTE ON WHERE THE CRYPTO IS: nowhere on this path. The platform validates the
+// SHAPE of what a terminal sends -- a known algorithm, this company's active
+// key, a well-formed digest, a bounded ciphertext -- stores the bytes, and hands
+// them back to terminals that are authorised to hold them. It never seals,
+// never unseals, and holds no key while doing any of it.
+
+// Bounds on sealed material.
+const (
+	// MaxSealedMaterialBytes caps the ciphertext a terminal may upload.
+	//
+	// A ZFM template is ~512 bytes; adding a 12-byte nonce and a 16-byte tag
+	// leaves this four times larger than anything legitimate. Generous on
+	// purpose -- a bound that a real template could brush against would fail in
+	// the field -- while still refusing to let the column be used as storage.
+	MaxSealedMaterialBytes = 2048
+
+	// SealingKeyIDPattern is the shape of a key label, matching the CHECK in
+	// 026. Not a secret; it names which key sealed something.
+	SealingKeyIDPrefix = "ck_"
+)
+
+// SealedMaterialUpload is an enrolling terminal handing over what it captured.
+//
+// The person is named by MemberID, the same name the roster, the sync payload
+// and the placement report already use. The company is NOT a field: it is taken
+// from the authenticated device, so there is no parameter through which a
+// terminal could file material against another tenant.
+type SealedMaterialUpload struct {
+	MemberID string `json:"member_id" binding:"required"`
+
+	// CredentialID is optional, and present when the terminal was working from
+	// a pending item. Absent for an enrolment the terminal originated.
+	CredentialID string `json:"credential_id,omitempty"`
+
+	CredentialType string `json:"credential_type,omitempty"`
+	Vendor         string `json:"vendor,omitempty"`
+	TemplateFormat string `json:"template_format,omitempty"`
+
+	// SensorProfile is what this terminal's module answered, not what its build
+	// assumes. It becomes the ONLY compatibility rule: material moves between
+	// byte-equal profiles and nowhere else.
+	SensorProfile string `json:"sensor_profile" binding:"required"`
+
+	Sealed SealedCredentialMaterial `json:"sealed" binding:"required"`
+}
+
+// SealedMaterialResponse is what a receiving terminal is given.
+//
+// MemberID is echoed because the terminal needs it to reconstruct the AAD the
+// enrolling terminal sealed under (`company|member|key_id`) -- without it the
+// unseal fails, which is the point of the binding. It is not new information:
+// the terminal already holds this person from the roster.
+type SealedMaterialResponse struct {
+	CredentialID string `json:"credential_id"`
+	MemberID     string `json:"member_id"`
+
+	CredentialType string `json:"credential_type"`
+	Vendor         string `json:"vendor,omitempty"`
+	TemplateFormat string `json:"template_format,omitempty"`
+	SensorProfile  string `json:"sensor_profile"`
+
+	Sealed SealedCredentialMaterial `json:"sealed"`
+}
+
+// Material errors. Separate values rather than one, because the handler answers
+// them differently and a terminal retries them differently.
+var (
+	ErrSealingAlgorithmUnknown = errors.New(
+		"unknown sealing algorithm")
+	ErrSealingKeyUnknown = errors.New(
+		"that sealing key is not this company's active key")
+	ErrSealedMaterialTooLarge = errors.New(
+		"sealed material is larger than a template can be")
+	ErrSealedMaterialEmpty = errors.New(
+		"sealed material carries no ciphertext")
+	ErrMaterialDigestInvalid = errors.New(
+		"material digest must be 64 lowercase hex characters")
+	ErrSensorProfileRequired = errors.New(
+		"sensor_profile is required: material cannot be routed without it")
+	ErrMaterialNotAvailable = errors.New(
+		"no sealed material for that credential")
+
+	// ErrDeviceCannotExport and ErrDeviceCannotImport are refusals based on what
+	// the terminal itself reported (025). A terminal that has never reported its
+	// capabilities gets these too -- NULL means "has never spoken", and the
+	// replication path fails closed on it.
+	ErrDeviceCannotExport = errors.New(
+		"this terminal has not reported that it can export templates")
+	ErrDeviceCannotImport = errors.New(
+		"this terminal has not reported that it can import templates")
+)
+
+// IsMaterialDigest reports whether s is the digest shape the schema stores:
+// 64 lowercase hex, the same shape every other digest in this system uses.
+func IsMaterialDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }

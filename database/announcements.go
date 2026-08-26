@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -526,6 +527,22 @@ type AnnouncementStatusResult struct {
 	// BootstrapJobs is how much work was queued for the new terminal, reported
 	// for the audit trail the same way claim redemption reports it.
 	BootstrapJobs int
+
+	// SealingKey is the company's biometric sealing key, base64, delivered
+	// EXACTLY ONCE here beside the API key (026).
+	//
+	// Same handling rules as APIKey and for the same reason: it goes into the
+	// response body and nowhere else. NOT into the audit record -- the audit
+	// block in handlers/announcements.go already carries a comment saying the
+	// API key is not there and must never be, and this belongs to the same
+	// sentence.
+	//
+	// EMPTY IS A NORMAL ANSWER. A deployment with no SEALING_MASTER_KEY set
+	// hands out no sealing key, and the terminal simply cannot replicate --
+	// which is exactly how every terminal in the field behaves today. Claiming
+	// must not fail over it.
+	SealingKey   string
+	SealingKeyID string
 }
 
 // Device-facing states.
@@ -714,6 +731,41 @@ func AnnouncementStatus(token, ip string) (*AnnouncementStatusResult, error) {
 		return nil, err
 	}
 
+	// The company's sealing key, minted on the first collection for that company
+	// and handed to every terminal after it (026).
+	//
+	// IN THIS TRANSACTION deliberately: a terminal recorded as having collected,
+	// and the key it was given, are one commit. Two transactions could leave a
+	// terminal marked COLLECTED against a key row that rolled back.
+	//
+	// BEST EFFORT ON THE KEY, NEVER ON THE CLAIM. A deployment that has not
+	// configured SEALING_MASTER_KEY, or whose master key no longer opens a
+	// stored key, must still be able to put a terminal on a wall -- that path is
+	// the product working, and it predates this feature by a long way. The
+	// terminal collects with no sealing key, cannot replicate, and behaves
+	// exactly as the fleet already in the field does.
+	//
+	// The loud version of this failure is at startup: a deployment holding
+	// sealing keys with no master key configured refuses to boot. That is where
+	// a misconfiguration should be caught, not on a customer's claim.
+	sealingKeyID, sealingKey, keyErr := EnsureCompanySealingKeyTx(tx, siteCompany)
+	switch {
+	case keyErr == nil:
+		// Delivered.
+	case errors.Is(keyErr, ErrSealingMasterKeyMissing),
+		errors.Is(keyErr, ErrSealingMasterKeyInvalid),
+		errors.Is(keyErr, ErrSealingKeyCorrupt):
+		// Recoverable without the caller: none of these touched the
+		// transaction, so the collection itself is still sound.
+		log.Printf("sealing key unavailable for company %d on collection by %s: %v",
+			siteCompany, serial, keyErr)
+		sealingKeyID, sealingKey = "", ""
+	default:
+		// A real database failure. The transaction may be poisoned, and a
+		// half-written collection is not something to commit around.
+		return nil, keyErr
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -729,6 +781,8 @@ func AnnouncementStatus(token, ip string) (*AnnouncementStatusResult, error) {
 		DeviceID:        device.ID,
 		ApprovedByEmail: approvedBy.String,
 		BootstrapJobs:   jobs,
+		SealingKey:      sealingKey,
+		SealingKeyID:    sealingKeyID,
 	}, nil
 }
 

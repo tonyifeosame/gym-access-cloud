@@ -2645,10 +2645,16 @@ mis-parsing it, so this must never become a local time.
 
 ### 17.3 Credential placements, device-facing
 
-Two device-authenticated routes. **No biometric material crosses either, in
-either direction.** A `credential_id` is a handle naming which credential a
-report is about; the template stays on the sensor that captured it, which is all
-the fitted hardware permits.
+Four device-authenticated routes. Two of them — the work list and the placement
+report — carry **no biometric material in either direction**: a `credential_id`
+is a handle naming which credential a report is about. The other two, added by
+026, are the **only** routes on this platform through which sealed material
+moves, and they are separate endpoints for exactly that reason: one place to
+audit, one place to rate limit, one place to test, and a work-list response a
+reviewer can still clear at a glance because it demonstrably carries no bytes.
+
+All four take the terminal from the **authenticated credential** and never from
+a parameter. A terminal cannot report, upload or fetch on another's behalf.
 
 #### `GET /api/v1/devices/credentials/pending`
 
@@ -2702,6 +2708,113 @@ words ("sensor full") so an operator sees why.
 Idempotent on `(credential, device)`. A `PLACED` report promotes a `PENDING`
 credential to `ACTIVE`. A credential named in the body that does not belong to
 `member_id`, or to this tenant, is a **404**.
+
+#### `POST /api/v1/devices/credentials/material`
+
+The **enrolling** terminal handing over what it captured, sealed. Called after
+the placement report above — two calls rather than one, deliberately, so the
+placement path is unchanged, tests included. Enrolment is not a hot path: a
+person is standing at the door either way.
+
+```json
+{"member_id": "MEM001", "credential_id": "8c2f…",
+ "credential_type": "FINGERPRINT", "vendor": "ZFM",
+ "sensor_profile": "ZFM:0x0009:1000",
+ "sealed": {"ciphertext": "<base64>", "key_id": "ck_a1b2c3d4e5f6",
+            "algorithm": "AES-256-GCM", "digest": "<64 hex>"}}
+```
+
+`algorithm` must be `AES-256-GCM`; `ciphertext` is base64 and capped at **2048
+decoded bytes** (a ZFM template is ~512, so the bound is generous on purpose
+while still refusing to let the column be used as storage); `digest` is the
+SHA-256 of the plaintext, in lower-case hex.
+
+`key_id` must be the company's **active** sealing key — the one collected with
+the device credential. A terminal sealing under any other gets `409` with
+`SEALING_KEY_UNKNOWN`, which is distinct from `400` on purpose: the body is well
+formed and the remedy is on the terminal (re-collect its credential), so firmware
+can tell "fix yourself" apart from "stop sending this".
+
+**Idempotent.** A retry of the same material answers `200`, with `duplicate:
+true`. A **second, different** template for a credential that already holds one
+is refused with `409` `MATERIAL_ALREADY_PRESENT` rather than overwritten:
+overwriting would leave terminals placed earlier holding one finger and
+terminals placed afterwards holding another, and the person would have to
+remember which door knows which. Re-enrolling somebody is revoking the
+credential and creating a new one, which the console already does.
+
+`409` `CAPABILITY_NOT_REPORTED` when the terminal has never advertised
+`biometric_export`.
+
+```json
+{"protocol_version": 1, "credential_id": "8c2f…", "member_id": "MEM001",
+ "placements_created": 3, "duplicate": false}
+```
+
+`placements_created` is how many **other** terminals were just told to expect
+this person. Zero is an ordinary answer — a single-terminal site, or a fleet
+where nothing else reports a matching sensor.
+
+#### `GET /api/v1/devices/credentials/{id}/material`
+
+The **receiving** terminal collecting what it was told to expect. The response
+carries the sealed bytes plus the `member_id` the enrolling terminal bound them
+to, which the receiver needs to rebuild the AAD; without it the unseal fails,
+which is the point of the binding. Not new information — the roster already
+delivered that person to this terminal.
+
+```json
+{"protocol_version": 1, "credential_id": "8c2f…", "member_id": "MEM001",
+ "credential_type": "FINGERPRINT", "vendor": "ZFM",
+ "template_format": "VENDOR_TEMPLATE", "sensor_profile": "ZFM:0x0009:1000",
+ "sealed": {"ciphertext": "<base64>", "key_id": "ck_a1b2c3d4e5f6",
+            "algorithm": "AES-256-GCM", "digest": "<64 hex>"}}
+```
+
+**One answer for every refusal: `404`.** No placement, wrong placement state,
+capability never reported, mismatched sensor profile, revoked or suspended
+credential, deactivated person, roster says no — all of them return the same body
+with `MATERIAL_NOT_AVAILABLE`. A terminal that is not entitled to a credential
+does not learn which rule stopped it, or that the credential exists at all. This
+is the discipline the announce token already uses, for the same reason: a refusal
+that explains itself is an oracle. The reason **is** recorded, server-side, in
+the audit row.
+
+#### Who receives material, and who does not
+
+Three gates, all of which must pass and all of which fail closed:
+
+1. **The roster rule**, reused from the sync path rather than restated, so the
+   replication surface is exactly as narrow as the access surface.
+2. **The capability**, self-reported (025). A terminal that has never advertised
+   `biometric_import` is never a fan-out target and can never fetch. `NULL`
+   means "never reported" and is not treated as "can".
+3. **Sensor profile equality.** Material moves between **byte-equal** profiles
+   and nowhere else. Whether two different fingerprint modules interoperate is a
+   hardware fact nobody has established, so nothing here asserts it and nothing
+   is inferred from a shared vendor string. A module reporting a different
+   profile receives nothing and falls back to the pre-existing re-enrolment work
+   list — a working product, not a failure.
+
+Every upload and every fetch is audited, successful or refused
+(`CREDENTIAL_MATERIAL_UPLOADED`, `CREDENTIAL_MATERIAL_SERVED`,
+`CREDENTIAL_MATERIAL_REFUSED`). The rows carry the terminal, the person and the
+credential, and **never** the ciphertext, the digest or the key id.
+`CREDENTIAL_MATERIAL_SERVED` is the record that a template left the platform:
+"which doors ever received this person's fingerprint" is a data-protection
+question a customer is entitled to ask, and that is what answers it.
+
+#### The sealing key itself
+
+Delivered **once**, in the approved `GET /api/v1/devices/announce/{token}`
+response that already carries the device credential, as `sealing_key` (base64)
+and `sealing_key_id` (the non-secret label). Both are **omitted** — not empty —
+when the deployment has no `SEALING_MASTER_KEY` configured, and that is an
+ordinary answer rather than an error: such a terminal cannot replicate and
+behaves exactly as the fleet already in the field does. The key appears in no
+audit row and no log line. See `docs/sealing-key-lifecycle.md` for the full
+threat model, including what is **not** claimed: an attacker holding the running
+server and this database can decrypt every template in it.
 
 #### `generation`
 

@@ -160,6 +160,8 @@ func AnnouncementStatus(c *gin.Context) {
 
 	if result.State == database.AnnounceStateApproved {
 		body.APIKey = result.APIKey
+		body.SealingKey = result.SealingKey
+		body.SealingKeyID = result.SealingKeyID
 		body.CompanyName = result.CompanyName
 		body.SiteName = result.SiteName
 		body.DeviceName = result.DeviceName
@@ -171,7 +173,11 @@ func AnnouncementStatus(c *gin.Context) {
 		// same choice the DEVICE_CLAIMED record makes, and the alternative
 		// (an actor-less row) reads in the trail as though nobody decided.
 		//
-		// THE KEY IS NOT HERE and must never be.
+		// THE KEY IS NOT HERE and must never be. Nor is the SEALING key that
+		// 026 delivers in the same response: it is the one secret in this
+		// system that has to be stored recoverably, which makes every place it
+		// could be copied to worth refusing individually. An audit row is one
+		// of them.
 		database.WriteAuditEvent(database.AuditEntry{
 			CompanyID:   result.CompanyID,
 			ActorEmail:  result.ApprovedByEmail,

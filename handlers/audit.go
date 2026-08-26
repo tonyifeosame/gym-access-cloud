@@ -84,6 +84,24 @@ const (
 	auditCredentialIssued  = "CREDENTIAL_ISSUED"
 	auditCredentialRevoked = "CREDENTIAL_REVOKED"
 
+	// Biometric replication (026). BOTH DIRECTIONS ARE RECORDED, and neither
+	// record contains material, a digest or a key id.
+	//
+	// These are written with NO OPERATOR, because there is no human on either
+	// call -- a terminal enrols somebody and another terminal collects the
+	// result. That is the same position TERMINAL_CREDENTIAL_COLLECTED is in, and
+	// it is resolved the same way: the actor field carries the terminal's serial
+	// rather than being left empty, so the trail reads as "this door did this"
+	// instead of as though nobody did.
+	//
+	// MATERIAL_SERVED is the one that matters operationally. It is the only
+	// record that a template left the platform, and answering "which doors ever
+	// received this person's fingerprint" is a data-protection question a
+	// customer is entitled to ask.
+	auditMaterialUploaded = "CREDENTIAL_MATERIAL_UPLOADED"
+	auditMaterialServed   = "CREDENTIAL_MATERIAL_SERVED"
+	auditMaterialRefused  = "CREDENTIAL_MATERIAL_REFUSED"
+
 	auditOperatorCreated     = "OPERATOR_CREATED"
 	auditOperatorUpdated     = "OPERATOR_UPDATED"
 	auditOperatorRoleSet     = "OPERATOR_ROLE_CHANGED"

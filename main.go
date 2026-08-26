@@ -136,6 +136,46 @@ func main() {
 		log.Fatalf("Platform bootstrap: %v", err)
 	}
 
+	// The sealing key that biometric replication depends on (026).
+	//
+	// FATAL when this installation holds sealing keys and cannot read them. That
+	// combination means every company key in the database is unrecoverable, so:
+	// no terminal claimed from now on can ever be given the key its fleet is
+	// already sealing under, replication silently stops for all of them, and
+	// stored material becomes bytes nobody can decrypt. Recovery is a new key
+	// and re-enrolling every person.
+	//
+	// EVERY PART OF THAT DAMAGE IS INVISIBLE FROM THE OUTSIDE. Doors keep
+	// opening, heartbeats keep arriving, the console looks healthy, and the only
+	// symptom is that newly claimed terminals quietly never learn anybody. A
+	// deployment that dropped the variable would find out weeks later, from a
+	// customer. Refusing to start converts it into a failure at deploy time,
+	// which is when somebody is actually looking.
+	//
+	// NOT fatal on an installation with no sealing keys: that is simply a
+	// deployment which has not turned this feature on, and it is entitled to run
+	// exactly as it did before 026.
+	if !database.SealingMasterKeyConfigured() {
+		hasKeys, err := database.AnySealingKeyExists()
+		if err != nil {
+			// NOT FATAL. This check exists to catch a misconfiguration, and it
+			// is not a health check for the database -- turning a transient
+			// query failure here into a refusal to start would make a
+			// diagnostic more dangerous than the thing it diagnoses.
+			log.Printf("SEALING: could not check for sealing keys (%v). "+
+				"If this installation holds any, terminals claimed now will "+
+				"collect no sealing key and will never receive an enrolment.", err)
+		}
+		if hasKeys {
+			log.Fatalf("SEALING: this installation holds biometric sealing keys but %s "+
+				"is not set, so none of them can be read. Terminals claimed from now on "+
+				"would collect no sealing key and would never receive an enrolment, "+
+				"silently. Set %s to the 32-byte base64 master key this database was "+
+				"written with, or the keys are unrecoverable.",
+				database.EnvSealingMasterKey, database.EnvSealingMasterKey)
+		}
+	}
+
 	// SEC-05. Announced at startup rather than left to be discovered, because
 	// this is the one setting that lets a site's provisioning key authenticate
 	// as any terminal at that site -- and the deployment that has it on is

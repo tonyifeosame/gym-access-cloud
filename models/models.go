@@ -399,6 +399,26 @@ const (
 	// CapabilityTerminalAnnounce is announce-and-approve: the terminal
 	// introduces itself and displays a pairing code.
 	CapabilityTerminalAnnounce = "terminal_announce"
+
+	// CapabilityBiometricExport is: this terminal can read a template off its
+	// own sensor and seal it.
+	//
+	// TWO CAPABILITIES, NOT ONE, because export and import are separate driver
+	// features that fail separately and are verified separately. The fitted
+	// Adafruit driver has neither working -- getModel() sends UpChar and never
+	// reads the data packets back, and DownChar (0x09) is not even defined --
+	// so a build can plausibly ship with one half done and not the other.
+	CapabilityBiometricExport = "biometric_export"
+
+	// CapabilityBiometricImport is: this terminal can unseal a template and
+	// write it into its own sensor.
+	//
+	// A CAPABILITY IS A STATEMENT OF TESTED FACT, which is the whole reason 025
+	// exists instead of a version check. Firmware must advertise this only in a
+	// build where the import path is compiled AND has been shown to work on the
+	// module actually fitted. Nothing on the platform side can check that, which
+	// is exactly why the platform asks rather than infers.
+	CapabilityBiometricImport = "biometric_import"
 )
 
 // DeviceRegistrationResponse carries the issued credential. The plaintext key is
@@ -421,6 +441,20 @@ type DeviceHeartbeatRequest struct {
 	Status           string `json:"status,omitempty"` // ONLINE, UPDATING or ERROR
 	Error            string `json:"error,omitempty"`
 	IPAddress        string `json:"ip_address,omitempty"`
+
+	// SensorProfile is what this terminal's fingerprint module actually
+	// answered when asked -- `vendor:system_id:capacity`, e.g. `ZFM:0x0009:1000`
+	// (026).
+	//
+	// IT IS NOT A BUILD CONSTANT and must not become one. The whole value of the
+	// field is that it reports the part that is physically fitted, so that a
+	// replaced or second-source module is VISIBLE rather than assumed to be the
+	// same as the last one.
+	//
+	// This is the only compatibility rule for replicating a template: material
+	// moves between byte-equal profiles and nowhere else. Empty means unchanged,
+	// on the same COALESCE terms as capabilities.
+	SensorProfile string `json:"sensor_profile,omitempty"`
 
 	// Capabilities is what this image says it can do (025).
 	//

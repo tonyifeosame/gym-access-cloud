@@ -84,6 +84,21 @@ type AnnounceStatusResponse struct {
 	SiteName    string `json:"site_name,omitempty"`
 	DeviceName  string `json:"device_name,omitempty"`
 
+	// SealingKey is the company's biometric sealing key, base64, delivered
+	// exactly once alongside APIKey (026). The terminal seals templates it
+	// captures with it and unseals ones it is sent.
+	//
+	// OMITTED, not empty-string, when this deployment has no master key
+	// configured -- and that is an ordinary answer, not an error. A terminal
+	// that receives no sealing key cannot replicate and works exactly as the
+	// fleet already in the field does.
+	//
+	// SealingKeyID is the NON-SECRET label naming which key this is, echoed back
+	// by the terminal on every upload so the platform can tell that a terminal
+	// is still sealing under the key the company is actually using.
+	SealingKey   string `json:"sealing_key,omitempty"`
+	SealingKeyID string `json:"sealing_key_id,omitempty"`
+
 	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
 	PollAfterSeconds int        `json:"poll_after_seconds"`
 }
