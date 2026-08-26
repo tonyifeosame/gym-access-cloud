@@ -7,7 +7,8 @@ import { RegisterPage } from './auth/RegisterPage'
 import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
 import { DashboardPage } from './pages/DashboardPage'
-import { ApplicationPlaceholder, NotImplemented } from './pages/NotImplemented'
+import { Forbidden, NotFound } from './pages/ErrorPage'
+import { ApplicationPlaceholder } from './pages/NotImplemented'
 import { ActivityPage } from './pages/activity/ActivityPage'
 import { SchedulesPage } from './pages/access/SchedulesPage'
 import { EventsPage } from './pages/events/EventsPage'
@@ -158,26 +159,9 @@ export const router = createBrowserRouter([
 
       { path: 'applications/:slug', element: <ApplicationPlaceholder /> },
 
-      {
-        path: 'forbidden',
-        element: (
-          <NotImplemented
-            title="Not available to you"
-            description="Your role does not include this area."
-            detail="If you need access, ask an owner or administrator of your company to change your role."
-          />
-        ),
-      },
+      { path: 'forbidden', element: <Forbidden /> },
 
-      {
-        path: '*',
-        element: (
-          <NotImplemented
-            title="Page not found"
-            detail="That address does not match anything in the console."
-          />
-        ),
-      },
+      { path: '*', element: <NotFound /> },
     ],
   },
 
