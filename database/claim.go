@@ -356,7 +356,7 @@ func RedeemClaimCode(code, serial, ip string) (*ClaimedDevice, error) {
 	// a unit being re-provisioned after a factory reset.
 	device, key, jobs, err := registerDeviceTx(tx, siteID, models.DeviceRegistrationRequest{
 		SerialNumber: storedSerial,
-	})
+	}, ProvisionedViaClaimCode)
 	if err != nil {
 		return nil, err
 	}

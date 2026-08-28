@@ -88,6 +88,22 @@ type NewSite struct {
 // ignores soft-deleted rows, so a retired site's name can be reused. A conflict
 // surfaces as ErrSiteNameTaken rather than as a raw driver error.
 func CreateSite(companyID int64, in NewSite) (*models.ConsoleSite, *SiteCredential, error) {
+	return createSite(DB, companyID, in)
+}
+
+// createSite inserts a site against a connection OR a transaction.
+//
+// The transaction form exists for self-service signup, which creates a company,
+// its first site and its owner atomically -- a half-built tenant with a company
+// row and no site would be one nobody could finish without SQL, which is the
+// state this whole flow exists to remove.
+//
+// One function rather than two so the credential is minted the same way on both
+// paths. A second site-creation routine is exactly where a key would eventually
+// be generated with the wrong entropy source or stored without hashing.
+func createSite(q queryRower, companyID int64, in NewSite) (
+	*models.ConsoleSite, *SiteCredential, error) {
+
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		return nil, nil, models.ErrSiteNameRequired
@@ -109,7 +125,7 @@ func CreateSite(companyID int64, in NewSite) (*models.ConsoleSite, *SiteCredenti
 	}
 
 	var site models.ConsoleSite
-	err = DB.QueryRow(`
+	err = q.QueryRow(`
 		INSERT INTO sites (company_id, site_name, address, timezone,
 		                   api_key_hash, api_key_prefix, active)
 		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, TRUE)

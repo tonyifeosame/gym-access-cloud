@@ -37,18 +37,31 @@ export class ApiError extends Error {
   readonly status: number
   readonly requestId: string | null
   readonly retryAfterSeconds: number | null
+  /**
+   * The API's machine-readable reason, when it sent one — the `code` field some
+   * refusals carry beside the human message.
+   *
+   * THE STABLE HALF OF AN ERROR. `message` is prose the API says explicitly is
+   * not stable, so a screen that matched on it would break the first time the
+   * wording improved; a code is the API committing to a distinction. Null on
+   * every response that does not carry one, which is most of them — the default
+   * remains branching on `status`.
+   */
+  readonly code: string | null
 
   constructor(
     status: number,
     message: string,
     requestId: string | null,
     retryAfterSeconds: number | null,
+    code: string | null = null,
   ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.requestId = requestId
     this.retryAfterSeconds = retryAfterSeconds
+    this.code = code
   }
 
   get isUnauthenticated(): boolean {
@@ -153,6 +166,7 @@ export async function request<T>(
       errorMessage(payload, response.status),
       requestId,
       retryAfter(response),
+      errorCode(payload),
     )
   }
 
@@ -177,6 +191,15 @@ function errorMessage(payload: unknown, status: number): string {
     if (typeof message === 'string' && message.length > 0) return message
   }
   return `Request failed with status ${status}`
+}
+
+/** The `code` on an error body, when the API committed to one. */
+function errorCode(payload: unknown): string | null {
+  if (payload && typeof payload === 'object' && 'code' in payload) {
+    const code = (payload as { code?: unknown }).code
+    if (typeof code === 'string' && code.length > 0) return code
+  }
+  return null
 }
 
 function retryAfter(response: Response): number | null {

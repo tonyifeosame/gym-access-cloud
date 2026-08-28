@@ -49,15 +49,66 @@
 
   --radius: 8px;
   --radius-sm: 5px;
+
+  /*
+   * SPACING, SPLIT BY WHAT THE STEP SEPARATES.
+   *
+   * The first three steps separate things INSIDE one control -- a badge from
+   * its neighbour, a label from its input, a checkbox from its description --
+   * and they are deliberately left where they were. Tightening them buys a few
+   * pixels and costs touch targets and reading order, which is the wrong trade
+   * on a console used standing in front of a door.
+   *
+   * The last three separate CONTAINERS: panel padding, the gap between a page's
+   * sections, the shell's own margins. Those were set for a screen with a
+   * handful of tiles on it, and an operations console is not that -- so they
+   * come in by roughly an eighth. Nothing changes shape; there is simply less
+   * air around everything, which is where the density complaint actually was.
+   */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
+  --space-4: 14px;
+  --space-5: 20px;
+  --space-6: 28px;
 
   --font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  /*
+   * TYPE SCALE.
+   *
+   * ONE LADDER, REFERENCED BY NAME. The sizes used to be written as literal
+   * pixels at some sixty call sites and had drifted into eleven distinct values
+   * -- 17px, 20px and 26px among them -- with nothing to say which of those
+   * differences were meant and which were somebody matching a neighbour by eye.
+   *
+   * `sm` IS THE BODY SIZE, and the rest of the scale is anchored to it: help
+   * text one step down, the title of a row one step up, section headings above
+   * that, and the page title as the only thing higher. It reads smaller than it
+   * did because a console is read at a desk with a lot on screen at once, not
+   * skimmed -- the hierarchy between the steps is unchanged.
+   */
+  --font-size-3xs: 11px; /* uppercase eyebrows: nav sections, audit roles */
+  --font-size-2xs: 12px; /* badges, table headers, card labels */
+  --font-size-xs: 13px; /* help text, hints, timestamps, secondary detail */
+  --font-size-sm: 14px; /* body, and every control that inherits it */
+  --font-size-md: 15px; /* the title of a row within a section */
+  --font-size-lg: 16px; /* section headings and dialog titles */
+  --font-size-xl: 18px; /* the login card's title */
+  --font-size-2xl: 22px; /* the page title, and the one number on a stat card */
+
+  /*
+   * LINE HEIGHT. Headings set solid. Body prose at 1.45.
+   *
+   * `snug` is for the explanatory paragraph under a heading or beside a
+   * control. There are a great many of those in this console -- it explains
+   * what disable, revoke and retire each do, every time -- and at body leading
+   * each was costing a line it did not need.
+   */
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-normal: 1.45;
 
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.1);
 }

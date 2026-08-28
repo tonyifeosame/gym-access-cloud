@@ -70,16 +70,27 @@ func operatorSiteScope(c *gin.Context) ([]int64, error) {
 //
 // The fingerprint template never crosses this boundary. It holds a credential
 // locator rather than biometric data, but the frontend must treat biometrics as
-// an abstraction either way -- so the only thing that travels is whether a
-// credential exists.
-func consolePerson(member models.Member) models.ConsolePerson {
+// an abstraction either way -- so the only things that travel are whether a
+// credential exists and WHICH STORE says so.
+//
+// hasCredential comes from `credentials`, the structured record. The legacy
+// column is read from the member in hand. Both are needed because the two are
+// written by different paths that do not keep each other in step -- see the note
+// on models.ConsolePerson -- and reporting either one alone would call somebody
+// unenrolled who is enrolled.
+func consolePerson(member models.Member, hasCredential bool) models.ConsolePerson {
+	enrolment := database.PersonEnrolment{
+		HasCredential: hasCredential,
+		HasLegacy:     member.FingerprintTemplate != "",
+	}
 	return models.ConsolePerson{
 		ID:                member.PublicID,
 		ExternalID:        member.MemberID,
 		FullName:          member.FullName,
 		Category:          member.MembershipType,
 		Active:            member.Active,
-		BiometricEnrolled: member.FingerprintTemplate != "",
+		BiometricEnrolled: enrolment.Enrolled(),
+		EnrolmentSource:   enrolment.Source(),
 		CreatedAt:         member.CreatedAt,
 		UpdatedAt:         member.UpdatedAt,
 	}
@@ -120,8 +131,12 @@ func ConsoleGetCompany(c *gin.Context) {
 
 // ConsoleListSites handles GET /console/sites
 //
-// Narrowed to the caller's grants. The response carries no API keys: the
-// projection does not select the column at all.
+// Narrowed to the caller's grants, then to the optional `q` search. The response
+// carries no API keys: the projection does not select the column at all.
+//
+// SEARCH NARROWS WITHIN THE GRANT AND NEVER WIDENS IT. Both predicates are in
+// the same statement and the scope one is applied whether or not a term was
+// given, so a search cannot surface a site the operator is not entitled to.
 func ConsoleListSites(c *gin.Context) {
 	scope, err := operatorSiteScope(c)
 	if err != nil {
@@ -130,7 +145,9 @@ func ConsoleListSites(c *gin.Context) {
 		return
 	}
 
-	sites, err := database.ListConsoleSites(c.GetInt64("company_id"), scope)
+	search := truncateSearch(strings.TrimSpace(c.Query("q")))
+
+	sites, err := database.ListConsoleSites(c.GetInt64("company_id"), scope, search)
 	if err != nil {
 		logError(c, "console list sites", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve sites"})
@@ -290,18 +307,28 @@ func ConsoleListTerminals(c *gin.Context) {
 		return
 	}
 
-	terminals, err := database.ListDevices(c.GetInt64("company_id"),
-		c.Query("outdated") == "true", scope)
+	query := database.DeviceQuery{
+		Search:       truncateSearch(strings.TrimSpace(c.Query("q"))),
+		OutdatedOnly: c.Query("outdated") == "true",
+		Limit:        boundedQueryInt(c, "limit", defaultTerminalLimit, 1, maxTerminalLimit),
+		Offset:       boundedQueryInt(c, "offset", 0, 0, 0),
+	}
+
+	page, err := database.ListConsoleDevicesPage(c.GetInt64("company_id"), scope, query)
 	if err != nil {
 		logError(c, "console list terminals", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve terminals"})
 		return
 	}
-	if terminals == nil {
-		terminals = []models.DeviceInventory{}
-	}
 
-	c.JSON(http.StatusOK, gin.H{"count": len(terminals), "terminals": terminals})
+	c.JSON(http.StatusOK, models.ConsoleTerminalsPage{
+		Count:   len(page.Devices),
+		Total:   page.Total,
+		Limit:   query.Limit,
+		Offset:  query.Offset,
+		HasMore: query.Offset+len(page.Devices) < page.Total,
+		Devices: page.Devices,
+	})
 }
 
 // ConsoleTerminalSummary handles GET /console/terminals/summary
@@ -489,6 +516,12 @@ const (
 	defaultPeopleLimit = 50
 	maxPeopleLimit     = 200
 	maxSearchLength    = 100
+
+	// The fleet's own bounds (D2). Same shape as people, and separate constants
+	// rather than shared ones because the two lists have different row costs and
+	// will not stay in step for ever.
+	defaultTerminalLimit = 50
+	maxTerminalLimit     = 200
 )
 
 // ConsoleListPeople handles GET /console/people?limit=&offset=&q=
@@ -508,6 +541,16 @@ const (
 func ConsoleListPeople(c *gin.Context) {
 	query := database.PeopleQuery{
 		Search: truncateSearch(strings.TrimSpace(c.Query("q"))),
+
+		// Both filters are TRI-STATE. Absent is not `false`: "everybody" and
+		// "everybody with no credential" are different questions, and the
+		// second is the one asked before a rollout. Filtering happens in SQL
+		// for the same reason the search does -- narrowing a fetched page would
+		// narrow the page rather than the roster, which is silently wrong past
+		// the first one and silently right in every test with three fixtures.
+		Enrolled: optionalBoolQuery(c, "enrolled"),
+		Active:   optionalBoolQuery(c, "active"),
+
 		Limit:  boundedQueryInt(c, "limit", defaultPeopleLimit, 1, maxPeopleLimit),
 		Offset: boundedQueryInt(c, "offset", 0, 0, 0),
 	}
@@ -520,8 +563,8 @@ func ConsoleListPeople(c *gin.Context) {
 	}
 
 	people := make([]models.ConsolePerson, 0, len(page.People))
-	for _, member := range page.People {
-		people = append(people, consolePerson(member))
+	for _, row := range page.People {
+		people = append(people, consolePerson(row.Member, row.Enrolment.HasCredential))
 	}
 
 	c.JSON(http.StatusOK, models.ConsolePeoplePage{
@@ -569,6 +612,67 @@ func truncateSearch(term string) string {
 	return term
 }
 
+// optionalBoolQuery reads a TRI-STATE filter: absent, true, or false.
+//
+// Returns nil for absent, which every caller must treat as "no filter" rather
+// than as false. The difference is the whole point of these parameters:
+// `enrolled=false` asks for the people with no credential, while no `enrolled`
+// at all asks for everybody, and collapsing the second into the first would hide
+// every enrolled person from an unfiltered list.
+//
+// UNPARSEABLE FALLS BACK TO ABSENT, matching boundedQueryInt's discipline: a
+// caller sending `enrolled=maybe` gets the unfiltered list rather than a 400.
+// Guessing which of true or false they meant would be worse than either.
+func optionalBoolQuery(c *gin.Context, name string) *bool {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil
+	}
+	return &value
+}
+
+// ConsoleListPersonCredentials handles
+// GET /console/people/:external_id/credentials
+//
+// "Is this person enrolled, where, and at how many doors." VIEWER, company
+// scoped, matching ConsoleListPersonPermissions -- the precedent for every
+// person-scoped read, and for the same stated reason: somebody at a front desk
+// has to be able to answer why a member is not recognised, and the rules are not
+// secret from the people administering the deployment.
+//
+// NO BIOMETRIC MATERIAL, AND NOTHING THAT LOCATES ANY. See the SELECT list in
+// database/console_credentials.go, which is the boundary, and the response types
+// in models/console.go, which cannot carry material even if the query changed.
+//
+// WHY THIS ENDPOINT EXISTS AT ALL. `biometric_enrolled` is a boolean, and a
+// boolean cannot answer the question an operator actually has: their member
+// works at the front desk and is refused at the east gate, and until now nothing
+// anywhere could tell them that the enrolment binds to the sensor that took it.
+// `usable_at_terminal_count` is that answer.
+func ConsoleListPersonCredentials(c *gin.Context) {
+	credentials, err := database.ListPersonCredentials(
+		c.GetInt64("company_id"), c.Param("external_id"))
+	switch {
+	case errors.Is(err, models.ErrPersonNotFound):
+		// 404 rather than an empty list. "This person does not exist" and "this
+		// person has never been enrolled" are different answers, and an empty
+		// list is the honest form of the second.
+		c.JSON(http.StatusNotFound, gin.H{"error": "Person not found"})
+		return
+	case err != nil:
+		logError(c, "console list person credentials", err)
+		c.JSON(http.StatusInternalServerError,
+			gin.H{"error": "Failed to retrieve credentials"})
+		return
+	}
+
+	c.JSON(http.StatusOK, credentials)
+}
+
 // ConsoleGetPerson handles GET /console/people/:external_id
 func ConsoleGetPerson(c *gin.Context) {
 	member, err := database.GetMemberByID(c.GetInt64("company_id"), c.Param("external_id"))
@@ -581,7 +685,17 @@ func ConsoleGetPerson(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve person"})
 		return
 	}
-	c.JSON(http.StatusOK, consolePerson(*member))
+	// The structured record, which the member row cannot answer for. A person
+	// enrolled through the placement endpoint has a credential and an empty
+	// legacy column, so reading only the member would report them unenrolled.
+	enrolment, err := database.PersonEnrolmentFor(c.GetInt64("company_id"), c.Param("external_id"))
+	if err != nil {
+		logError(c, "console person enrolment", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve person"})
+		return
+	}
+
+	c.JSON(http.StatusOK, consolePerson(*member, enrolment.HasCredential))
 }
 
 // ConsoleCreatePerson handles POST /console/people
@@ -647,7 +761,10 @@ func ConsoleCreatePerson(c *gin.Context) {
 		"active":    member.Active,
 	})
 
-	c.JSON(http.StatusCreated, consolePerson(member))
+	// A person created this instant holds no credential. Stated rather than
+	// queried: the only answer a lookup could give is the one written here, and
+	// a round trip to learn it would be a round trip that can fail.
+	c.JSON(http.StatusCreated, consolePerson(member, false))
 }
 
 // defaultPersonCategory fills people.membership_type when a caller supplies
@@ -725,7 +842,17 @@ func ConsoleUpdatePerson(c *gin.Context) {
 	}
 	recordAudit(c, auditPersonUpdated, auditTargetPerson, "", externalID, changes)
 
-	c.JSON(http.StatusOK, consolePerson(member))
+	// LOOKED UP, NOT ASSUMED. Editing a name must never change what the console
+	// says about somebody's credential, and defaulting to false here would
+	// unenrol every person the moment an operator corrected their spelling.
+	enrolment, err := database.PersonEnrolmentFor(c.GetInt64("company_id"), c.Param("external_id"))
+	if err != nil {
+		logError(c, "console person enrolment", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update person"})
+		return
+	}
+
+	c.JSON(http.StatusOK, consolePerson(member, enrolment.HasCredential))
 }
 
 // ConsoleDeletePerson handles DELETE /console/people/:external_id

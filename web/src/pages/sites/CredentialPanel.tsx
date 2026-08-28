@@ -6,7 +6,7 @@ import { CopyButton } from '../../components/CopyButton'
 /**
  * The one-time provisioning key.
  *
- * This is the only place in the console where a site API key is ever rendered,
+ * This is the only place in the console where a provisioning key is ever rendered,
  * and everything about it is shaped by two facts: the key registers terminals
  * and rotates their device credentials, and it cannot be recovered. If the
  * operator closes this panel without storing it, their only remedy is to rotate
@@ -75,14 +75,21 @@ export function CredentialPanel({
         <strong>This key is shown once and cannot be recovered.</strong> Store it in a
         password manager now. It is the provisioning secret for this site: anyone holding
         it can register terminals here and reissue their credentials. If it is lost, the
-        only remedy is to rotate — which invalidates this key too.
+        only remedy is to rotate it, which invalidates this key too.
       </p>
 
       {extra}
 
       <div className="credential__value">
+        {/*
+          "Provisioning key", the same words the rest of the console uses. This
+          label alone said "Site API key" while the site page called it a
+          provisioning key and the claim-code dialog called it a site key: three
+          names for one credential, one of which ("API") is a developer's word
+          for it rather than an operator's.
+        */}
         <label className="field__label" htmlFor={`${warningId}-key`}>
-          Site API key
+          Provisioning key
         </label>
         <div className="credential__row">
           {/*

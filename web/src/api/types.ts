@@ -96,6 +96,26 @@ export interface Session {
   session_expires_in_seconds: number
 }
 
+/**
+ * Self-service signup, POST /auth/register.
+ *
+ * FOUR FIELDS AND NOTHING ELSE. A new customer has no company id, no slug, no
+ * platform administrator, no claim code and no provisioning key — they have a
+ * name, a company, an address and a password, and the server derives everything
+ * else. Any field added here would be one more thing somebody has to be told
+ * before they can start.
+ *
+ * There is deliberately NO role, NO site and NO company id: the server forces
+ * OWNER, creates the company's first site itself, and would ignore anything
+ * sent in their place.
+ */
+export interface SignupRequest {
+  full_name: string
+  company_name: string
+  email: string
+  password: string
+}
+
 export interface CompanyDetail extends Company {
   contact_email?: string
   active: boolean
@@ -143,31 +163,32 @@ export interface Site {
   name: string
   address?: string
   /**
-   * IANA zone. Describes where the HARDWARE stands — a different question from
-   * the zone an operator reads timestamps in, which is their own browser's.
+   * The zone the HARDWARE stands in — a different question from the zone an
+   * operator reads timestamps in, which is their own browser's.
    */
   timezone: string
   active: boolean
   /** Live terminals at this site. */
   terminal_count: number
   created_at: string
-  /**
-   * The first 12 characters of the site's provisioning key. NOT SECRET — it
-   * identifies which key a site is on without being reconstructible.
-   *
-   * OPTIONAL BECAUSE NO READ ENDPOINT RETURNS IT, and that is still true after
-   * the terminal-lifecycle pass. `sites.api_key_prefix` exists and
-   * `database.SiteKeyPrefix` reads it, but `consoleSiteColumns`
-   * (database/console.go) does not select it and `models.ConsoleSite` has no
-   * field for it — so neither `GET /console/sites` nor
-   * `GET /console/sites/{id}` carries one. This is populated ONLY from a create
-   * or rotate response, for the life of that panel.
-   *
-   * Typed optional rather than assumed, so adding it to the projection is a
-   * backend-only change with nothing to alter here. Recorded in
-   * docs/frontend-backend-requirements.md as CO-01.
-   */
-  api_key_prefix?: string
+  /*
+    NO `api_key_prefix` HERE, AND THAT IS THE CORRECTED FACT rather than an
+    omission. It was typed optional on the theory that a create or rotate
+    response could populate it for the life of a panel, and the list and detail
+    pages both rendered a column and a card for it.
+
+    Neither could ever fill. `models.ConsoleSite` has no such field and
+    `consoleSiteColumns` does not select it, so no read carries one; `useCreateSite`
+    caches `result.site` rather than the response, and `useRotateSiteKey` only
+    invalidates. Every row and every card rendered an em dash, in every session,
+    for ever — while the browser mock injected a prefix onto its stored site and
+    made the dead UI look alive in development.
+
+    The prefix still exists where it is real and useful: on `SiteCredential`,
+    inside the one-time panel that shows the key it belongs to. If a read
+    endpoint ever returns one, add the field back together with the surface that
+    displays it, not before.
+  */
   /**
    * The site's outage behaviour, and the grace period `CACHED_GRACE` uses.
    *
@@ -365,6 +386,20 @@ export interface SitesResponse {
 }
 
 /**
+ * A sites search.
+ *
+ * SERVER-SIDE, like people's and unlike the terminal list's. `count` is the
+ * whole match rather than a page of it — the endpoint is not paginated, because
+ * a company's locations are counted in tens — but the MATCHING still happens in
+ * SQL, so a term narrows the estate rather than whatever one response happened
+ * to carry.
+ */
+export interface SitesQuery {
+  /** Matches the site name or its address, anywhere, case-insensitively. */
+  search?: string
+}
+
+/**
  * A site's device configuration.
  *
  * `settings` is an OPEN JSON object, deliberately. The platform does not fix the
@@ -449,7 +484,42 @@ export interface Terminal {
   last_heartbeat_at?: string
   current_firmware_version: string
   firmware_outdated: boolean
+  /**
+   * How this terminal's CURRENT credential was issued.
+   *
+   * Absent on rows that predate the column, which must be rendered as "not
+   * recorded" rather than guessed — a console cannot un-say "site key".
+   */
+  provisioned_via?: ProvisioningSource
+
+  /**
+   * What this terminal reported it can do.
+   *
+   * ABSENT AND EMPTY ARE DIFFERENT, and a console must not collapse them.
+   * Absent means the terminal has never reported — a brand-new unit that has
+   * not heartbeat yet, and a build that predates capability reporting, are both
+   * absent, and they deserve different words. An empty array is a real answer:
+   * it reports, and has none of these.
+   *
+   * Nothing may be inferred from the firmware version instead. Every image
+   * built before this feature reports "1.0.0" whatever it contains, which is
+   * exactly why this field exists.
+   */
+  capabilities?: TerminalCapability[]
 }
+
+/**
+ * What a terminal can do, in the firmware's own words.
+ *
+ * Matched EXACTLY — no prefixes, no wildcards, and never derived from a version
+ * string. The union is open on the wire: the server stores tokens it does not
+ * recognise and a console must ignore them rather than treat the list as
+ * malformed.
+ */
+export type TerminalCapability =
+  | 'wifi_provisioning'
+  | 'wifi_recovery'
+  | 'terminal_announce'
 
 /**
  * One terminal in full.
@@ -468,8 +538,28 @@ export interface TerminalDetail extends Terminal {
   effective_applications: ApplicationCode[]
 }
 
+/**
+ * One response from `GET /console/terminals`.
+ *
+ * THE ENDPOINT IS PAGED SINCE D2, and this type describes ONE PAGE of it.
+ * `count` is the rows in this response; `total` is the size of the whole match.
+ * A caller that reads `terminals` and ignores the rest is reading at most
+ * `limit` rows -- fifty, by default -- and must not present that as the fleet.
+ *
+ * `fetchTerminals` in api/endpoints.ts returns a COMPLETED one: it follows
+ * `has_more` to the end and hands back every terminal in the caller's scope,
+ * which is what every consumer in this console actually wants.
+ *
+ * The paging fields are OPTIONAL because a server that predates D2 does not
+ * send them, and this console is not always deployed in lockstep with the API.
+ * An absent `has_more` means the response was never paged and is already whole.
+ */
 export interface TerminalsResponse {
   count: number
+  total?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
   terminals: Terminal[]
 }
 
@@ -488,6 +578,131 @@ export interface FleetSummary {
 export interface TerminalModeRequest {
   application_mode: ApplicationCode | typeof MULTI_PURPOSE
 }
+
+// ---------------------------------------------------------------------------
+// Adding a terminal: announce and approve
+// ---------------------------------------------------------------------------
+
+/**
+ * The customer-facing way to add a terminal.
+ *
+ * The unit displays an eight-character PAIRING CODE on its own panel; an
+ * administrator types it here, confirms the hardware, picks a site and approves;
+ * the terminal then collects its credential.
+ *
+ * WHAT THIS IS NOT. It is not an open claim code. Nothing the server mints can
+ * be redeemed by arbitrary hardware — the secret travels outward, on the
+ * terminal's screen, and is bound to exactly one announcement from one serial.
+ * The serial-bound claim code still exists for pre-authorised installs and is
+ * unchanged.
+ */
+export const PAIRING_CODE_LENGTH = 8
+
+/** How the pairing code is grouped for reading and typing: XXXX-XXXX. */
+export const PAIRING_CODE_GROUP = 4
+
+/**
+ * The alphabet the server mints from: Crockford's, minus the characters that
+ * are misread off a panel (I, L, O, U, 0, 1).
+ *
+ * Used to FORMAT rather than to validate — the field accepts what somebody
+ * types and lets the server refuse it, because a client-side rejection of a
+ * character the server would have accepted is a customer stuck at a door.
+ */
+export const PAIRING_CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+export interface AdoptTerminalRequest {
+  pairing_code: string
+}
+
+export interface ApproveTerminalRequest {
+  site_id: string
+  device_name?: string
+}
+
+export interface RejectTerminalRequest {
+  reason?: string
+}
+
+/**
+ * What the console must SAY before an operator approves.
+ *
+ * Recomputed by the server on every read, because what it describes can change
+ * between the screen opening and the button being pressed — a colleague can
+ * disable the terminal, or another company can register the serial.
+ */
+export type TerminalVerdict =
+  | 'NEW'
+  | 'RE_PROVISION'
+  | 'REFUSED_OTHER_COMPANY'
+  | 'REFUSED_DISABLED'
+
+export type PendingTerminalState = 'ADOPTED' | 'APPROVED' | 'EXPIRED'
+
+/** The terminal a RE_PROVISION would rotate the credential of. */
+export interface ExistingTerminalSummary {
+  serial_number: string
+  device_name?: string
+  site_name?: string
+  status?: string
+}
+
+/**
+ * A terminal waiting to be set up.
+ *
+ * NO SECRET IS IN THIS SHAPE. The pairing code is not readable back — the server
+ * stores only its hash — and the announce token belongs to the device.
+ */
+export interface PendingTerminal {
+  id: string
+  serial_number: string
+  state: PendingTerminalState
+  verdict: TerminalVerdict
+  existing_terminal?: ExistingTerminalSummary
+
+  firmware_version?: string
+  hardware_revision?: string
+
+  /**
+   * What the unit said it can do when it announced.
+   *
+   * ABSENT MEANS IT NEVER SAID, which must be rendered as unknown rather than
+   * as none — an administrator about to mount a terminal on a door wants to
+   * know whether it can be recovered over the network, and "we have not been
+   * told" and "it cannot" send them to different places.
+   *
+   * An empty array is a real answer. SHOWN, NEVER TRUSTED: this arrives on an
+   * unauthenticated endpoint from hardware nobody has confirmed yet, and
+   * nothing is gated on it.
+   */
+  capabilities?: TerminalCapability[]
+
+  /** Corroboration that this is the unit in front of the operator. */
+  first_seen_ip?: string
+  last_seen_ip?: string
+  last_seen_at?: string
+  announced_at: string
+
+  adopted_by?: string
+  adopted_at?: string
+
+  site_id?: string
+  site_name?: string
+  device_name?: string
+
+  approved_by?: string
+  approved_at?: string
+
+  expires_at: string
+}
+
+export interface PendingTerminalsResponse {
+  count: number
+  pending: PendingTerminal[]
+}
+
+/** How a terminal's current credential was issued. `null` predates the column. */
+export type ProvisioningSource = 'SITE_KEY' | 'CLAIM_CODE' | 'ANNOUNCEMENT'
 
 // ---------------------------------------------------------------------------
 // Terminal lifecycle
@@ -578,6 +793,87 @@ export interface TerminalResyncResponse {
   serial_number: string
   superseded_jobs: number
   pending_jobs: number
+}
+
+// ---------------------------------------------------------------------------
+// Change Wi-Fi
+// ---------------------------------------------------------------------------
+
+/**
+ * How far a Change Wi-Fi command has got.
+ *
+ * THREE STATES AND NOT A BOOLEAN, and that is the whole point of the screen this
+ * serves. A queued command, a collected one and an applied one are different
+ * facts, and the console must not claim the last until the DEVICE has said so:
+ *
+ *   NONE       nothing has ever been sent to this terminal.
+ *   QUEUED     waiting for the terminal to collect it. "Waiting for terminal…"
+ *   DELIVERED  the terminal has it. It does not yet say it has acted on it.
+ *   ACCEPTED   the terminal ACKNOWLEDGED it. The only evidence anything
+ *              happened at the door.
+ *   EXPIRED    never collected inside its window, so it will not be delivered.
+ *              Deliberate: a command that arrived after the customer recovered
+ *              the terminal by hand would wipe the Wi-Fi they just gave it.
+ *   FAILED     the terminal reported it could not apply it.
+ *   CANCELLED  superseded by something that retired the terminal's queue.
+ */
+export type WifiRecoveryState =
+  | 'NONE'
+  | 'QUEUED'
+  | 'DELIVERED'
+  | 'ACCEPTED'
+  | 'EXPIRED'
+  | 'FAILED'
+  | 'CANCELLED'
+
+/**
+ * Why a terminal cannot be sent a command. Mirrors the `code` on the API's 409.
+ *
+ * The console branches on THESE and never on the message beside them: the
+ * message is for humans and is allowed to improve, and TERMINAL_OFFLINE is the
+ * one that changes what the customer is told to do — the answer there is the
+ * terminal's own local recovery, which no console can perform.
+ */
+export type WifiRecoveryRefusal =
+  | 'TERMINAL_OFFLINE'
+  | 'TERMINAL_DISABLED'
+  | 'TERMINAL_NOT_PROVISIONED'
+  /**
+   * The terminal has not reported that it can carry this out, so NOTHING WAS
+   * QUEUED.
+   *
+   * This is the refusal that replaced a lie. Firmware predating the feature
+   * acknowledges a job type it does not recognise — deliberately, so a newer
+   * server's job types are not redelivered for ever — so the platform used to
+   * queue the command, the terminal used to acknowledge it, and this console
+   * used to report that the terminal had confirmed the request while a customer
+   * stood at a door waiting for a setup network that was never going to appear.
+   */
+  | 'TERMINAL_CANNOT_CHANGE_WIFI'
+
+/**
+ * A Change Wi-Fi command, as the request returns it and the poll reads it back.
+ *
+ * NOTHING HERE NAMES A NETWORK, and nothing may be added that does. The platform
+ * never learns the customer's Wi-Fi password: the command hands the terminal
+ * back to its setup portal and somebody standing next to it types the new
+ * password into the hardware.
+ */
+export interface WifiRecoveryStatus {
+  serial_number: string
+  state: WifiRecoveryState
+  /** The sync job's public id, for support. Absent until one has been sent. */
+  request_id?: string
+  /** A command was already waiting, so this request queued nothing new. */
+  already_queued?: boolean
+  terminal_status: TerminalStatus
+  online: boolean
+  queued_at?: string
+  delivered_at?: string
+  /** When the TERMINAL said it had the command. The only proof of anything. */
+  acknowledged_at?: string
+  expires_at?: string
+  last_heartbeat_at?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +1010,30 @@ export interface EnrollmentRequest {
  * Both are needed: "showing 50 of 1,284" needs the pair, and `has_more` is what
  * says whether to offer a next page.
  */
+/**
+ * The setup facts the overview cannot derive for itself.
+ *
+ * Everything else the onboarding guidance needs is a count the console already
+ * holds. This is not: access rules are readable one person at a time, so
+ * "has anybody been granted anything" would cost one request per person and
+ * would be a sample rather than a count past the first page.
+ *
+ * `people_without_access` counts ACTIVE people with no rule IN FORCE: no rule
+ * that is switched on and inside its validity window right now. Not "no rule at
+ * all" — somebody whose only rule expired last month, or has not started yet, or
+ * was switched off, reaches nothing, and a figure rendered to a customer as
+ * "nobody can get in yet" has to mean what it says.
+ *
+ * That is the same reading as `standingOf()` in pages/access/accessVocabulary,
+ * which grades every rule IN_FORCE, NOT_YET, EXPIRED or INACTIVE and is what
+ * badges them on the person's own Access panel — and the same reading the
+ * authorization engine applies per rule. Schedules are not evaluated by any of
+ * the three: a rule that is in force but out of hours has still been granted.
+ */
+export interface OnboardingState {
+  people_without_access: number
+}
+
 export interface PeoplePage {
   count: number
   total: number

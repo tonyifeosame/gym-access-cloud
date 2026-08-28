@@ -46,7 +46,11 @@ export const keys = {
 
   sites: {
     all: [ROOT, 'sites'] as const,
-    list: () => [ROOT, 'sites', 'list'] as const,
+    // Keyed on the search term, so the Sites page's filtered result and the ten
+    // other callers that want the whole estate for a dropdown do not overwrite
+    // one another. Every invalidation targets `sites.all`, which is a prefix of
+    // all of these, so no call site has to know the term to refresh.
+    list: (search = '') => [ROOT, 'sites', 'list', { search }] as const,
     detail: (siteId: string) => [ROOT, 'sites', 'detail', siteId] as const,
     settings: (siteId: string) => [ROOT, 'sites', 'settings', siteId] as const,
   },
@@ -57,6 +61,49 @@ export const keys = {
       [ROOT, 'terminals', 'list', { outdated: options.outdated ?? false }] as const,
     summary: () => [ROOT, 'terminals', 'summary'] as const,
     detail: (serial: string) => [ROOT, 'terminals', 'detail', serial] as const,
+
+    /**
+     * The Change Wi-Fi command's progress, for one terminal.
+     *
+     * UNDER `terminals` rather than beside it, because it genuinely belongs to
+     * one terminal and every fleet-wide invalidation should refresh it — a
+     * terminal that has just been disabled or retired must not keep polling a
+     * command that can no longer be delivered.
+     */
+    wifiRecovery: (serial: string) => [ROOT, 'terminals', 'wifi-recovery', serial] as const,
+  },
+
+  /**
+   * Terminals waiting to be set up.
+   *
+   * A SIBLING OF `terminals` RATHER THAN A CHILD, deliberately. A pending
+   * terminal is not a terminal yet — it has no credential, no site until it is
+   * approved, and no row in the fleet — and nesting it under `terminals.all`
+   * would make every fleet invalidation refetch it and vice versa.
+   *
+   * The two do have to move together at one moment, and exactly one: approval
+   * turns a pending row into a terminal shortly afterwards. The mutation hooks
+   * invalidate both by hand there, which is one deliberate line rather than a
+   * hierarchy that couples them everywhere.
+   */
+  pendingTerminals: {
+    all: [ROOT, 'pending-terminals'] as const,
+    list: () => [ROOT, 'pending-terminals', 'list'] as const,
+    detail: (id: string) => [ROOT, 'pending-terminals', 'detail', id] as const,
+  },
+
+  /**
+   * What this company still has to set up.
+   *
+   * ITS OWN ROOT rather than a member of `people`, even though the one figure it
+   * carries is about people. Anything under `people` is invalidated whenever a
+   * person is created, edited or removed — which is correct for a roster page
+   * and wrong here, since granting access changes this number without touching a
+   * person at all. Kept apart so each is invalidated by what actually moves it.
+   */
+  onboarding: {
+    all: [ROOT, 'onboarding'] as const,
+    state: () => [ROOT, 'onboarding', 'state'] as const,
   },
 
   people: {

@@ -231,6 +231,26 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// SignupRequest is the body of POST /api/v1/auth/register.
+//
+// FOUR FIELDS, AND THE ABSENT ONES ARE THE POINT. There is no role, because the
+// first account in a company is forced to OWNER. There is no company id or slug,
+// because the company does not exist yet and the slug is derived. There is no
+// site, because one is created automatically. A new customer knows their name,
+// their company, their address and a password they just chose, and this is
+// exactly that list.
+//
+// Only presence is validated by the binding tags. Substance -- the address being
+// an address, the password meeting the policy, the names fitting their columns
+// -- is checked in database.RegisterCompany, so the same rules apply however an
+// account is created and there is one place to read them.
+type SignupRequest struct {
+	FullName    string `json:"full_name" binding:"required"`
+	CompanyName string `json:"company_name" binding:"required"`
+	Email       string `json:"email" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+}
+
 // PasswordChangeRequest is the body of POST /api/v1/auth/password.
 //
 // The current password is required even though the caller already holds a valid

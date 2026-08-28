@@ -71,14 +71,21 @@ describe('settings scopes stay separate', () => {
     expect(within(account).getByText(/This session expires/)).toBeInTheDocument()
   })
 
-  it('says an operator cannot change their own name, email or role', async () => {
-    // What stops an account quietly granting itself more than it was given.
+  it('SENDS AN OPERATOR TO WHOEVER CAN CHANGE THEIR DETAILS', async () => {
+    /*
+      THE RULE IS UNCHANGED and so is the reason for it. What changed is that the
+      sentence now leads with who to ask rather than with what you may not do —
+      this page had two notices whose headlines were both refusals, which made a
+      settings screen read as a list of prohibitions.
+    */
     signIn()
     renderSettings()
 
     expect(
-      await screen.findByText(/Your name, email and role are set by an administrator/),
+      await screen.findByText(/ask an administrator or owner in your company/i),
     ).toBeInTheDocument()
+    // The security reason survives the rewrite: it is why the rule exists.
+    expect(screen.getByText(/cannot raise its own permissions/i)).toBeInTheDocument()
   })
 
   it('shows company details read-only, and says WHY they are read-only', async () => {
@@ -90,11 +97,45 @@ describe('settings scopes stay separate', () => {
     const company = await screen.findByRole('region', { name: 'Company' })
     expect(await within(company).findByText('Northwind Logistics')).toBeInTheDocument()
     expect(within(company).getByText('northwind')).toBeInTheDocument()
+    /*
+      THE DISTINCTION THIS TEST EXISTS FOR IS KEPT: not a permission, so a bigger
+      role would not help. Only the vocabulary changed — "AccessLink has no
+      operator API for changing a company's name" described our system to
+      somebody who does not have one.
+    */
     expect(
-      within(company).getByText(/gap in the platform rather than a restriction on your role/),
+      within(company).getByText(/cannot be changed from the console by anyone, whatever their role/i),
+    ).toBeInTheDocument()
+    expect(
+      within(company).getByText(/Contact support to have your company/i),
     ).toBeInTheDocument()
     // No editing controls at all, for anyone.
     expect(within(company).queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
+  it('EXPLAINS THE COMPANY REFERENCE rather than printing a bare identifier', async () => {
+    // "Identifier: northwind" in monospace told a customer nothing about what it
+    // was for, so it read as something they were meant to understand.
+    signIn('OWNER')
+    renderSettings()
+
+    const company = await screen.findByRole('region', { name: 'Company' })
+    expect(await within(company).findByText('Reference')).toBeInTheDocument()
+    expect(within(company).getByText(/quote this if you contact support/i)).toBeInTheDocument()
+  })
+
+  it('SHOWS THE CREATION DATE WITHOUT AN HOUR NOBODY CHOSE', async () => {
+    // Read back in the viewer's zone, a midnight-UTC creation rendered as
+    // "1:00 AM". The instant is still carried in the element for anyone who
+    // needs it.
+    signIn('OWNER')
+    renderSettings()
+
+    const company = await screen.findByRole('region', { name: 'Company' })
+    const created = (await within(company).findByText('Created')).closest('div') as HTMLElement
+    const stamp = within(created).getByRole('time')
+    expect(stamp.textContent).not.toMatch(/\d{1,2}:\d{2}/)
+    expect(stamp).toHaveAttribute('datetime')
   })
 
   it('points at the other configuration scopes rather than duplicating them', async () => {
@@ -102,10 +143,16 @@ describe('settings scopes stay separate', () => {
     renderSettings()
 
     const elsewhere = await screen.findByRole('region', { name: 'Configured elsewhere' })
-    expect(within(elsewhere).getByRole('link', { name: 'Site settings' })).toBeInTheDocument()
-    expect(within(elsewhere).getByRole('link', { name: 'Terminal settings' })).toBeInTheDocument()
+    // "Manage …" because both of the first two lead to a LIST, and the label
+    // used to promise a settings screen.
     expect(
-      within(elsewhere).getByRole('link', { name: 'Application settings' }),
+      within(elsewhere).getByRole('link', { name: 'Manage site settings' }),
+    ).toBeInTheDocument()
+    expect(
+      within(elsewhere).getByRole('link', { name: 'Manage terminal settings' }),
+    ).toBeInTheDocument()
+    expect(
+      within(elsewhere).getByRole('link', { name: 'Manage features' }),
     ).toBeInTheDocument()
     // And does not offer an editor for any of them here.
     expect(within(elsewhere).queryByRole('button')).not.toBeInTheDocument()
@@ -116,11 +163,15 @@ describe('settings scopes stay separate', () => {
     renderSettings()
 
     const elsewhere = await screen.findByRole('region', { name: 'Configured elsewhere' })
-    expect(within(elsewhere).getByRole('link', { name: 'Site settings' })).toBeInTheDocument()
     expect(
-      within(elsewhere).queryByRole('link', { name: 'Application settings' }),
+      within(elsewhere).getByRole('link', { name: 'Manage site settings' }),
+    ).toBeInTheDocument()
+    expect(
+      within(elsewhere).queryByRole('link', { name: 'Manage features' }),
     ).not.toBeInTheDocument()
-    expect(within(elsewhere).queryByRole('link', { name: 'Operators' })).not.toBeInTheDocument()
+    expect(
+      within(elsewhere).queryByRole('link', { name: 'Manage operators' }),
+    ).not.toBeInTheDocument()
   })
 
   it('reports a failed company load without breaking the rest of the page', async () => {

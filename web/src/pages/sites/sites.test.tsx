@@ -8,6 +8,7 @@ import type { Role, Session } from '../../api/types'
 import { keys } from '../../data/keys'
 import { makeSession, makeSite, makeTerminal, SITE_A, SITE_B } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { SiteDetailPage } from './SiteDetailPage'
 import { SitesListPage } from './SitesListPage'
@@ -135,6 +136,124 @@ describe('site list', () => {
     expect(await screen.findByRole('link', { name: SITE_A.site_name })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: SITE_B.site_name })).not.toBeInTheDocument()
   })
+
+  it('CARRIES NO KEY COLUMN, because one could never be filled', async () => {
+    // `models.ConsoleSite` has no `api_key_prefix` and `consoleSiteColumns`
+    // selects none, so this column rendered an em dash on every row of every
+    // company, for ever. It looked populated in development only because the
+    // mock invented a prefix; it no longer does.
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    expect(screen.queryByRole('columnheader', { name: 'Key' })).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/**
+ * SEARCH IS SERVER-SIDE, and these tests are written to fail if it stops being.
+ *
+ * Matching the fetched array would search whatever one response happened to
+ * carry rather than the estate -- silently wrong for a customer with more
+ * locations than the screen was built around, and silently right in every test
+ * with two fixtures. So the assertions check the REQUEST as well as the rows:
+ * a client-side filter would satisfy the second and not the first.
+ */
+describe('searching sites', () => {
+  function sitesRequests() {
+    return state.requests.filter(
+      (entry) => entry.method === 'GET' && entry.url.includes('/console/sites'),
+    )
+  }
+
+  it('sends the term to the API rather than filtering what it already holds', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+
+    await user.type(screen.getByLabelText('Search sites'), 'Abuja')
+
+    await waitFor(() =>
+      expect(sitesRequests().some((entry) => entry.url.includes('q=Abuja'))).toBe(true),
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: SITE_A.site_name })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByRole('link', { name: SITE_B.site_name })).toBeInTheDocument()
+  })
+
+  it('matches an address as well as a name', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    await user.type(screen.getByLabelText('Search sites'), 'Airport')
+
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: SITE_A.site_name })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByRole('link', { name: SITE_B.site_name })).toBeInTheDocument()
+  })
+
+  it('asks for everything when the box is empty, sending no q at all', async () => {
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    expect(sitesRequests()).not.toHaveLength(0)
+    expect(sitesRequests().every((entry) => !entry.url.includes('q='))).toBe(true)
+  })
+
+  it('DISTINGUISHES "nothing matched" FROM "no sites yet"', async () => {
+    // Telling a company with a full estate that it has no locations is the worse
+    // of the two mistakes, and an empty table cannot tell them apart on its own.
+    const user = userEvent.setup()
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    await user.type(screen.getByLabelText('Search sites'), 'nowhere at all')
+
+    expect(await screen.findByText('No sites match that search')).toBeInTheDocument()
+    expect(screen.queryByText('No sites yet')).not.toBeInTheDocument()
+  })
+
+  it('offers a way back from a search that matched nothing', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    await user.type(screen.getByLabelText('Search sites'), 'nowhere at all')
+    await screen.findByText('No sites match that search')
+
+    await user.click(screen.getByRole('button', { name: 'Clear search' }))
+    expect(await screen.findByRole('link', { name: SITE_A.site_name })).toBeInTheDocument()
+  })
+
+  it('NARROWS WITHIN A GRANT AND NEVER WIDENS IT', async () => {
+    // The scope predicate and the search predicate are applied in the same
+    // statement server-side. A term must not surface a site the operator is not
+    // entitled to, however exactly it matches.
+    const user = userEvent.setup()
+    signIn('MANAGER', { all_sites: false, sites: [SITE_A] })
+    renderSites()
+
+    await screen.findByRole('link', { name: SITE_A.site_name })
+    await user.type(screen.getByLabelText('Search sites'), SITE_B.site_name)
+
+    await waitFor(() =>
+      expect(screen.getByText('No sites match that search')).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('link', { name: SITE_B.site_name })).not.toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -165,7 +284,7 @@ describe('role restrictions', () => {
     renderSites(`/sites/${SITE_A.site_id}`)
 
     await screen.findByRole('heading', { name: SITE_A.site_name, level: 1 })
-    for (const label of ['Edit', 'Rotate key', 'Deactivate', 'Retire']) {
+    for (const label of ['Edit', 'Rotate provisioning key', 'Deactivate', 'Retire']) {
       expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
     }
   })
@@ -225,21 +344,59 @@ describe('site detail', () => {
     expect(await screen.findByText('Not one of your sites')).toBeInTheDocument()
   })
 
-  it('never shows more than the key PREFIX', async () => {
+  it('CARRIES NO PROVISIONING-KEY CARD, because one could never be filled', async () => {
+    /*
+      The card read "Not reported" on every site in every session, and spent
+      thirty-nine words telling a customer that our own read endpoints do not
+      return a field. `models.ConsoleSite` has no `api_key_prefix` and
+      `consoleSiteColumns` selects none, so no GET carries one; `useCreateSite`
+      caches `result.site` rather than the response and `useRotateSiteKey` only
+      invalidates, so no cache write puts one there either.
+
+      It looked alive in development because the test mock stored a prefix on the
+      site after a create or a rotation. It no longer does -- see the note in
+      test/server.ts -- which is what keeps a surface like this from being built
+      against a fixture the API will not supply.
+    */
     signIn()
     renderSites(`/sites/${SITE_A.site_id}`)
 
     await screen.findByRole('heading', { name: SITE_A.site_name, level: 1 })
-    expect(screen.getByText('Provisioning key')).toBeInTheDocument()
-    // TWO SEPARATE FACTS, and the card now keeps them apart. The KEY is
-    // unrecoverable by design; the non-secret PREFIX is simply not returned by
-    // any read endpoint, which is a gap in the API rather than a decision. The
-    // card used to run them together as "not shown", which implied the prefix
-    // was being withheld on purpose.
-    expect(screen.getByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
-    expect(screen.getByText(/not returned by any read endpoint/i)).toBeInTheDocument()
-    // No GET populates a full key, and nothing on the page requests one.
+    expect(screen.queryByText('Provisioning key')).not.toBeInTheDocument()
+    expect(screen.queryByText(/not returned by any read endpoint/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Not reported/i)).not.toBeInTheDocument()
+    // Unchanged and non-negotiable: no GET populates a full key, and nothing on
+    // the page requests one.
     expect(document.body.textContent).not.toMatch(/ats_[0-9a-f]{64}/)
+  })
+
+  it('KEEPS THE DESTRUCTIVE ACTIONS OUT OF THE PAGE HEADER', async () => {
+    /*
+      The header used to carry four buttons of equal weight -- Edit, Rotate
+      provisioning key,
+      Deactivate, Retire -- with only a fill colour separating the irreversible
+      one. `.page__actions` wraps, so at some viewport widths Retire landed on a
+      new row beside Edit.
+
+      Edit is the frequent, harmless one and stays. The three that stop hardware
+      working are grouped and labelled at the end of the page.
+    */
+    signIn()
+    renderSites(`/sites/${SITE_A.site_id}`)
+
+    await screen.findByRole('heading', { name: SITE_A.site_name, level: 1 })
+
+    const header = document.querySelector('.page__actions') as HTMLElement
+    expect(within(header).getByRole('button', { name: 'Edit' })).toBeInTheDocument()
+    expect(within(header).queryByRole('button', { name: 'Retire' })).not.toBeInTheDocument()
+    expect(within(header).queryByRole('button', { name: 'Rotate provisioning key' })).not.toBeInTheDocument()
+    expect(within(header).queryByRole('button', { name: 'Deactivate' })).not.toBeInTheDocument()
+
+    // All three are still reachable, together, under their own heading.
+    const danger = screen.getByRole('region', { name: 'Site administration' })
+    expect(within(danger).getByRole('button', { name: 'Rotate provisioning key' })).toBeInTheDocument()
+    expect(within(danger).getByRole('button', { name: 'Deactivate' })).toBeInTheDocument()
+    expect(within(danger).getByRole('button', { name: 'Retire' })).toBeInTheDocument()
   })
 })
 
@@ -263,7 +420,7 @@ describe('creating a site', () => {
     // THE WARNING IS UNMISSABLE and comes before the value.
     expect(await screen.findByText(/shown once and cannot be recovered/i)).toBeInTheDocument()
 
-    const key = screen.getByLabelText('Site API key') as HTMLInputElement
+    const key = screen.getByLabelText('Provisioning key') as HTMLInputElement
     expect(key.value).toMatch(/^ats_[0-9a-f]{64}$/)
     expect(key).toHaveAttribute('readonly')
 
@@ -297,10 +454,10 @@ describe('creating a site', () => {
     await user.type(screen.getByLabelText(/Site name/), 'Ephemeral Depot')
     await user.click(screen.getByRole('button', { name: 'Create site' }))
 
-    const key = (screen.getByLabelText('Site API key') as HTMLInputElement).value
+    const key = (screen.getByLabelText('Provisioning key') as HTMLInputElement).value
     await user.click(screen.getByLabelText('I have stored this key somewhere safe'))
     await user.click(screen.getByRole('button', { name: 'Done' }))
-    await waitFor(() => expect(screen.queryByLabelText('Site API key')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByLabelText('Provisioning key')).not.toBeInTheDocument())
 
     // Not in the DOM.
     expect(document.body.textContent).not.toContain(key)
@@ -311,7 +468,7 @@ describe('creating a site', () => {
     expect(window.location.href).not.toContain(key)
     // And NOT IN THE QUERY CACHE, which is the one that would otherwise
     // outlive the panel and be readable from any component.
-    expect(JSON.stringify(client.getQueryData(keys.sites.list()) ?? {})).not.toContain(key)
+    expect(JSON.stringify(client.getQueryData(keys.sites.list('')) ?? {})).not.toContain(key)
     for (const entry of client.getQueryCache().getAll()) {
       expect(JSON.stringify(entry.state.data ?? null)).not.toContain(key)
     }
@@ -344,7 +501,7 @@ describe('creating a site', () => {
     await user.click(screen.getByRole('button', { name: 'Create site' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/Failed to create site/)
-    expect(screen.queryByLabelText('Site API key')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Provisioning key')).not.toBeInTheDocument()
   })
 
   it('validates before asking the server', async () => {
@@ -429,6 +586,37 @@ describe('deactivation and retirement are different actions', () => {
     expect(confirm.getByText(/deactivate it instead/)).toBeInTheDocument()
   })
 
+  /*
+    NEITHER DIALOG NAMES A DOOR.
+
+    These two sentences are the most consequential copy in the console -- they
+    are what somebody reads immediately before stopping every terminal at a
+    location -- and both used to describe the effect as doors not opening. A
+    school, a depot or a residential block reading that is being told what the
+    product is for, at the worst possible moment. What actually stops is people
+    getting in, which is true wherever the hardware is mounted.
+  */
+  it('describes both consequences without naming a door', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderSites(`/sites/${SITE_A.site_id}`)
+
+    await user.click(await screen.findByRole('button', { name: 'Deactivate' }))
+    const deactivate = screen.getByRole('dialog')
+    expect(
+      within(deactivate).getByText(/Nobody will get in by credential/),
+    ).toBeInTheDocument()
+    expectNoDoorWording('The deactivate-site dialog', deactivate.textContent ?? '')
+    await user.click(within(deactivate).getByRole('button', { name: 'Cancel' }))
+
+    await user.click(screen.getByRole('button', { name: 'Retire' }))
+    const retire = screen.getByRole('dialog')
+    expect(
+      within(retire).getByText(/stops letting anybody in immediately/),
+    ).toBeInTheDocument()
+    expectNoDoorWording('The retire-site dialog', retire.textContent ?? '')
+  })
+
   it('retirement requires typing the site name', async () => {
     const user = userEvent.setup()
     signIn()
@@ -499,13 +687,13 @@ describe('rotating the provisioning key', () => {
     })
     renderSites(`/sites/${SITE_A.site_id}`)
 
-    await user.click(await screen.findByRole('button', { name: 'Rotate key' }))
+    await user.click(await screen.findByRole('button', { name: 'Rotate provisioning key' }))
     expect(screen.getByText(/stops working/)).toBeInTheDocument()
     expect(screen.getByText(/no overlap period/i)).toBeInTheDocument()
 
     // Scoped to the dialog: the page action behind it carries the same label.
     await user.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate key' }),
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate provisioning key' }),
     )
 
     // Scoped to the dialog: the provisioning-key card on the page behind it says
@@ -514,16 +702,16 @@ describe('rotating the provisioning key', () => {
     expect(
       await credential.findByText(/shown once and cannot be recovered/i),
     ).toBeInTheDocument()
-    const key = screen.getByLabelText('Site API key') as HTMLInputElement
+    const key = screen.getByLabelText('Provisioning key') as HTMLInputElement
     expect(key.value).toMatch(/^ats_[0-9a-f]{64}$/)
 
     // legacy_terminals is surfaced, not swallowed.
     expect(screen.getByText(/1 terminal/)).toBeInTheDocument()
-    expect(screen.getByText(/re-provisioning/)).toBeInTheDocument()
+    expect(screen.getByText(/registered again with the new key/)).toBeInTheDocument()
 
     await user.click(screen.getByLabelText('I have stored this key somewhere safe'))
     await user.click(screen.getByRole('button', { name: 'Done' }))
-    await waitFor(() => expect(screen.queryByLabelText('Site API key')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByLabelText('Provisioning key')).not.toBeInTheDocument())
     expect(document.body.textContent).not.toContain(key.value)
   })
 
@@ -535,12 +723,14 @@ describe('rotating the provisioning key', () => {
     seed({ sites: SITES, terminals: [] })
     renderSites(`/sites/${SITE_A.site_id}`)
 
-    await user.click(await screen.findByRole('button', { name: 'Rotate key' }))
+    await user.click(await screen.findByRole('button', { name: 'Rotate provisioning key' }))
     await user.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate key' }),
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate provisioning key' }),
     )
 
-    expect(await screen.findByText(/No terminal at this site depends on the site key/)).toBeInTheDocument()
+    expect(
+      await screen.findByText(/No terminal at this site depends on the provisioning key/),
+    ).toBeInTheDocument()
   })
 
   it('does not show a key when rotation fails', async () => {
@@ -549,12 +739,12 @@ describe('rotating the provisioning key', () => {
     failNext('rotate-key', 500)
     renderSites(`/sites/${SITE_A.site_id}`)
 
-    await user.click(await screen.findByRole('button', { name: 'Rotate key' }))
+    await user.click(await screen.findByRole('button', { name: 'Rotate provisioning key' }))
     await user.click(
-      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate key' }),
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Rotate provisioning key' }),
     )
 
     expect(await screen.findByText(/Failed to rotate the site key/)).toBeInTheDocument()
-    expect(screen.queryByLabelText('Site API key')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Provisioning key')).not.toBeInTheDocument()
   })
 })

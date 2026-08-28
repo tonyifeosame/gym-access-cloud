@@ -64,14 +64,27 @@ export function InfoNote({
   title,
   children,
   tone = 'muted',
+  headingLevel = 2,
 }: {
   title?: string
   children: ReactNode
   tone?: 'muted' | 'warning'
+  /**
+   * The level of the note's own heading.
+   *
+   * DEFAULTS TO 2 BECAUSE MOST NOTES SIT DIRECTLY ON A PAGE, under its single
+   * `<h1>`. A note nested inside a panel is under that panel's `<h2>` and must
+   * be a 3, or the outline reads as two siblings where one contains the other.
+   * The styling is on the class, not the element, so the level changes nothing
+   * visually — which is exactly why it has to be passed deliberately rather
+   * than left to look correct.
+   */
+  headingLevel?: 2 | 3
 }) {
+  const Heading = headingLevel === 3 ? 'h3' : 'h2'
   return (
     <div className={`notice${tone === 'warning' ? ' notice--warning' : ' notice--muted'}`}>
-      {title ? <h2 className="notice__title">{title}</h2> : null}
+      {title ? <Heading className="notice__title">{title}</Heading> : null}
       <div>{children}</div>
     </div>
   )

@@ -3,9 +3,11 @@ import { setCsrfToken } from './csrf'
 import type {
   AccessDecision,
   AccessEvaluationRequest,
+  AdoptTerminalRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  ApproveTerminalRequest,
   AuditPage,
   AuditQuery,
   ClaimCodeRequest,
@@ -26,10 +28,13 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
   PasswordResetAcceptedResponse,
+  PendingTerminal,
+  PendingTerminalsResponse,
   PeoplePage,
   PeopleQuery,
   Permission,
@@ -37,6 +42,7 @@ import type {
   PermissionsResponse,
   Person,
   PersonRequest,
+  RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
   Schedule,
@@ -48,12 +54,15 @@ import type {
   SiteGrantsRequest,
   SiteSettings,
   SiteSettingsRequest,
+  SitesQuery,
   SitesResponse,
+  SignupRequest,
   TerminalDetail,
   TerminalLifecycleResponse,
   TerminalModeRequest,
   TerminalMoveRequest,
   TerminalResyncResponse,
+  Terminal,
   TerminalRetireRequest,
   TerminalRetiredResponse,
   TerminalRevokeRequest,
@@ -61,6 +70,7 @@ import type {
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
+  WifiRecoveryStatus,
 } from './types'
 
 /**
@@ -79,6 +89,24 @@ function adoptSession(session: Session): Session {
 
 export async function login(email: string, password: string): Promise<Session> {
   const session = await api.post<Session>('/api/v1/auth/login', { email, password })
+  return adoptSession(session)
+}
+
+/**
+ * Creates a company and its first OWNER, and signs them in. UNAUTHENTICATED.
+ *
+ * RETURNS THE SAME BODY LOGIN DOES, and for the same reason /me does: the
+ * account exists and the session cookie is already set by the time this
+ * resolves, so a console that had to send the new customer back to a login form
+ * would be asking them to prove something the server has just established.
+ *
+ * WHAT IT DOES NOT RETURN, and must never: the site provisioning key. The server
+ * creates the company's first site in the same transaction and keeps only the
+ * hash of its credential — there is no plaintext to leak here, which is what
+ * makes this endpoint safe to expose to an anonymous browser at all.
+ */
+export async function register(body: SignupRequest): Promise<Session> {
+  const session = await api.post<Session>('/api/v1/auth/register', body)
   return adoptSession(session)
 }
 
@@ -130,8 +158,11 @@ export function fetchCompany(): Promise<CompanyDetail> {
 // Sites
 // ---------------------------------------------------------------------------
 
-export function fetchSites(): Promise<SitesResponse> {
-  return api.get<SitesResponse>('/api/v1/console/sites')
+export function fetchSites(query: SitesQuery = {}): Promise<SitesResponse> {
+  const params = new URLSearchParams()
+  if (query.search) params.set('q', query.search)
+  const suffix = params.size > 0 ? `?${params}` : ''
+  return api.get<SitesResponse>(`/api/v1/console/sites${suffix}`)
 }
 
 export function fetchSite(siteId: string): Promise<Site> {
@@ -223,9 +254,84 @@ export function updateSiteSettings(
 // Terminals
 // ---------------------------------------------------------------------------
 
-export function fetchTerminals(options: { outdated?: boolean } = {}): Promise<TerminalsResponse> {
-  const query = options.outdated ? '?outdated=true' : ''
-  return api.get<TerminalsResponse>(`/api/v1/console/terminals${query}`)
+/**
+ * The page size this console asks for, which is the endpoint's maximum.
+ *
+ * THE MAXIMUM RATHER THAN THE DEFAULT, to make the loop below cheap: a fleet of
+ * 180 is one request at 200 and four at 50. It is not a limit on what is
+ * returned -- `fetchTerminals` follows `has_more` however many pages there are.
+ * Clamped server-side by `maxTerminalLimit`, so asking for more would be
+ * silently reduced to this anyway.
+ */
+const TERMINAL_PAGE_LIMIT = 200
+
+/**
+ * Every terminal in the caller's scope, across as many pages as that takes.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS PAGES RATHER THAN ASKING ONCE
+ * ---------------------------------------------------------------------------
+ *
+ * `GET /console/terminals` gained `limit`/`offset`/`q` in D2 and DEFAULTS TO
+ * FIFTY ROWS. Every consumer of this function wants the whole fleet and none of
+ * them wants a page:
+ *
+ *   DashboardPage      groups and counts it into a fleet rollup
+ *   terminals/health   filters it in the browser, which is only honest on a
+ *                      complete set
+ *   FirmwarePage       counts how much hardware is behind
+ *   PersonAccessPanel  offers the terminals a permission can name
+ *
+ * A single unbounded request is not available and should not be: bounding the
+ * endpoint is what stops one company's fleet from being an unbounded response.
+ * So completeness is assembled HERE, in the one place all four go through,
+ * rather than by weakening the endpoint or by teaching four screens to page.
+ *
+ * ---------------------------------------------------------------------------
+ * TERMINATION
+ * ---------------------------------------------------------------------------
+ *
+ * The loop stops on `has_more === false`, which is the server's own answer. Two
+ * further guards exist because a loop that talks to a network must not be able
+ * to spin for ever:
+ *
+ *   - a page that comes back EMPTY ends it, whatever `has_more` says. Without
+ *     this, a server that always reported more would loop until the tab died.
+ *   - an ABSENT `has_more` ends it. That is a server predating D2, whose single
+ *     response is already the whole fleet.
+ *
+ * The returned envelope describes the ASSEMBLED result, not the last page:
+ * `count` and `total` are the whole fleet and `has_more` is false, so a caller
+ * that checks it is told the truth about what it is holding.
+ */
+export async function fetchTerminals(
+  options: { outdated?: boolean } = {},
+): Promise<TerminalsResponse> {
+  const terminals: Terminal[] = []
+  let total: number | undefined
+
+  for (;;) {
+    const params = new URLSearchParams()
+    if (options.outdated) params.set('outdated', 'true')
+    params.set('limit', String(TERMINAL_PAGE_LIMIT))
+    params.set('offset', String(terminals.length))
+
+    const page = await api.get<TerminalsResponse>(`/api/v1/console/terminals?${params}`)
+    terminals.push(...page.terminals)
+    total = page.total
+
+    if (!page.has_more) break
+    if (page.terminals.length === 0) break
+  }
+
+  return {
+    count: terminals.length,
+    total: total ?? terminals.length,
+    limit: TERMINAL_PAGE_LIMIT,
+    offset: 0,
+    has_more: false,
+    terminals,
+  }
 }
 
 export function fetchTerminalSummary(): Promise<FleetSummary> {
@@ -248,6 +354,73 @@ export function updateTerminalMode(
 ): Promise<TerminalDetail> {
   return api.put<TerminalDetail>(
     `/api/v1/console/terminals/${encodeURIComponent(serial)}/application-mode`,
+    body,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Adding a terminal: announce and approve
+// ---------------------------------------------------------------------------
+
+/**
+ * Claims a terminal that is displaying a pairing code. ADMIN.
+ *
+ * THE ONE FIELD A CUSTOMER FILLS IN. Until this succeeds the terminal belongs to
+ * nobody and is listed by no endpoint — there is no browsing of unclaimed
+ * hardware, which is what keeps one customer's units invisible to every other.
+ *
+ * Three refusals worth handling distinctly, and the server distinguishes them by
+ * `code`: `PAIRING_CODE_REFUSED` (404, deliberately uniform across unknown,
+ * expired and spent), `TERMINAL_OWNED_ELSEWHERE` (409) and `TERMINAL_DISABLED`
+ * (409).
+ *
+ * NOTHING IS MINTED HERE. Adoption records that a company has taken
+ * responsibility for a unit; the credential comes later, and only after approval.
+ */
+export function adoptTerminal(body: AdoptTerminalRequest): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>('/api/v1/console/terminal-announcements/adopt', body)
+}
+
+/** Terminals waiting to be set up. MANAGER — seeing one is operational. */
+export function fetchPendingTerminals(): Promise<PendingTerminalsResponse> {
+  return api.get<PendingTerminalsResponse>('/api/v1/console/terminal-announcements')
+}
+
+export function fetchPendingTerminal(id: string): Promise<PendingTerminal> {
+  return api.get<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}`,
+  )
+}
+
+/**
+ * Places an adopted terminal at a site and authorises it. ADMIN.
+ *
+ * AUTHORISES; MINTS NOTHING. The terminal collects its own credential
+ * afterwards, which is why the response carries no key and why there is nothing
+ * here for a caller to be careful with.
+ */
+export function approveTerminal(
+  id: string,
+  body: ApproveTerminalRequest,
+): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}/approve`,
+    body,
+  )
+}
+
+/**
+ * Refuses a terminal, and the UNDO for an approval.
+ *
+ * The second is the operationally useful one: it frees the serial, so a unit
+ * that was approved and then reset can be added again.
+ */
+export function rejectTerminal(
+  id: string,
+  body: RejectTerminalRequest = {},
+): Promise<PendingTerminal> {
+  return api.post<PendingTerminal>(
+    `/api/v1/console/terminal-announcements/${encodeURIComponent(id)}/reject`,
     body,
   )
 }
@@ -328,6 +501,36 @@ export function resyncTerminal(serial: string): Promise<TerminalResyncResponse> 
   )
 }
 
+/**
+ * Asks one terminal to return to Wi-Fi setup mode. ADMIN.
+ *
+ * NO BODY, AND THERE IS NOWHERE TO PUT ONE. The platform never learns the
+ * customer's Wi-Fi password: the command hands the terminal back to the same
+ * setup portal a new unit uses, and somebody standing next to it connects a
+ * phone and types the new password into the hardware. If a network name or a
+ * passphrase ever appears in this call, the feature has been misunderstood.
+ *
+ * 202, not 200: the command has been accepted for delivery and nothing has
+ * happened at the terminal yet. Poll `fetchWifiRecoveryStatus` for what did.
+ *
+ * SAFELY REPEATABLE. Sending it again while one is outstanding returns the same
+ * command with `already_queued`, rather than queueing a second — which the
+ * terminal would apply twice, the second time after the customer had already
+ * re-provisioned it.
+ */
+export function requestWifiRecovery(serial: string): Promise<WifiRecoveryStatus> {
+  return api.post<WifiRecoveryStatus>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/wifi-recovery`,
+  )
+}
+
+/** What became of this terminal's most recent Change Wi-Fi command. ADMIN. */
+export function fetchWifiRecoveryStatus(serial: string): Promise<WifiRecoveryStatus> {
+  return api.get<WifiRecoveryStatus>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/wifi-recovery`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
@@ -345,6 +548,18 @@ export function fetchPeople(query: PeopleQuery = {}): Promise<PeoplePage> {
   if (query.offset) params.set('offset', String(query.offset))
   const suffix = params.size > 0 ? `?${params}` : ''
   return api.get<PeoplePage>(`/api/v1/console/people${suffix}`)
+}
+
+/**
+ * What this company still has to do before anybody gets in.
+ *
+ * A SEPARATE READ FROM THE PEOPLE LIST, deliberately. Every number on that page
+ * describes the match the caller asked for — a company-wide figure riding along
+ * on it would be the one value that ignored the search and the filters, and
+ * would eventually be read as though it did not.
+ */
+export function fetchOnboardingState(): Promise<OnboardingState> {
+  return api.get<OnboardingState>('/api/v1/console/onboarding')
 }
 
 export function fetchPerson(externalId: string): Promise<Person> {

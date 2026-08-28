@@ -7,6 +7,7 @@ import { setCsrfToken } from '../../api/csrf'
 import type { Role } from '../../api/types'
 import { makeSession, makeSite, SITE_A } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { ProvisionTerminalDialog } from './ClaimCodeDialog'
 import { SiteDetailPage } from './SiteDetailPage'
@@ -64,14 +65,43 @@ beforeEach(() => setCsrfToken(null))
 // Getting to it
 // ---------------------------------------------------------------------------
 
-describe('the site offers provisioning as its own action', () => {
-  it('puts "Provision a terminal" on the site, ahead of rotating the key', async () => {
+describe('the site offers a claim code as the advanced path', () => {
+  /**
+   * WHAT CHANGED, AND WHY THE OLD ASSERTION WAS RIGHT TO FAIL.
+   *
+   * "Provision a terminal" used to be the site's PRIMARY action, because a
+   * claim code was the only way to bring hardware up without handing out the
+   * site key. It is no longer the only way: a terminal now announces itself and
+   * is added from the Terminals page with a code it displays on its own screen,
+   * which needs no serial number and no cable.
+   *
+   * So the claim code is demoted rather than removed. It is still exactly right
+   * for the case it was built for — pre-authorising a serial before the hardware
+   * arrives — and it is behind a disclosure so that a customer setting up their
+   * first door does not find it first and conclude they need a laptop.
+   */
+  it('keeps the claim code, behind Advanced, and not as the primary action', async () => {
+    const user = userEvent.setup()
     signIn()
     renderSite()
 
+    // NOT in the page header any more.
+    await screen.findByRole('heading', { name: SITE_A.site_name })
     expect(
-      await screen.findByRole('button', { name: 'Provision a terminal' }),
+      screen.queryByRole('button', { name: 'Provision a terminal' }),
+    ).not.toBeInTheDocument()
+
+    // Reachable, and honest about what it is for.
+    const advanced = await screen.findByText(/pre-authorise a terminal for an installer/i)
+    await user.click(advanced)
+
+    expect(screen.getByText(/before the hardware arrives/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Issue a claim code' }),
     ).toBeInTheDocument()
+
+    // And it points at the path a customer should use instead.
+    expect(screen.getByRole('link', { name: /the terminals page/i })).toBeInTheDocument()
   })
 
   it('does not offer it to somebody who could not use it', async () => {
@@ -82,7 +112,7 @@ describe('the site offers provisioning as its own action', () => {
 
     await screen.findByRole('heading', { name: SITE_A.site_name })
     expect(
-      screen.queryByRole('button', { name: 'Provision a terminal' }),
+      screen.queryByText(/pre-authorise a terminal for an installer/i),
     ).not.toBeInTheDocument()
   })
 })
@@ -101,16 +131,57 @@ describe('asking for a code', () => {
     ).toBeInTheDocument()
   })
 
-  it('states that the code is single use, expiring, and supersedes an earlier one', async () => {
+  it('WARNS BEFORE THE BUTTON about the one fact that strands somebody', async () => {
+    /*
+      THE FORM CARRIES ONE WARNING, NOT FOUR.
+
+      "Shown once", "works once" and "expires" were stated here and then stated
+      again, in full, on the panel that follows -- which is the screen somebody
+      actually has to act on before they can close it. Saying them twice meant an
+      operator read the same three facts on consecutive screens and scrolled past
+      the one that was different.
+
+      What is left is the fact that cannot wait for the next screen, because the
+      decision it bears on is made HERE: issuing another code for a serial kills
+      the code somebody may already be holding, and they find out at a door.
+    */
     signIn()
     renderDialog()
 
-    expect(await screen.findByText('One code, one terminal, one use')).toBeInTheDocument()
-    expect(screen.getByText(/cannot be read back/i)).toBeInTheDocument()
-    expect(screen.getByText(/expires whether or not it is used/i)).toBeInTheDocument()
+    expect(await screen.findByText('Re-issuing cancels any earlier code')).toBeInTheDocument()
+    expect(screen.getByText(/stops theirs working/i)).toBeInTheDocument()
+
+    // Said once, on the panel that shows the code -- not twice.
+    expect(screen.queryByText(/expires whether or not it is used/i)).not.toBeInTheDocument()
+  })
+
+  /*
+    WHERE THEY FIND OUT IS "ON SITE", NOT "AT THE DOOR". The fact is about the
+    installer standing next to hardware that will not accept their code, which
+    is as true of a turnstile, a barrier or a locker as it is of a door.
+  */
+  it('says where a stranded installer finds out without naming a door', async () => {
+    signIn()
+    renderDialog()
+
     expect(
-      screen.getByText(/Issuing a second code for the same serial cancels the first/i),
+      await screen.findByText(/stops theirs working . on site, with no warning to them/),
     ).toBeInTheDocument()
+    expectNoDoorWording('The claim-code dialog', document.body.textContent ?? '')
+  })
+
+  it('does not repeat the Terminals-page pointer the disclosure already made', async () => {
+    // The dialog is opened from "Advanced: pre-authorise a terminal", whose one
+    // paragraph says most terminals are added from Terminals instead. Repeating
+    // it in the dialog description put the same redirection twice on the path of
+    // somebody who had already chosen the specialist route.
+    signIn()
+    renderDialog()
+
+    expect(
+      await screen.findByText(/provisioning key is not involved/i),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/code the unit shows on its own screen/i)).not.toBeInTheDocument()
   })
 
   it('requires a serial, because the code is bound to one', async () => {

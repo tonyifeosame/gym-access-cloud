@@ -1,6 +1,6 @@
 import type { Role, Session } from '../api/types'
 import { roleAtLeast } from '../auth/roles'
-import { applicationPath, describeApplication } from '../applications/registry'
+import { describeApplication } from '../applications/registry'
 
 /**
  * How the console decides what to show.
@@ -70,7 +70,10 @@ export const PLATFORM_NAV: NavItem[] = [
   },
   {
     id: 'applications',
-    label: 'Applications',
+    // "Features" is the customer-facing word for a capability throughout the
+    // console. The id and the path stay as they are: one is what tests and code
+    // address this entry by, the other is a URL people may have bookmarked.
+    label: 'Features',
     path: '/settings/applications',
     // ADMIN sees what the company is configured for; only OWNER may change it,
     // and that gate is on the controls rather than the route.
@@ -92,22 +95,40 @@ export function platformNav(role: string): NavItem[] {
 }
 
 /**
- * Navigation for the capabilities this company has enabled and this operator may
- * open. Order follows the API's, which is stable, so the menu does not reshuffle
+ * Navigation for the capabilities this company has enabled, this operator may
+ * open, AND that have a screen to open.
+ *
+ * THE LAST CONDITION IS THE ONE THAT MATTERS TODAY, and it is why this currently
+ * returns nothing. Every enabled capability used to produce an entry pointing at
+ * a shared page whose entire content was that the screens had not been built. An
+ * operator following one spent a click to be told about the state of our
+ * development, and a company that had enabled six capabilities got six of them.
+ *
+ * The mechanism is intact rather than deleted: this is still derived from the
+ * session and nothing is hard-coded, so the day a capability gains a screen it
+ * gains its entry by declaring `route` in the registry -- no change here.
+ *
+ * Order follows the API's, which is stable, so the menu does not reshuffle
  * between requests.
  */
 export function moduleNav(session: Session): NavItem[] {
   return session.applications
     .map((application) => describeApplication(application.code))
     .filter((definition) => roleAtLeast(session.role, definition.minimumRole))
-    .map((definition) => ({
-      id: `application:${definition.code}`,
-      label: definition.label,
-      path: applicationPath(definition),
-      minimumRole: definition.minimumRole,
-      module: true,
-      description: definition.description,
-    }))
+    .flatMap((definition) =>
+      definition.route
+        ? [
+            {
+              id: `application:${definition.code}`,
+              label: definition.label,
+              path: definition.route,
+              minimumRole: definition.minimumRole,
+              module: true,
+              description: definition.description,
+            },
+          ]
+        : [],
+    )
 }
 
 export function navigationFor(session: Session): { platform: NavItem[]; modules: NavItem[] } {

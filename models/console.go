@@ -65,9 +65,34 @@ type ConsoleSite struct {
 // company doing visitor management has no "membership", and requiring one would
 // be the product assuming a workflow.
 //
-// BiometricEnrolled is the entire biometric surface here -- a boolean. The
-// credential itself is an abstraction the backend owns, so a proper credentials
-// table can replace the current column without the dashboard noticing.
+// BiometricEnrolled is the entire biometric surface on this type -- a boolean.
+// The credential itself is an abstraction the backend owns, so how it is stored
+// can change without the dashboard noticing. Detail lives on its own endpoint:
+// GET /console/people/{external_id}/credentials.
+//
+// ENROLMENT SOURCE EXISTS BECAUSE THERE ARE TWO STORES AND THEY DISAGREE.
+//
+// A person can be recorded as enrolled in two different places, written by two
+// different paths that do not keep each other in step:
+//
+//	credentials + credential_placements  the structured record (012). Written by
+//	                                     POST /devices/credentials/placement, and
+//	                                     by the enrolment result WHEN the caller
+//	                                     is a device AND sent a `credential`
+//	                                     object.
+//	people.fingerprint_template          the legacy column. Written by every
+//	                                     enrolment result, including the
+//	                                     site-key path that names no terminal.
+//
+// So a person enrolled through site-key tooling has the column and no
+// credential row, and a person reported through the placement endpoint has the
+// row and no column. Reporting only one of the two would tell an operator
+// somebody is not enrolled when they are.
+//
+// BiometricEnrolled therefore stays the honest answer to "is this person
+// enrolled at all", and EnrolmentSource says WHICH RECORD BACKS IT -- which is
+// what makes the difference visible instead of leaving the credentials endpoint
+// silently contradicting this boolean on the same screen.
 type ConsolePerson struct {
 	ID                string    `json:"id"`
 	ExternalID        string    `json:"external_id"`
@@ -75,9 +100,30 @@ type ConsolePerson struct {
 	Category          string    `json:"category,omitempty"`
 	Active            bool      `json:"active"`
 	BiometricEnrolled bool      `json:"biometric_enrolled"`
+	EnrolmentSource   string    `json:"enrolment_source"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
+
+// Where a person's enrolment is recorded.
+const (
+	// EnrolmentSourceCredential means a row in `credentials`. The credentials
+	// endpoint can say what type it is, when it was taken, at which terminal,
+	// and how many terminals hold it.
+	EnrolmentSourceCredential = "CREDENTIAL"
+
+	// EnrolmentSourceLegacy means people.fingerprint_template is set and there
+	// is no credential row. The person IS enrolled and the platform cannot say
+	// anything more about it -- no terminal, no date, no count.
+	//
+	// A console must not render this as "not enrolled", and must not render it
+	// as though the detail is merely missing from the response. It is not
+	// recorded anywhere.
+	EnrolmentSourceLegacy = "LEGACY_ONLY"
+
+	// EnrolmentSourceNone means neither store has anything.
+	EnrolmentSourceNone = "NONE"
+)
 
 // TerminalDetail is one terminal, in full.
 //
@@ -318,4 +364,100 @@ type ConsoleSiteRotatedResponse struct {
 type ConsoleSiteRetiredResponse struct {
 	Retired          bool `json:"retired"`
 	TerminalsRetired int  `json:"terminals_retired"`
+}
+
+// ---------------------------------------------------------------------------
+// Credential visibility (D1)
+// ---------------------------------------------------------------------------
+//
+// "Is this person enrolled, where, and at how many doors."
+//
+// ---------------------------------------------------------------------------
+// WHAT IS ABSENT FROM THESE TYPES, AND MUST STAY ABSENT
+// ---------------------------------------------------------------------------
+//
+// No template. No sealed material, key id, algorithm or digest. No sensor slot,
+// no locator, no vendor, no template format, no sensor profile. A type that
+// cannot carry biometric material cannot leak it, which is the same construction
+// models.Site uses to keep the site key out of responses -- and unlike a policy,
+// it survives somebody adding a field in a hurry.
+//
+// The store's SELECT list is written to be checkable against this by reading it,
+// and a test scans the raw response body for every one of those words.
+
+// CredentialTerminalRef names the terminal an enrolment happened at.
+//
+// A NAME AND A SERIAL, NOTHING ELSE. This is not a terminal projection and must
+// not grow into one -- it exists so an operator reading a person's record can
+// tell which door to walk to.
+type CredentialTerminalRef struct {
+	SerialNumber string `json:"serial_number"`
+	DeviceName   string `json:"device_name,omitempty"`
+	SiteName     string `json:"site_name,omitempty"`
+
+	// Retired is true when the terminal has been soft-deleted.
+	//
+	// REPORTED RATHER THAN DROPPED. An enrolment outlives the hardware that
+	// took it, and "enrolled at a terminal that no longer exists" is a fact an
+	// operator needs -- it is the reason somebody is not recognised anywhere.
+	// Hiding the row because the device is gone would turn that into a mystery.
+	Retired bool `json:"retired"`
+}
+
+// PersonCredential is one credential a person holds.
+type PersonCredential struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	State string `json:"state"`
+
+	// EnrolledAt is when the credential was captured, absent when the row does
+	// not record it. A console must render absence as "not recorded".
+	EnrolledAt *time.Time `json:"enrolled_at,omitempty"`
+
+	// EnrolledAtTerminal is where it was captured. NULL when the enrolling
+	// terminal was hard-deleted (the column is ON DELETE SET NULL) or was never
+	// recorded -- again "not recorded", never "none".
+	EnrolledAtTerminal *CredentialTerminalRef `json:"enrolled_at_terminal,omitempty"`
+
+	// UsableAtTerminalCount is how many terminals currently HOLD this
+	// credential -- placements in state PLACED, on terminals that still exist.
+	//
+	// THIS IS THE FIELD THAT MAKES THE PRODUCT'S REAL LIMITATION LEGIBLE. An
+	// enrolment binds to the sensor that took it, so this is normally 1, and an
+	// operator otherwise has no way to discover that "enrolled" means
+	// "recognised at one door". PENDING and FAILED placements are NOT counted:
+	// they are doors that should hold it and do not, which is the opposite of
+	// what this number is for.
+	UsableAtTerminalCount int `json:"usable_at_terminal_count"`
+}
+
+// PersonCredentialsResponse is the credentials endpoint's body.
+type PersonCredentialsResponse struct {
+	Count int `json:"count"`
+
+	// EnrolmentSource describes what backs this person's enrolment. See the note
+	// on ConsolePerson: LEGACY_ONLY is the case where Credentials is EMPTY and
+	// the person is nonetheless enrolled, and a caller that reads only the array
+	// would report them as unenrolled.
+	EnrolmentSource string             `json:"enrolment_source"`
+	Credentials     []PersonCredential `json:"credentials"`
+}
+
+// ---------------------------------------------------------------------------
+// Terminal paging (D2)
+// ---------------------------------------------------------------------------
+
+// ConsoleTerminalsPage is one page of the fleet.
+//
+// THE SAME ENVELOPE ConsolePeoplePage USES, field for field, so a reader who has
+// learned one has learned both. `count` and `terminals` keep the meaning and the
+// position they had before paging existed, so a client that ignores the rest is
+// unaffected.
+type ConsoleTerminalsPage struct {
+	Count   int               `json:"count"`
+	Total   int               `json:"total"`
+	Limit   int               `json:"limit"`
+	Offset  int               `json:"offset"`
+	HasMore bool              `json:"has_more"`
+	Devices []DeviceInventory `json:"terminals"`
 }

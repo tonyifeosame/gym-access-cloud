@@ -48,6 +48,19 @@ type DeviceCredentialItem struct {
 	LastError string `json:"last_error,omitempty"`
 
 	Generation int `json:"generation"`
+
+	// MaterialAvailable is ONE BIT: the platform holds a sealed template for
+	// this credential and this terminal may ask for it (026).
+	//
+	// It is not material and it is not a digest. A terminal that can import
+	// fetches the bytes from GET /devices/credentials/:id/material; one that
+	// cannot ignores this field entirely and works the entry as a re-enrolment
+	// task, which is what every terminal in the field does today.
+	MaterialAvailable bool `json:"material_available"`
+
+	// SensorProfile is the module the stored template was captured on, empty
+	// when there is none.
+	SensorProfile string `json:"sensor_profile,omitempty"`
 }
 
 // GetPendingCredentials handles GET /api/v1/devices/credentials/pending
@@ -79,17 +92,19 @@ func GetPendingCredentials(c *gin.Context) {
 	items := make([]DeviceCredentialItem, 0, len(pending))
 	for _, p := range pending {
 		items = append(items, DeviceCredentialItem{
-			CredentialID:   p.CredentialID,
-			PlacementID:    p.PlacementID,
-			MemberID:       p.ExternalID,
-			FullName:       p.FullName,
-			CredentialType: p.CredentialType,
-			TemplateFormat: p.TemplateFormat,
-			Vendor:         p.Vendor,
-			State:          p.State,
-			Attempts:       p.Attempts,
-			LastError:      p.LastError,
-			Generation:     p.Generation,
+			CredentialID:      p.CredentialID,
+			PlacementID:       p.PlacementID,
+			MemberID:          p.ExternalID,
+			FullName:          p.FullName,
+			CredentialType:    p.CredentialType,
+			TemplateFormat:    p.TemplateFormat,
+			Vendor:            p.Vendor,
+			State:             p.State,
+			Attempts:          p.Attempts,
+			LastError:         p.LastError,
+			Generation:        p.Generation,
+			MaterialAvailable: p.MaterialAvailable,
+			SensorProfile:     p.SensorProfile,
 		})
 	}
 
@@ -127,6 +142,14 @@ type DevicePlacementRequest struct {
 	// Error is the device's own words, so an operator reads "sensor full"
 	// rather than "failed".
 	Error string `json:"error,omitempty"`
+
+	// AppliedDigest is SHA-256 of the plaintext this terminal says it wrote,
+	// sent only when it installed REPLICATED material (026).
+	//
+	// The platform records it and compares it to what the enrolling terminal
+	// reported. IT CANNOT VERIFY IT -- there is no key on this path. Two devices
+	// agreeing is what this proves; it is not an attestation by the server.
+	AppliedDigest string `json:"applied_digest,omitempty"`
 }
 
 // ReportCredentialPlacement handles POST /api/v1/devices/credentials/placement
@@ -154,12 +177,14 @@ func ReportCredentialPlacement(c *gin.Context) {
 		Slot:           req.Slot,
 		State:          req.State,
 		Error:          req.Error,
+		AppliedDigest:  req.AppliedDigest,
 	})
 	switch {
 	case errors.Is(err, models.ErrPlacementStateInvalid),
 		errors.Is(err, models.ErrPlacementSlotRequired),
 		errors.Is(err, models.ErrPlacementSubjectRequired),
-		errors.Is(err, models.ErrCredentialTypeInvalid):
+		errors.Is(err, models.ErrCredentialTypeInvalid),
+		errors.Is(err, models.ErrMaterialDigestInvalid):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	case errors.Is(err, models.ErrPersonNotFound):

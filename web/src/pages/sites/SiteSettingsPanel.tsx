@@ -154,19 +154,27 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
         <h2 className="panel__title" id="site-settings-heading">
           Terminal settings
         </h2>
+        {/*
+          NO VERSION NUMBER. `settings_version` is the platform's own counter for
+          deciding whether a terminal is behind; it is not a document revision an
+          operator tracks, and printing it here invited being read as one. The
+          console still uses it — the form reseeds on it — it is just not a fact a
+          customer was ever meant to act on.
+
+          NO POINTER TO THE OUTAGE PANEL EITHER. It was said here, in both
+          superseded-key reasons, and in the raw editor's error: four statements
+          of one thing, three of them to people whose site carries no stale copy
+          and who therefore had no idea what they were being warned off. The one
+          that fires when it is relevant is kept.
+        */}
         <p className="field__hint">
-          Applied to every terminal at this site. Version {query.data?.settings_version}.
+          Applied to every terminal at this site.
           {query.isFetching ? ' Refreshing…' : ''}
-        </p>
-        <p className="field__hint">
-          What terminals do during an outage is <strong>not</strong> here. It is a
-          validated field of its own, set under “Behaviour during an outage” above —
-          a value written into this object under the same name is ignored.
         </p>
       </div>
 
       {!mayEdit ? (
-        <InfoNote title="Read only">
+        <InfoNote headingLevel={3} title="Read only">
           Your role can view these settings but not change them. A manager, administrator
           or owner in your company can.
         </InfoNote>
@@ -179,7 +187,7 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
         quietly tidy away.
       */}
       {supersededKeys.length > 0 ? (
-        <InfoNote tone="warning" title="Settings this console no longer edits">
+        <InfoNote tone="warning" headingLevel={3} title="Settings this console no longer edits">
           <p>
             This site still carries {supersededKeys.length} setting
             {supersededKeys.length === 1 ? '' : 's'} that the console used to offer a
@@ -217,7 +225,7 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
       ) : null}
 
       {unknownKeys.length > 0 ? (
-        <InfoNote tone="warning" title="Settings this console does not recognise">
+        <InfoNote tone="warning" headingLevel={3} title="Settings this console does not recognise">
           <p>
             This site carries {unknownKeys.length} setting
             {unknownKeys.length === 1 ? '' : 's'} newer than this version of the console:{' '}
@@ -236,13 +244,30 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
         </InfoNote>
       ) : null}
 
-      <div className="tabs" role="tablist" aria-label="Settings editor">
+      {/*
+        PLAIN TOGGLE BUTTONS, NOT AN ARIA TABLIST, and the change is a correction
+        rather than a preference.
+
+        This was `role="tablist"` with two `role="tab"` children, which promises a
+        keyboard contract it did not keep: the ARIA tabs pattern requires arrow-key
+        navigation between tabs and a roving tabindex, and neither was implemented.
+        A screen reader announced "tab 1 of 2" and the arrow keys did nothing.
+
+        It was also emitting an invalid reference on every render. Only the
+        selected panel is mounted, so whichever tab was inactive pointed
+        `aria-controls` at an element id that was not in the document — an axe
+        `aria-valid-attr-value` violation present in every state of the panel.
+
+        Two buttons with `aria-pressed` are the simpler pattern that is actually
+        correct here: they are already in the tab order, Enter and Space already
+        activate them, and the pressed state is announced without promising
+        navigation that does not exist. Implementing the full tabs pattern was the
+        other honest option and buys nothing for two choices.
+      */}
+      <div className="tabs" role="group" aria-label="Settings editor">
         <button
           type="button"
-          role="tab"
-          id="tab-guided"
-          aria-selected={mode === 'guided'}
-          aria-controls="panel-guided"
+          aria-pressed={mode === 'guided'}
           className={`tab${mode === 'guided' ? ' tab--active' : ''}`}
           onClick={() => setMode('guided')}
         >
@@ -250,19 +275,16 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
         </button>
         <button
           type="button"
-          role="tab"
-          id="tab-advanced"
-          aria-selected={mode === 'advanced'}
-          aria-controls="panel-advanced"
+          aria-pressed={mode === 'advanced'}
           className={`tab${mode === 'advanced' ? ' tab--active' : ''}`}
           onClick={() => setMode('advanced')}
         >
-          Advanced (JSON)
+          Advanced
         </button>
       </div>
 
       {mode === 'guided' ? (
-        <div className="form" role="tabpanel" id="panel-guided" aria-labelledby="tab-guided">
+        <div className="form">
           {SETTING_DEFINITIONS.map((definition) =>
             definition.kind === 'boolean' ? (
               <CheckboxField
@@ -332,7 +354,7 @@ export function SiteSettingsPanel({ siteId, siteName }: { siteId: string; siteNa
           ) : null}
         </div>
       ) : (
-        <div className="form" role="tabpanel" id="panel-advanced" aria-labelledby="tab-advanced">
+        <div className="form">
           <TextField
             label="Settings JSON"
             multiline

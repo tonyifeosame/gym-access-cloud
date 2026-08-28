@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import type { EventDecision, EventQuery, FieldEvent } from '../../api/types'
+import { describeApplication } from '../../applications/registry'
 import { Badge, humaniseCode } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
 import { SelectField, TextField } from '../../components/Form'
@@ -9,7 +10,12 @@ import { Pagination, SearchInput } from '../../components/Pagination'
 import { InfoNote, PageHeader, RefreshingIndicator } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useEvents, useSites } from '../../data/console'
-import { describeReason } from '../access/accessVocabulary'
+import {
+  UNCONFIRMED_TIME_LABEL,
+  describeEventCause,
+  describeReason,
+} from '../access/accessVocabulary'
+import { PERSON_ID_LABEL } from '../people/personVocabulary'
 
 const PAGE_SIZE = 50
 
@@ -106,7 +112,7 @@ export function EventsPage() {
             as an unqualified door time would be a quiet lie.
           */}
           {!event.occurred_at_trusted ? (
-            <Badge tone="warning">Terminal clock unverified</Badge>
+            <Badge tone="warning">{UNCONFIRMED_TIME_LABEL}</Badge>
           ) : null}
           {event.recorded_at !== event.occurred_at ? (
             <span className="event__delay">
@@ -140,7 +146,17 @@ export function EventsPage() {
       header: 'Who',
       render: (event) =>
         event.person_name ? (
-          <Link to={`/people/${encodeURIComponent(event.subject_external_id ?? '')}`}>
+          /*
+            `table__link`, which is not decoration: it carries the 24px minimum
+            height that WCAG 2.2 (2.5.8, AA) requires of a target. These links
+            were bare, so at 390px they measured 243x20 on every row -- roughly
+            forty failures a page, on the two columns somebody on a phone is most
+            likely to tap.
+          */
+          <Link
+            to={`/people/${encodeURIComponent(event.subject_external_id ?? '')}`}
+            className="table__link"
+          >
             {event.person_name}
           </Link>
         ) : event.subject_external_id ? (
@@ -161,28 +177,79 @@ export function EventsPage() {
       render: (event) => (
         <span className="event__where">
           {event.device_serial ? (
-            <Link to={`/terminals/${encodeURIComponent(event.device_serial)}`}>
+            <Link
+              to={`/terminals/${encodeURIComponent(event.device_serial)}`}
+              className="table__link"
+            >
               {event.device_name || event.device_serial}
             </Link>
           ) : (
             <span className="muted">—</span>
           )}
-          {event.site_name ? <span className="audit__role">{event.site_name}</span> : null}
+          {/*
+            NOT `audit__role`, which uppercases and letterspaces its content.
+            That treatment suits an enum -- a role, a target type -- and this is
+            the customer's own name for a place. "Lagos Distribution Centre"
+            rendered as "LAGOS DISTRIBUTION CENTRE" reads as a code rather than
+            as somewhere a person goes.
+          */}
+          {event.site_name ? <span className="event__site">{event.site_name}</span> : null}
         </span>
       ),
     },
     {
       id: 'why',
       header: 'Why',
-      secondary: true,
-      render: (event) =>
-        event.reason ? (
-          <span title={describeReason(event.reason).meaning}>
-            {describeReason(event.reason).label}
+      /*
+        THE MEANING IS ON THE PAGE, NOT IN A `title`.
+
+        This used to be `<span title={meaning}>{label}</span>`, which puts the
+        explanation somewhere three kinds of reader cannot get at it: there is no
+        hover on a touch screen, no way to reach it from the keyboard, and screen
+        readers disagree about whether to announce it at all. On a phone -- where
+        somebody is most likely to be standing next to the person who was refused
+        -- the explanation simply did not exist.
+
+        The label stays the scannable thing and the meaning sits under it, quiet
+        and readable. The remedy is deliberately NOT repeated per row: it is the
+        same sentence for every row sharing a reason, and the summary above the
+        table already states it once per reason.
+
+        `describeEventCause` rather than `describeReason` so that an event
+        carrying no reason -- the platform's own ERROR events -- still says what
+        happened instead of showing an em dash.
+      */
+      render: (event) => {
+        const cause = describeEventCause(event)
+        if (!cause) return <span className="muted">—</span>
+
+        /*
+          THE REMEDY IS SHOWN HERE ONLY WHERE NOTHING ELSE SHOWS IT.
+
+          A denial's remedy is the same sentence for every row sharing a reason,
+          and the summary above the table already states it once per reason —
+          repeating it on forty rows would bury the rows in advice.
+
+          An event with NO reason has no such summary: the summary groups
+          refusals, and the platform's own errors refused nobody, so they are not
+          in it. `ROSTER_CAPACITY_EXCEEDED` would otherwise carry a remedy that
+          exists in the vocabulary and appears on no screen. Its row is the only
+          place it can go.
+        */
+        const remedyBelongsHere = !event.reason && Boolean(cause.remedy)
+
+        return (
+          <span className="event__why">
+            <span className="event__why-label">{cause.label}</span>
+            <span className="event__why-meaning">{cause.meaning}</span>
+            {remedyBelongsHere ? (
+              <span className="event__why-meaning">
+                <strong>What to do:</strong> {cause.remedy}
+              </span>
+            ) : null}
           </span>
-        ) : (
-          <span className="muted">—</span>
-        ),
+        )
+      },
     },
     {
       id: 'what',
@@ -191,8 +258,17 @@ export function EventsPage() {
       render: (event) => (
         <span className="event__what">
           {humaniseCode(event.event_type)}
+          {/*
+            THE FEATURE'S NAME, NOT A GENERAL HUMANISATION OF ITS CODE. Both
+            produce "Access Control", which is why this survived a first pass —
+            but `humaniseCode` turns CHECK_IN into "Check In" while the rest of
+            the console, reading the registry, calls it "Check-in". The registry
+            is the one place feature names are decided.
+          */}
           {event.application ? (
-            <span className="audit__role">{humaniseCode(event.application)}</span>
+            <span className="audit__role">
+              {describeApplication(event.application).label}
+            </span>
           ) : null}
         </span>
       ),
@@ -214,7 +290,7 @@ export function EventsPage() {
         The counterpart to the note on Activity. Somebody arriving here to find
         out who changed a setting needs sending the other way, once.
       */}
-      <InfoNote title="This is the door log, not the operator trail">
+      <InfoNote title="This is the event log, not the operator trail">
         Every record here is something that happened in the field. Changes
         operators made in this console — a terminal disabled, a person removed, a
         role changed — are in <Link to="/activity">Activity</Link>.
@@ -259,6 +335,14 @@ export function EventsPage() {
               { value: 'TAMPER', label: 'Tamper' },
               { value: 'TERMINAL_ONLINE', label: 'Terminal online' },
               { value: 'TERMINAL_OFFLINE', label: 'Terminal offline' },
+              /*
+                The platform's own error condition, and the only event type it
+                emits that carries `decision: ERROR`. The Outcome filter has
+                offered "Error" all along while this list omitted the one thing
+                that produces one, so an operator could filter to it and had no
+                way to ask for it by name.
+              */
+              { value: 'ROSTER_CAPACITY_EXCEEDED', label: 'Too many people for a terminal' },
             ]}
           />
 
@@ -284,7 +368,7 @@ export function EventsPage() {
             label="Person"
             value={search}
             onChange={change(setSearch)}
-            placeholder="Name or identifier"
+            placeholder={`Name or ${PERSON_ID_LABEL}`}
             busy={events.isFetching && search.trim().length > 0}
           />
 

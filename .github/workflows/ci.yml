@@ -88,6 +88,11 @@ jobs:
       # TEST_DB_SKIP is deliberately NOT set. If the database is unreachable the
       # suite fails rather than skipping, because a green run that silently
       # covered none of the tenancy or sync SQL is worse than a red one.
+      #
+      # -timeout matches the Makefile, and for the reason given there: this suite
+      # had grown to within a minute of go test's 10-minute default, so a slow
+      # runner would report a PANIC instead of a result. A timeout exists to
+      # catch a deadlock, not a busy machine.
       - name: Test
         env:
           DB_HOST: localhost
@@ -95,7 +100,7 @@ jobs:
           DB_USER: postgres
           DB_PASSWORD: postgres
           DB_SSLMODE: disable
-        run: go test -count=1 ./...
+        run: go test -count=1 -timeout 30m ./...
 
       # Proves the migrations apply to an EMPTY database in filename order, which
       # is what a new customer's database does and what the test suite's own

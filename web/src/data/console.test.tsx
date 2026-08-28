@@ -129,6 +129,103 @@ describe('reads', () => {
     expect(keys.terminals.list({ outdated: true })).not.toEqual(keys.terminals.list())
   })
 
+  /*
+   * A FLEET BIGGER THAN A PAGE.
+   *
+   * D2 gave `GET /console/terminals` a `limit` that DEFAULTS TO FIFTY. Every
+   * screen reading this list treats it as a complete set -- the dashboard's
+   * fleet rollup, the terminals page's browser-side filter, the firmware page's
+   * "how much is behind", the permission picker's list of doors. Fifty rows
+   * presented as the fleet is not a shorter list, it is a WRONG NUMBER, and it
+   * is wrong silently: nothing about `{count: 50, terminals: [...]}` looks
+   * truncated.
+   *
+   * The sizes are deliberately not multiples of the page size, so an off-by-one
+   * in the offset arithmetic drops or repeats a row instead of landing evenly.
+   */
+  const bigFleet = (size: number) =>
+    Array.from({ length: size }, (_, index) =>
+      makeTerminal({
+        id: index + 1,
+        public_id: `terminal-public-${index + 1}`,
+        serial_number: `AT-${String(index + 1).padStart(4, '0')}`,
+        site_public_id: SITE_A.site_id,
+        site_name: SITE_A.site_name,
+        firmware_outdated: index % 2 === 0,
+      }),
+    )
+
+  const terminalListCalls = () =>
+    state.requests.filter((request) => request.url.includes('/console/terminals?'))
+
+  it('returns a fleet of 137 whole, rather than the first page of fifty', async () => {
+    signIn()
+    seed({ terminals: bigFleet(137) })
+
+    const { result } = renderHook(() => useTerminals(), { wrapper: queryWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(result.current.data?.terminals).toHaveLength(137)
+
+    // Every serial exactly once. A repeated page would also total 137.
+    const serials = new Set(result.current.data?.terminals.map((t) => t.serial_number))
+    expect(serials.size).toBe(137)
+    expect(serials.has('AT-0001')).toBe(true)
+    expect(serials.has('AT-0137')).toBe(true)
+  })
+
+  it('describes the assembled fleet, not the last page it fetched', async () => {
+    // A caller that checks the envelope must be told it is holding everything,
+    // otherwise the fix simply moves the wrong number somewhere else.
+    signIn()
+    seed({ terminals: bigFleet(137) })
+
+    const { result } = renderHook(() => useTerminals(), { wrapper: queryWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(result.current.data?.count).toBe(137)
+    expect(result.current.data?.total).toBe(137)
+    expect(result.current.data?.has_more).toBe(false)
+  })
+
+  it('pages through a fleet larger than the maximum page size', async () => {
+    signIn()
+    seed({ terminals: bigFleet(437) })
+
+    const { result } = renderHook(() => useTerminals(), { wrapper: queryWrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(result.current.data?.terminals).toHaveLength(437)
+    expect(new Set(result.current.data?.terminals.map((t) => t.serial_number)).size).toBe(437)
+
+    // 200 + 200 + 37, walking the offset. Asserted so that a change which
+    // fetched one page and stopped fails HERE, beside the contract, rather than
+    // in whichever screen happened to count it.
+    const calls = terminalListCalls()
+    expect(calls).toHaveLength(3)
+    expect(calls.map((call) => new URL(call.url).searchParams.get('offset'))).toEqual([
+      '0',
+      '200',
+      '400',
+    ])
+  })
+
+  it('keeps the outdated filter while paging', async () => {
+    // The filter is the server's, so it has to survive being asked three times.
+    signIn()
+    seed({ terminals: bigFleet(437) })
+
+    const { result } = renderHook(() => useTerminals({ outdated: true }), {
+      wrapper: queryWrapper(),
+    })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    // Every other terminal in the fixture is behind: 219 of 437.
+    expect(result.current.data?.terminals).toHaveLength(219)
+    expect(result.current.data?.terminals.every((t) => t.firmware_outdated)).toBe(true)
+    expect(terminalListCalls().every((call) => call.url.includes('outdated=true'))).toBe(true)
+  })
+
   it('surfaces a failure as an error rather than as empty data', async () => {
     signIn()
     failNext('people', 500)

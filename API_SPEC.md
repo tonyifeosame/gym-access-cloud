@@ -692,6 +692,7 @@ Provisions a device and issues its credential.
 | `firmware_version` | string | no |
 | `hardware_revision` | string | no |
 | `build_number` | string | no |
+| `capabilities` | string[] | no |
 | `release_channel` | string | no — `STABLE` (default), `BETA`, `CANARY` |
 | `ip_address` | string | no (defaults to the caller's IP) |
 
@@ -912,6 +913,7 @@ All fields optional; body may be omitted entirely.
 | `error` | string | recorded when `status` is `ERROR` |
 | `ip_address` | string | defaults to the caller's IP |
 | `member_capacity` | integer | how many people this terminal can hold (FW-01) |
+| `capabilities` | string[] | what this image can do (025) |
 
 **`member_capacity` is the terminal's own ceiling, and its absence is
 meaningful.** The server treats "not reported" as *unknown* and never
@@ -923,8 +925,41 @@ because the hardware has not changed.
 Values ≤ 0 are ignored and the heartbeat still succeeds; a garbage field must
 not take a door out of service.
 
-**No firmware sends this yet.** The contract it has to meet is in
-`docs/sync-protocol.md`.
+#### `capabilities` — what this terminal can actually do
+
+The list the platform gates commands on. Tokens are the firmware's own, matched
+**exactly** — no prefixes, no wildcards, and never derived from a version string:
+
+| Token | Means |
+|---|---|
+| `wifi_provisioning` | Wi-Fi setup from a phone, through the terminal's own captive portal |
+| `wifi_recovery` | it parses the `WIFI_RECOVERY` job and **acts** on it |
+| `terminal_announce` | it announces itself and displays a pairing code (§17.5) |
+
+**Absent, empty and populated are three different answers.** An absent field
+means *unchanged* and merges with what is stored — so a build that does not
+report cannot switch a gated feature off for that door. An empty array is a real
+answer: *this terminal reports its capabilities and has none of these*, which is
+what a downgrade looks like and is how a capability is taken away. A terminal
+that has never reported at all reads as `null`, and **nothing may be inferred
+from it**: a brand-new unit before its first heartbeat and an image predating
+capability reporting are both `null`.
+
+Unrecognised tokens are stored and ignored rather than refused — the vocabulary
+grows in the firmware first, and a server that refused an unknown token would
+make every new device capability wait for a platform release.
+
+A malformed list never fails the heartbeat. Blank and duplicate tokens are
+dropped; the beat still succeeds, because a terminal that cannot heartbeat reads
+on the console as one that has gone offline.
+
+**Why this exists rather than a version comparison.** `DEVICE_FIRMWARE_VERSION`
+defaulted to `1.0.0` and the build flag that would have overridden it was
+commented out, so every image ever produced reported the same string. The
+version is stamped from `platformio.ini` from firmware 1.2.0 onward, but the
+fleet already in the field will keep reporting `1.0.0` until it is reflashed —
+and no column can fix that after the fact. A capability is the fact itself
+rather than a proxy for it, and it needs version ordering on neither side.
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/devices/heartbeat \
@@ -1278,11 +1313,12 @@ one. CSRF is required on every unsafe method.
 | Method | Path | Auth | Min role |
 |---|---|---|---|
 | `POST` | `/api/v1/auth/login` | none | — |
+| `POST` | `/api/v1/auth/register` | none | — |
 | `GET` | `/api/v1/auth/me` | session | any |
 | `POST` | `/api/v1/auth/logout` | session + CSRF | any |
 | `POST` | `/api/v1/auth/password` | session + CSRF | any |
 | `GET` | `/api/v1/console/company` | session | VIEWER |
-| `GET` | `/api/v1/console/sites` | session | VIEWER |
+| `GET` | `/api/v1/console/sites?q=` | session | VIEWER |
 | `GET` | `/api/v1/console/sites/{site_id}` | session | VIEWER |
 | `GET` | `/api/v1/console/sites/{site_id}/settings` | session | VIEWER |
 | `PUT` | `/api/v1/console/sites/{site_id}/settings` | session + CSRF | MANAGER |
@@ -1294,6 +1330,7 @@ one. CSRF is required on every unsafe method.
 | `PUT` | `/api/v1/console/terminals/{serial}/application-mode` | session + CSRF | MANAGER |
 | `GET` | `/api/v1/console/people` | session | VIEWER |
 | `GET` | `/api/v1/console/people/{external_id}` | session | VIEWER |
+| `GET` | `/api/v1/console/people/{external_id}/credentials` | session | VIEWER |
 | `POST` | `/api/v1/console/people` | session + CSRF | MANAGER |
 | `PUT` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
 | `DELETE` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
@@ -1318,6 +1355,8 @@ one. CSRF is required on every unsafe method.
 | `POST` | `/api/v1/console/terminals/{serial}/revoke` | session + CSRF | ADMIN |
 | `DELETE` | `/api/v1/console/terminals/{serial}` | session + CSRF | ADMIN |
 | `PUT` | `/api/v1/console/terminals/{serial}/site` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminals/{serial}/wifi-recovery` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/terminals/{serial}/wifi-recovery` | session | ADMIN |
 | `GET` | `/api/v1/console/firmware` | session | ADMIN |
 | `POST` | `/api/v1/console/firmware` | session + CSRF | ADMIN |
 | `PUT` | `/api/v1/console/firmware/{id}/current` | session + CSRF | ADMIN |
@@ -1332,6 +1371,17 @@ one. CSRF is required on every unsafe method.
 | `DELETE` | `/api/v1/console/schedules/{schedule_id}` | session + CSRF | MANAGER |
 | `POST` | `/api/v1/console/terminals/{serial}/evaluate` | session + CSRF | MANAGER |
 | `POST` | `/api/v1/console/sites/{site_id}/claim-codes` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/terminal-announcements` | session | MANAGER |
+| `GET` | `/api/v1/console/terminal-announcements/{id}` | session | MANAGER |
+| `POST` | `/api/v1/console/terminal-announcements/adopt` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/approve` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/reject` | session + CSRF | ADMIN |
+
+Adding a terminal splits by role on purpose: **seeing** that one is waiting is
+MANAGER, because the person who unpacked the box is often not an administrator
+and a pending terminal nobody can see is a support call. **Acting** on it mints a
+credential and is ADMIN, matching claim-code issue and site-key rotation. See
+section 17.5.
 
 ### Credential handover routes
 
@@ -1361,11 +1411,56 @@ a terminal or a site key.
 | `POST` | `/api/v1/platform/companies` | platform session + CSRF |
 | `PUT` | `/api/v1/platform/companies/{company_id}` | platform session + CSRF |
 | `POST` | `/api/v1/platform/companies/{company_id}/operators` | platform session + CSRF |
+| `POST` | `/api/v1/platform/companies/{company_id}/recovery` | platform session + CSRF |
+| `POST` | `/api/v1/platform/terminals/{serial}/release` | platform session + CSRF |
 
 Issuing a first operator is refused into a company that already has one, by a
 query predicate rather than a check: a platform identity that could add accounts
 to a running tenant at any time would be a standing back door into every
 customer.
+
+**Recovery is bounded by the same kind of predicate**, and it exists because
+self-service signup creates a company of **one**. That customer had no route back
+into their own account: `POST /auth/forgot-password` mints a token this platform
+has no way to deliver, `POST /console/operators/{id}/reset` needs a **second**
+administrator, and the first-operator route above is refused once a company has
+any operator at all.
+
+`POST /api/v1/platform/companies/{company_id}/recovery` issues a single-use reset
+link for a company's **sole** `OWNER`-or-`ADMIN`, and refuses with `409` the
+moment there are two — at which point the customer can recover from their own
+console and this surface has no business reaching in. `409` as well when there is
+none, because resetting a `MANAGER` or a `VIEWER` hands back an account that
+still cannot administer anything. `MANAGER` and `VIEWER` are deliberately not
+counted as administrators: an owner whose only colleague is a viewer is exactly
+as stranded as one with no colleague at all.
+
+It mints through the same token mechanism as the console's own administrative
+reset — single-use, short-lived, stored as a hash, superseding any outstanding
+token for that account. There is no second token path. The link is returned
+**once**, to the authenticated platform administrator, and the customer's own
+forgot-password screen still answers `202` and learns nothing.
+
+**Audited into the tenant's own trail** as `COMPANY_OWNER_RECOVERY_ISSUED` — a
+distinct action from the `OPERATOR_RESET_ISSUED` an administrator inside the
+company produces, so "did our vendor reset our owner account" is a question the
+customer can answer without asking the vendor. A recovery mechanism whose use is
+visible only to the party using it is one nobody can hold to account.
+
+```json
+{"operator": {"id": "…", "email": "owner@example.com", "full_name": "…",
+              "role": "OWNER"},
+ "reset": {"token": "…", "purpose": "RESET", "expires_at": "…",
+           "shown_once": true},
+ "delivery": "…"}
+```
+
+**Release is the one exception to "nothing inside a tenant"**, and it is narrow
+by construction: it detaches a serial from the company holding it and does not
+give it to anybody. The next owner adopts it through the ordinary flow with their
+own administrator's approval, so reassigning a terminal always takes two people
+in two companies. Audited into the trail of the company that loses it. See
+section 17.5.
 
 ---
 
@@ -1439,6 +1534,54 @@ send JSON, so a cross-site form post cannot reach this endpoint.
 | `415` | body was not `application/json` |
 | `429` | too many attempts (per address) **or** the account is temporarily locked (5 failures → 1 min, doubling to a 15 min cap). Carries `Retry-After` |
 | `500` | database unavailable — never reported as a credential failure |
+
+### `POST /api/v1/auth/register`
+
+Unauthenticated, and the way a customer nobody has onboarded gets an account.
+Requires `Content-Type: application/json`, same as login and for the same reason.
+
+**Four fields, and no others exist.** No company id, no slug, no role, no site,
+no claim code — the role is forced to `OWNER`, the slug is derived from the
+company name, and the company's first site is created automatically.
+
+```json
+{
+  "full_name": "Amaka Obi",
+  "company_name": "Harbour Freight Ltd",
+  "email": "amaka@harbourfreight.com",
+  "password": "..."
+}
+```
+
+`201` **sets the session cookie and returns the same session body login does**
+([below](#the-session-body)) — the new owner is signed in and the console can go
+straight to its authenticated tree.
+
+What happens server-side, in ONE transaction:
+
+1. a company, with a slug derived from the name (`Harbour Freight Ltd` →
+   `harbour-freight-ltd`; a taken slug is resolved by trying the next candidate,
+   never by refusing the signup), `contact_email` set to the address supplied,
+   and `default_person_access = NONE`
+2. a site named **Main Site**, with a provisioning credential minted and stored
+   as a hash
+3. the registering user as that company's `OWNER`, *not* flagged
+   `must_change_password` — they chose the password themselves
+
+**The response never carries the site's provisioning key.** The plaintext is
+discarded inside the transaction; the owner rotates a fresh one from the console
+(`POST /console/sites/{site_id}/api-key`, ADMIN) when there is hardware to
+install. Nothing on this route can reach `/api/v1/platform/*` — that is a
+different table, a different cookie and a different identity.
+
+| Code | When |
+|---|---|
+| `400` | a missing or blank field, a malformed address, a password outside the 12–72 policy, or a name past its column |
+| `403` | self-service signup is disabled (`PUBLIC_SIGNUP_ENABLED=false`) |
+| `409` | that email address already has an account. Unavoidably an existence disclosure: `users.email` is unique globally because the login form has no tenant selector, so an address accepted twice would create an account nobody could sign in with |
+| `415` | body was not `application/json` |
+| `429` | too many attempts. **One allowance shared with `/auth/login`, `/auth/password` and the handover routes**, so alternating between them does not buy a second budget |
+| `500` | the account could not be created. If it was created but the session could not be opened, the message says so and says to sign in — it never reports a failure that would send somebody to sign up again with an address that is now taken |
 
 ### `GET /api/v1/auth/me`
 
@@ -1542,7 +1685,7 @@ tenant is `404`.
 | Method | Path | Role | Returns |
 |---|---|---|---|
 | `GET` | `/console/company` | VIEWER | `{id, name, slug, contact_email, active, created_at}` |
-| `GET` | `/console/sites` | VIEWER | `{count, sites: [...]}` |
+| `GET` | `/console/sites?q=` | VIEWER | `{count, sites: [...]}` |
 | `GET` | `/console/sites/{site_id}` | VIEWER | one site |
 | `GET` | `/console/sites/{site_id}/settings` | VIEWER | `{settings, settings_version}` |
 | `PUT` | `/console/sites/{site_id}/settings` | MANAGER | updated settings |
@@ -1550,6 +1693,20 @@ tenant is `404`.
 | `PUT` | `/console/sites/{site_id}` | **ADMIN** | updated site |
 | `DELETE` | `/console/sites/{site_id}` | **ADMIN** | `{retired, terminals_retired}` |
 | `POST` | `/console/sites/{site_id}/api-key` | **ADMIN** | **new key, once** |
+
+The list is **searchable**, with the same `q` semantics as `/console/people`:
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `q` | — | ≤ 100 chars | matches `site_name` **or** `address`, anywhere, case-insensitively |
+
+`%`, `_` and `\` are matched literally, and `q` is trimmed and truncated to 100
+characters. The search **narrows within the caller's grants and never widens
+them**: the scope predicate and the search predicate are applied in the same
+statement, so a term cannot surface a site the operator is not entitled to.
+
+The list is **not paginated**. A company's locations are counted in tens, not
+thousands, and `count` is the whole match rather than a page of it.
 
 A site:
 
@@ -1664,10 +1821,12 @@ not touch it.
 
 | Method | Path | Role | Returns |
 |---|---|---|---|
-| `GET` | `/console/terminals` | VIEWER | `{count, terminals: [...]}` |
+| `GET` | `/console/terminals?limit=&offset=&q=` | VIEWER | paged `{count, total, limit, offset, has_more, terminals: [...]}` |
 | `GET` | `/console/terminals/summary` | VIEWER | fleet counts |
 | `GET` | `/console/terminals/{serial}` | VIEWER | inventory row + application configuration |
 | `PUT` | `/console/terminals/{serial}/application-mode` | MANAGER | inventory row + application configuration |
+| `POST` | `/console/terminals/{serial}/wifi-recovery` | ADMIN | Change Wi-Fi command state (`202`) |
+| `GET` | `/console/terminals/{serial}/wifi-recovery` | ADMIN | Change Wi-Fi command state |
 
 `terminals` entries are the inventory objects from
 [section 7](#get-apiv1devicesoutdatedtrue). They carry **no credential material**
@@ -1682,6 +1841,44 @@ terminal's own site — `403` for an ungranted site in your company, `404` for
 another tenant's serial or one that does not exist. The gate runs **before** the
 handler, so a malformed body against a terminal you may not reach is still `403`
 rather than a `400` that would confirm the serial exists.
+
+The list is **paginated and searchable**, in the same envelope and with the same
+bounds as [people](#people):
+
+| Parameter | Default | Bounds | Meaning |
+|---|---|---|---|
+| `limit` | 50 | 1–200 | page size |
+| `offset` | 0 | ≥ 0 | rows to skip |
+| `q` | — | ≤ 100 chars | matches `serial_number`, `device_name` **or** the terminal's `site_name`, anywhere, case-insensitively |
+
+```json
+{
+  "count": 50, "total": 128, "limit": 50, "offset": 0, "has_more": true,
+  "terminals": [ … ]
+}
+```
+
+`count` and `terminals` keep the meaning and the position they had before paging
+existed, so a client that reads only those two still parses — but it now sees at
+most `limit` rows. **A console that does not page stops at 50 terminals.**
+`total` is the size of the whole match, so it reflects `q` and `?outdated=true`
+rather than the fleet.
+
+Clamping, and the literal handling of `%`, `_` and `\` in `q`, work exactly as
+they do for [people](#people). `q` composes with `?outdated=true` and with site
+grants. Ordering is by site, then serial, with an id tiebreak — without a unique
+final key the same terminal can appear on two consecutive pages while another is
+skipped, so paging visits every terminal exactly once.
+
+**`GET /console/terminals/summary` is deliberately not narrowed by `limit`,
+`offset` or `q`.** It is the rollup *above* the list, and counts that shrank as
+somebody typed into a search box would misreport the fleet. It remains narrowed
+by site grants.
+
+**`GET /api/v1/devices` (site key) is unchanged** and still returns the complete
+inventory — deployed tooling reads it as one, and bounding it would silently
+truncate a fleet somebody depends on being whole. Same reasoning as
+`GET /api/v1/members`.
 
 `GET /console/terminals/{serial}` returns the **same inventory row as the list**,
 plus the application assignment:
@@ -1789,12 +1986,152 @@ credential is only ever produced by `POST /api/v1/devices/claim` or by
 `POST /api/v1/devices/register` behind the site API key, in each case exactly
 once, and never by a console read.
 
+#### Change Wi-Fi
+
+`POST /console/terminals/{serial}/wifi-recovery` (ADMIN) asks one terminal to
+return to the **same setup portal a brand-new unit uses**, so that somebody
+standing next to it can join it to a different Wi-Fi network from a phone.
+
+**No Wi-Fi credential crosses this API, in either direction.** The request takes
+**no body** — any body sent is ignored — and there is no SSID field, no
+passphrase field, and no column behind this route that one could be stored in.
+The platform does not learn the customer's Wi-Fi password and cannot leak one it
+never had. A client that wants to send a network name has misunderstood the
+feature.
+
+**It is not a factory reset.** The firmware's recovery path clears the SSID and
+the pre-shared key and nothing else; the device credential, the terminal's
+identity and serial, its company, site and name, the server URL, the offline
+policy, the member table and every fingerprint binding are untouched. The cloud
+side deletes nothing at all — it inserts one row.
+
+##### How it is delivered
+
+It is a `WIFI_RECOVERY` job in the **existing sync outbox**, delivered by
+`GET /api/v1/devices/jobs` and retired by `POST /api/v1/devices/jobs/{id}/complete`
+exactly as every other job is. The job carries **no payload** and names no
+entity: the id and the type are the whole message.
+
+Firmware that predates the command parses an unrecognised type as unknown and
+**acknowledges** it, so serving this type to a mixed fleet makes an older unit
+ignore the command rather than fail on it forever.
+
+##### 202, and why the state matters
+
+The response is `202 Accepted`: the command has been accepted **for delivery**,
+and nothing has happened at the terminal yet. `GET` on the same path returns the
+same shape and is what a client polls.
+
+```json
+{
+  "serial_number": "AT-0001",
+  "state": "QUEUED",
+  "request_id": "8f0c…",
+  "already_queued": false,
+  "terminal_status": "ONLINE",
+  "online": true,
+  "queued_at": "2026-08-18T09:00:00Z",
+  "expires_at": "2026-08-18T09:15:00Z"
+}
+```
+
+| `state` | Meaning |
+|---|---|
+| `NONE` | nothing has ever been sent to this terminal |
+| `QUEUED` | waiting for the terminal to collect it |
+| `DELIVERED` | the terminal has collected it. It has **not** said it acted on it |
+| `ACCEPTED` | the terminal **acknowledged** it. The only evidence anything happened at the door |
+| `EXPIRED` | never collected inside its window, so it will not be delivered |
+| `FAILED` | the terminal reported it could not apply it |
+| `CANCELLED` | superseded by something that retired the terminal's queue — a revocation or a retirement |
+
+**A client must not report the Wi-Fi as changed before `ACCEPTED`.** `QUEUED` is
+the console's own request read back; `DELIVERED` says the terminal holds the
+command and nothing more.
+
+##### `ACCEPTED` on a mixed fleet — a known limitation
+
+**`ACCEPTED` is not proof the terminal acted on the command**, and a client must
+not phrase it as though it were.
+
+Firmware that predates this feature parses an unrecognised job type as *unknown*
+and **acknowledges it as applied**. That is deliberate on the firmware's part —
+it is what stops a newer server's job types being redelivered forever — and it is
+precisely what makes this command safe to serve to a fleet running mixed builds:
+an old unit ignores it rather than failing on it. The cost is that an old unit's
+acknowledgement is byte-for-byte indistinguishable from a new one's.
+
+**This is now gated rather than inferred (025).** The command is refused, and
+nothing is queued, unless the terminal has reported the `wifi_recovery`
+capability on its heartbeat — see `POST /devices/heartbeat`. A terminal that has
+never reported is refused on the same terms: silence is not consent, and
+treating it as consent is exactly what produced a console reporting that a door
+had confirmed a command its firmware never recognised.
+
+The version is not the discriminator and never became one. `DEVICE_FIRMWARE_
+VERSION` defaulted to `1.0.0` and the build flag that would have overridden it
+was commented out, so every image ever produced reported the same string; it is
+stamped from firmware 1.2.0 onward, but the fleet in the field will keep
+reporting `1.0.0` until it is reflashed.
+
+A client should still say the terminal **acknowledged** the command and state
+the setup mode as an expectation rather than a fact. The terminal acknowledges
+*before* it drops the link — deliberately, so the acknowledgement is not
+stranded — and everything after that is past what the platform can observe. Tell
+the operator what "nothing happened" looks like: no setup network within a few
+minutes means the local recovery at the unit.
+
+##### Safely repeatable, and deliberately perishable
+
+Sending it again while one is outstanding returns **the same command** with
+`already_queued: true` and queues nothing new — enforced by a partial unique
+index, so a retried request whose response was never seen cannot produce a
+second. A completed command does not block a later one.
+
+A command that is not collected within **15 minutes** stops being deliverable and
+reads as `EXPIRED`. This is a safety property rather than tidiness: every other
+job type describes *state*, so arriving late is merely late, while this one
+describes an *act*. A command that sat in the queue while the customer recovered
+the terminal by hand would arrive after they had re-provisioned it and wipe the
+network they had just typed in.
+
+For the same reason a queued command is **not cancelled by a resync or a
+relocation** — those replace state, and a command is not state — but **is**
+cancelled by a revocation or a retirement, which take the terminal out of
+service.
+
+##### Refusals
+
+| Code | `code` | When |
+|---|---|---|
+| `404` | — | no such terminal in this company, or it has been retired |
+| `403` | — | the caller is below ADMIN, or is not scoped to the terminal's site |
+| `409` | `TERMINAL_OFFLINE` | the terminal is not currently reachable |
+| `409` | `TERMINAL_DISABLED` | administratively disabled, so it will not collect commands |
+| `409` | `TERMINAL_NOT_PROVISIONED` | holds no device credential, so it cannot poll |
+| `409` | `TERMINAL_CANNOT_CHANGE_WIFI` | has not reported the `wifi_recovery` capability (025) |
+
+**Nothing is queued on any refusal.** Branch on `code`, never on the message:
+`TERMINAL_OFFLINE` is the one that changes what the customer must be told, and
+what they must be told is that a terminal whose Wi-Fi is already broken has to be
+recovered **at the unit** — the firmware exposes a local path that needs no
+network at all.
+
+That case is not an edge case. A terminal with the wrong Wi-Fi credentials **is**
+offline, which is exactly why somebody reached for this endpoint, and refusing is
+the correct answer rather than an inconvenience.
+
+The operator's request is recorded in the audit trail as
+`TERMINAL_WIFI_RECOVERY_REQUESTED`, carrying the request id and whether a command
+was already waiting. A refusal writes no record: nothing happened.
+
 ### People
 
 | Method | Path | Role |
 |---|---|---|
-| `GET` | `/console/people?limit=&offset=&q=` | VIEWER |
+| `GET` | `/console/people?limit=&offset=&q=&enrolled=&active=` | VIEWER |
 | `GET` | `/console/people/{external_id}` | VIEWER |
+| `GET` | `/console/people/{external_id}/credentials` | VIEWER |
 | `POST` | `/console/people` | MANAGER |
 | `PUT` | `/console/people/{external_id}` | MANAGER |
 | `DELETE` | `/console/people/{external_id}` | MANAGER |
@@ -1806,6 +2143,8 @@ The list is **paginated and searchable**:
 | `limit` | 50 | 1–200 | page size |
 | `offset` | 0 | ≥ 0 | rows to skip |
 | `q` | — | ≤ 100 chars | matches `external_id` **or** `full_name`, anywhere, case-insensitively |
+| `enrolled` | — | `true` / `false` | narrows by whether the person is enrolled **at all** |
+| `active` | — | `true` / `false` | narrows by `active` |
 
 Out-of-range and unparseable values are **clamped, not rejected** — a `limit` of
 5000 is a caller asking for as much as it can have, and `limit=abc` falls back to
@@ -1816,6 +2155,24 @@ the whole roster, `_` would match any single character, and a trailing `\` would
 produce a malformed pattern; a search box can pass any of them safely. `q` is
 trimmed and truncated to 100 characters — a term longer than any stored value
 cannot match anything.
+
+**`enrolled` and `active` are tri-state, and absent is not `false`.** Omitting a
+filter means "everybody"; `enrolled=false` means "everybody with no enrolment",
+which is the question asked before a rollout. Collapsing the two would hide every
+enrolled person from an unfiltered list. `true`/`false`, `1`/`0`, `t`/`f` and
+`TRUE`/`FALSE` all parse; a value that will not parse as a boolean is treated as
+**absent**, consistent with the clamping rule above.
+
+Both filters are applied **in SQL, against the whole roster** — not to the
+fetched page. Narrowing a fetched page would narrow the page rather than the
+roster: silently right on the first page and silently wrong on every one after
+it. `total` and the rows therefore describe the same filtered set, so paging
+through a filter visits every match and stops at the end of it.
+
+`enrolled` uses the **same rule** as `biometric_enrolled` on each row — the union
+of a live `credentials` record and the legacy column — so the filter and the
+badge beside each person cannot disagree. A `SUSPENDED` or `REVOKED` credential
+is not enrolment.
 
 ```json
 {
@@ -1836,7 +2193,7 @@ bounding it would silently truncate a roster somebody depends on being complete.
 {
   "id": "7ac1…", "external_id": "P-100", "full_name": "Sam Taylor",
   "category": "STANDARD", "active": true,
-  "biometric_enrolled": true,
+  "biometric_enrolled": true, "enrolment_source": "CREDENTIAL",
   "created_at": "…", "updated_at": "…"
 }
 ```
@@ -1846,11 +2203,20 @@ bounding it would silently truncate a roster somebody depends on being complete.
 - `category` is **optional** and free text, defaulting to `STANDARD`. It maps to a
   legacy column; the platform has no opinion about what class of person a company
   records.
-- **`biometric_enrolled` is the entire biometric surface.** No template, locator
-  or credential detail is ever returned. Biometrics are an abstraction the backend
-  owns — do not model a person as *having a fingerprint*, model them as having
-  zero or more credentials whose details the API will describe when that resource
-  exists.
+- **`biometric_enrolled` is the entire biometric surface on this object.** No
+  template, locator or credential detail is ever returned here. Biometrics are an
+  abstraction the backend owns — do not model a person as *having a fingerprint*,
+  model them as having zero or more credentials. That resource now exists:
+  [credential visibility](#credential-visibility) describes them.
+- **`enrolment_source` says which record backs `biometric_enrolled`**, because
+  there are two stores and they do not keep each other in step. `CREDENTIAL` is a
+  row in `credentials`, and the credentials endpoint can say what type it is, when
+  it was taken, where, and at how many doors. `LEGACY_ONLY` is
+  `people.fingerprint_template` with no credential row: the person **is** enrolled
+  and the platform can say nothing further — no terminal, no date, no count.
+  `NONE` is neither store. A console must not render `LEGACY_ONLY` as "not
+  enrolled", and must not render it as though the detail is merely missing from
+  the response; it was never recorded.
 - An update **never** alters a person's biometric enrolment. Enrolment happens at
   a terminal, through the enrolment flow.
 
@@ -1860,6 +2226,81 @@ sync jobs that keep terminals in step.
 
 People are company-wide in this schema, so **site grants do not narrow the people
 list** — see the known limitations.
+
+#### Credential visibility
+
+`GET /console/people/{external_id}/credentials` (VIEWER) answers **"is this
+person enrolled, where, and at how many doors"**. It reads `credentials` and
+`credential_placements` — the structured record — and **not** the legacy
+`people.fingerprint_template` column.
+
+```json
+{
+  "count": 1,
+  "enrolment_source": "CREDENTIAL",
+  "credentials": [
+    {
+      "id": "c4f2…",
+      "type": "FINGERPRINT",
+      "state": "ACTIVE",
+      "enrolled_at": "2026-08-14T09:31:02Z",
+      "enrolled_at_terminal": {
+        "serial_number": "TERM-1", "device_name": "Front Desk",
+        "site_name": "Lagos Depot", "retired": false
+      },
+      "usable_at_terminal_count": 1
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | `FINGERPRINT`, `CARD`, `PIN`, `MOBILE`, `FACE` or `QR` |
+| `state` | `PENDING`, `ACTIVE`, `SUSPENDED` or `REVOKED` — reported, never filtered out |
+| `enrolled_at` | When it was captured. **Omitted** when the row does not record it — render that as "not recorded", not as "never" |
+| `enrolled_at_terminal` | The terminal that captured it. **Omitted** when that terminal was hard-deleted or was never recorded. `device_name` and `site_name` are omitted when unknown |
+| `enrolled_at_terminal.retired` | `true` when that terminal has been retired. The row is still reported: an enrolment outlives the hardware that took it, and "enrolled at a terminal that no longer exists" is usually the explanation for why somebody stopped being recognised |
+| `usable_at_terminal_count` | How many terminals **currently hold** this credential |
+
+**`usable_at_terminal_count` is the field that makes the product's real
+limitation legible.** An enrolment binds to the sensor that captured it, so this
+is normally `1` — "enrolled" means "recognised at one door", and an operator
+otherwise has no way to discover it. It counts `PLACED` placements on terminals
+that still exist. `PENDING` and `FAILED` placements are **not** counted: those
+are doors that *should* hold the credential and do not, and counting them would
+tell an operator somebody works at a door where they will be refused.
+
+**Revoked and suspended credentials are listed, but do not count as enrolment.**
+"She had a credential and it was revoked on Tuesday" is the answer to why access
+stopped everywhere at once, so the row is shown with its state. `enrolment_source`
+is computed from the live-credential rule rather than from the length of this
+array, so a person whose only credential is revoked reads as `NONE` while that
+row stays visible.
+
+**No route currently revokes a credential.** The response contract above is what
+this endpoint returns *if* a credential is ever in that state; nothing on the
+platform puts one there today, and withdrawal is done through the roster instead
+— removing a person's access or deactivating them takes them off it, and the
+terminal erases the template. See `docs/biometric-replication.md` §7.
+
+**Read `enrolment_source`, not `credentials.length`, to decide whether somebody
+is enrolled.** `LEGACY_ONLY` is exactly the case where the array is **empty** and
+the person is nonetheless enrolled — a caller that counted the array would report
+them as unenrolled.
+
+**No biometric material crosses this boundary.** No template; no sealed material,
+key id, algorithm or digest; no sensor slot, locator, vendor, template format or
+sensor profile. The store's `SELECT` list and the response types are both written
+so that this is checkable by reading them, and a test scans the raw response body
+for every one of those terms.
+
+Company-scoped, matching
+[`…/permissions`](#get-apiv1consolepeopleexternal_idpermissions): people are
+company-wide in this schema, so site grants do not narrow it. `404` for a person
+who does not exist in your company. An existing person who has never been
+enrolled is `200` with `"count": 0`, `"credentials": []` and
+`"enrolment_source": "NONE"` — a different and honest answer from `404`.
 
 ### Operators
 
@@ -2365,10 +2806,16 @@ mis-parsing it, so this must never become a local time.
 
 ### 17.3 Credential placements, device-facing
 
-Two device-authenticated routes. **No biometric material crosses either, in
-either direction.** A `credential_id` is a handle naming which credential a
-report is about; the template stays on the sensor that captured it, which is all
-the fitted hardware permits.
+Four device-authenticated routes. Two of them — the work list and the placement
+report — carry **no biometric material in either direction**: a `credential_id`
+is a handle naming which credential a report is about. The other two, added by
+026, are the **only** routes on this platform through which sealed material
+moves, and they are separate endpoints for exactly that reason: one place to
+audit, one place to rate limit, one place to test, and a work-list response a
+reviewer can still clear at a glance because it demonstrably carries no bytes.
+
+All four take the terminal from the **authenticated credential** and never from
+a parameter. A terminal cannot report, upload or fetch on another's behalf.
 
 #### `GET /api/v1/devices/credentials/pending`
 
@@ -2422,6 +2869,113 @@ words ("sensor full") so an operator sees why.
 Idempotent on `(credential, device)`. A `PLACED` report promotes a `PENDING`
 credential to `ACTIVE`. A credential named in the body that does not belong to
 `member_id`, or to this tenant, is a **404**.
+
+#### `POST /api/v1/devices/credentials/material`
+
+The **enrolling** terminal handing over what it captured, sealed. Called after
+the placement report above — two calls rather than one, deliberately, so the
+placement path is unchanged, tests included. Enrolment is not a hot path: a
+person is standing at the door either way.
+
+```json
+{"member_id": "MEM001", "credential_id": "8c2f…",
+ "credential_type": "FINGERPRINT", "vendor": "ZFM",
+ "sensor_profile": "ZFM:0x0009:1000",
+ "sealed": {"ciphertext": "<base64>", "key_id": "ck_a1b2c3d4e5f6",
+            "algorithm": "AES-256-GCM", "digest": "<64 hex>"}}
+```
+
+`algorithm` must be `AES-256-GCM`; `ciphertext` is base64 and capped at **2048
+decoded bytes** (a ZFM template is ~512, so the bound is generous on purpose
+while still refusing to let the column be used as storage); `digest` is the
+SHA-256 of the plaintext, in lower-case hex.
+
+`key_id` must be the company's **active** sealing key — the one collected with
+the device credential. A terminal sealing under any other gets `409` with
+`SEALING_KEY_UNKNOWN`, which is distinct from `400` on purpose: the body is well
+formed and the remedy is on the terminal (re-collect its credential), so firmware
+can tell "fix yourself" apart from "stop sending this".
+
+**Idempotent.** A retry of the same material answers `200`, with `duplicate:
+true`. A **second, different** template for a credential that already holds one
+is refused with `409` `MATERIAL_ALREADY_PRESENT` rather than overwritten:
+overwriting would leave terminals placed earlier holding one finger and
+terminals placed afterwards holding another, and the person would have to
+remember which door knows which. Re-enrolling somebody is revoking the
+credential and creating a new one, which the console already does.
+
+`409` `CAPABILITY_NOT_REPORTED` when the terminal has never advertised
+`biometric_export`.
+
+```json
+{"protocol_version": 1, "credential_id": "8c2f…", "member_id": "MEM001",
+ "placements_created": 3, "duplicate": false}
+```
+
+`placements_created` is how many **other** terminals were just told to expect
+this person. Zero is an ordinary answer — a single-terminal site, or a fleet
+where nothing else reports a matching sensor.
+
+#### `GET /api/v1/devices/credentials/{id}/material`
+
+The **receiving** terminal collecting what it was told to expect. The response
+carries the sealed bytes plus the `member_id` the enrolling terminal bound them
+to, which the receiver needs to rebuild the AAD; without it the unseal fails,
+which is the point of the binding. Not new information — the roster already
+delivered that person to this terminal.
+
+```json
+{"protocol_version": 1, "credential_id": "8c2f…", "member_id": "MEM001",
+ "credential_type": "FINGERPRINT", "vendor": "ZFM",
+ "template_format": "VENDOR_TEMPLATE", "sensor_profile": "ZFM:0x0009:1000",
+ "sealed": {"ciphertext": "<base64>", "key_id": "ck_a1b2c3d4e5f6",
+            "algorithm": "AES-256-GCM", "digest": "<64 hex>"}}
+```
+
+**One answer for every refusal: `404`.** No placement, wrong placement state,
+capability never reported, mismatched sensor profile, revoked or suspended
+credential, deactivated person, roster says no — all of them return the same body
+with `MATERIAL_NOT_AVAILABLE`. A terminal that is not entitled to a credential
+does not learn which rule stopped it, or that the credential exists at all. This
+is the discipline the announce token already uses, for the same reason: a refusal
+that explains itself is an oracle. The reason **is** recorded, server-side, in
+the audit row.
+
+#### Who receives material, and who does not
+
+Three gates, all of which must pass and all of which fail closed:
+
+1. **The roster rule**, reused from the sync path rather than restated, so the
+   replication surface is exactly as narrow as the access surface.
+2. **The capability**, self-reported (025). A terminal that has never advertised
+   `biometric_import` is never a fan-out target and can never fetch. `NULL`
+   means "never reported" and is not treated as "can".
+3. **Sensor profile equality.** Material moves between **byte-equal** profiles
+   and nowhere else. Whether two different fingerprint modules interoperate is a
+   hardware fact nobody has established, so nothing here asserts it and nothing
+   is inferred from a shared vendor string. A module reporting a different
+   profile receives nothing and falls back to the pre-existing re-enrolment work
+   list — a working product, not a failure.
+
+Every upload and every fetch is audited, successful or refused
+(`CREDENTIAL_MATERIAL_UPLOADED`, `CREDENTIAL_MATERIAL_SERVED`,
+`CREDENTIAL_MATERIAL_REFUSED`). The rows carry the terminal, the person and the
+credential, and **never** the ciphertext, the digest or the key id.
+`CREDENTIAL_MATERIAL_SERVED` is the record that a template left the platform:
+"which doors ever received this person's fingerprint" is a data-protection
+question a customer is entitled to ask, and that is what answers it.
+
+#### The sealing key itself
+
+Delivered **once**, in the approved `GET /api/v1/devices/announce/{token}`
+response that already carries the device credential, as `sealing_key` (base64)
+and `sealing_key_id` (the non-secret label). Both are **omitted** — not empty —
+when the deployment has no `SEALING_MASTER_KEY` configured, and that is an
+ordinary answer rather than an error: such a terminal cannot replicate and
+behaves exactly as the fleet already in the field does. The key appears in no
+audit row and no log line. See `docs/sealing-key-lifecycle.md` for the full
+threat model, including what is **not** claimed: an attacker holding the running
+server and this database can decrypt every template in it.
 
 #### `generation`
 
@@ -2520,7 +3074,206 @@ The code is returned **once** and no read endpoint gives it back.
 refused when minted rather than discovered at a door. `superseded_codes` lets the
 console warn that an installer's earlier printout has just stopped working.
 
-### 17.5 `ENROLL_FINGERPRINT` — operator-driven enrolment
+**This is now the ADVANCED path.** It is minted *for* a serial, and the serial is
+derived from the factory MAC and printed only on the terminal's USB console — so
+issuing a code needs a cable to read the serial and redeeming one needs a cable
+to type the code. That is right for pre-authorising hardware that has not
+arrived, and unusable by a customer with a box. §17.5 is the customer path.
+Nothing about this endpoint changed.
+
+### 17.5 Announce and approve — `/api/v1/devices/announce`
+
+**The customer-facing way to add a terminal**, and the other end of the claim
+code: the secret travels *outward*, on the terminal's own screen.
+
+The terminal announces itself and displays an eight-character **pairing code**.
+An authenticated ADMIN types that code into the console, confirms the hardware,
+picks a site and approves. The terminal then collects its credential. The
+customer never sees a serial number, a URL, a provisioning key or a cable.
+
+**There are no open claim codes anywhere in this.** Nothing the server mints can
+be redeemed by arbitrary hardware; the pairing code binds one announcement from
+one serial from the moment it exists.
+
+#### `POST /api/v1/devices/announce` — unauthenticated
+
+```
+POST /api/v1/devices/announce
+X-Announce-Token: <previous token, if this unit holds one>
+{"serial_number": "AT-A1B2C3", "firmware_version": "1.4.0",
+ "hardware_revision": "rev-C",
+ "capabilities": ["wifi_provisioning", "wifi_recovery", "terminal_announce"]}
+
+201 {"announcement_id": "…uuid…",
+     "pairing_code": "K7M2-P4QX",
+     "announce_token": "…64 hex…",
+     "state": "PENDING", "serial_number": "AT-A1B2C3",
+     "expires_at": "…", "poll_after_seconds": 5}
+```
+
+`pairing_code` and `announce_token` are returned **only when this call created an
+announcement**, and the firmware must persist both — the code because it has to
+keep displaying it, the token because it is the only way to collect.
+
+Behaviour when a live announcement already exists for the serial — `200`, and
+each branch answers a real field situation:
+
+| Existing state | With a valid `X-Announce-Token` | Without one |
+|---|---|---|
+| `PENDING` | same announcement, **no new code**: a reboot must not rotate a code the customer is reading | superseded; fresh code and token. This is how a unit that lost its stored code recovers |
+| `ADOPTED` / `APPROVED` | state only | state only — **not superseded**, so a reboot cannot destroy an operator's work in flight |
+
+`400` for a serial that is absent, over 15 characters, or outside
+`[A-Za-z0-9_-]` — the firmware's own rule, checked here because this value
+eventually becomes a device identity.
+
+`capabilities` is optional and follows the same rules as on the heartbeat:
+absent means *unchanged* and merges, `[]` is the real answer *reports and has
+none*, and a stored `null` means *never said*. It is **shown to an operator
+before they approve and gates nothing** — the Change Wi-Fi gate reads
+`devices.capabilities`, which only an authenticated heartbeat writes. This
+arrives unauthenticated from hardware nobody has confirmed yet, so it is
+corroboration on the same footing as the firmware version and the calling IP.
+A value that is not an array is a `400`.
+
+#### `GET /api/v1/devices/announce` — authenticated by the announce token
+
+```
+GET /api/v1/devices/announce
+X-Announce-Token: …
+
+200 {"state": "ANNOUNCED", "expires_at": "…", "poll_after_seconds": 5}
+200 {"state": "ADOPTED",   "poll_after_seconds": 5}
+200 {"state": "APPROVED",  "api_key": "atd_…", "company_name": "…",
+     "site_name": "…", "device_name": "Front Door", "poll_after_seconds": 5}
+200 {"state": "REFUSED",   "poll_after_seconds": 5}
+401  unknown token
+```
+
+**Four device-facing states and no more**, because a terminal has four things it
+can do: keep showing its code, say somebody is dealing with it, store a
+credential, or start over. `REJECTED`, `EXPIRED`, `SUPERSEDED` and
+already-`COLLECTED` all arrive as `REFUSED`.
+
+`company_name`, `site_name` and `device_name` are what the panel shows once the
+unit is set up, so a customer can see on the hardware that it joined the right
+account.
+
+Security properties:
+
+- **Announcing grants nothing.** The row has no company, is listed by no
+  endpoint, and becomes a credential only when an ADMIN types a code displayed
+  on the physical unit. There is no route that enumerates un-adopted
+  announcements, so one customer's unclaimed hardware is invisible to every
+  other.
+- **The credential is minted at COLLECTION, not at approval.** Approval records
+  a decision; minting early would mean storing a plaintext key until the device
+  arrived.
+- **One-shot.** The same token never yields a second credential. A unit that
+  loses what it was given re-announces and is approved again.
+- **Both secrets hashed at rest.** SHA-256, like every other secret here.
+- **One live announcement per serial**, so two codes for one door cannot exist.
+- **15 minutes** for `PENDING`/`ADOPTED` (adoption resets the clock);
+  **24 hours** for an approval to be collected.
+- **Rate limited by two buckets, both of which must have a token.** Per client
+  address (300/min, `ANNOUNCE_RATE_LIMIT_PER_MINUTE`) and per terminal
+  (20/min, `ANNOUNCE_DEVICE_RATE_LIMIT_PER_MINUTE`) — keyed on the serial
+  announced or the token polled with. **A site is one address**: every terminal
+  in a building shares the customer's public IP and each polls twelve times a
+  minute, so an address-only limiter refuses a legitimate installation at about
+  five doors. The per-terminal bucket is what makes the address allowance safe
+  to raise: one unit in a loop is bounded by its own behaviour and cannot spend
+  its neighbours' budget. A `429` means *the announcement is fine, you asked too
+  often* — back off, and do **not** discard the stored code or token.
+  Adoption has a separate **per-session** limiter, which is the only place a
+  pairing code can be guessed.
+- **Audited** — `TERMINAL_ADOPTED`, `TERMINAL_APPROVED`,
+  `TERMINAL_SETUP_REJECTED`, `TERMINAL_CREDENTIAL_COLLECTED`, and
+  `TERMINAL_RELEASED` from the platform. There is no `TERMINAL_ANNOUNCED`:
+  `audit_events.company_id` is `NOT NULL` and an un-adopted announcement has no
+  company, so the announcement's own facts ride on the `TERMINAL_ADOPTED`
+  record. The announcement itself is in the operational log.
+- **Never logged** — not the pairing code, not the token, not the key.
+
+#### The ownership rule
+
+**A serial registered to another company is refused**, and it is checked three
+times — at adoption, again at approval, and a third time at collection by
+`registerDeviceTx`'s site-mismatch guard. Minutes pass between them and the
+consequence of missing the window is one customer's door silently becoming
+another's. The refusal names no company, no site and no operator.
+
+| Verdict | Meaning |
+|---|---|
+| `NEW` | no device row anywhere for this serial |
+| `RE_PROVISION` | a live terminal in **this** company. Allowed, and warned about: collection rotates the credential and the current one stops working |
+| `REFUSED_OTHER_COMPANY` | `409`, and nothing is written |
+| `REFUSED_DISABLED` | `409` — their own terminal, out of service. Re-enable first |
+
+#### Console routes
+
+| Method | Path | Auth |
+|---|---|---|
+| `POST` | `/api/v1/console/terminal-announcements/adopt` | session + CSRF, **ADMIN** |
+| `GET` | `/api/v1/console/terminal-announcements` | session, **MANAGER** |
+| `GET` | `/api/v1/console/terminal-announcements/{id}` | session, **MANAGER** |
+
+The pending-terminal shape carries `capabilities` when the unit reported them
+and **omits the field entirely when it did not** — which a console must render
+as *unknown*, never as *none*. A build predating capability reporting and a
+brand-new unit that has only just announced are both absent here.
+| `POST` | `/api/v1/console/terminal-announcements/{id}/approve` | session + CSRF, **ADMIN** |
+| `POST` | `/api/v1/console/terminal-announcements/{id}/reject` | session + CSRF, **ADMIN** |
+
+Reading is MANAGER and acting is ADMIN: the person who unpacked the box is often
+not an administrator, and a terminal waiting where nobody can see it is a support
+call. Adopt answers `404` with `{"code": "PAIRING_CODE_REFUSED"}` for an unknown,
+expired or already-adopted code — one uniform answer, because distinguishing them
+is what makes guessing worth doing.
+
+Approve takes `{"site_id": "<site public id>", "device_name": "Front Door"}` and
+returns the pending terminal. **It carries no credential**, which is why nothing
+about this response needs the care a claim code's does.
+
+#### `POST /api/v1/platform/terminals/{serial}/release` — platform admin only
+
+The only route that detaches a serial from a company, and deliberately only half
+of a move: it releases, and the next owner adopts through the ordinary flow with
+their own administrator's approval. A single call that reassigned a terminal
+between companies would be a credential capable of taking over any door on the
+platform.
+
+Revokes the credential, soft-deletes the device row, cancels its queued work and
+voids any announcement in flight. Audited into the trail of the company that
+**loses** the terminal; the gaining company's half is its own `TERMINAL_ADOPTED`
+record.
+
+### 17.6 What the firmware now does, and what is still outstanding
+
+**Announce and approve is implemented on the device** as of firmware 1.2.0
+(`src/announce.cpp`). A terminal with no credential and a working link
+announces, persists the pairing code and the announce token across reboots,
+displays the code on its 16×2 panel, polls on the server's
+`poll_after_seconds`, collects its credential exactly once, and retires the
+announcement. The same build reports its capabilities on every heartbeat and
+carries a stamped `firmware_version` for the first time.
+
+Still outstanding:
+
+Recorded because the requirements document lists them as done on the device and
+they are not consumed today:
+
+- **The heartbeat response's `firmware_update` object is not parsed.**
+  `parseHeartbeatResponse` reads `protocol_version`, `pending_jobs` and
+  `server_time` only. The OTA *execution* path is complete and reachable from the
+  serial console; the network transport that feeds it is not wired.
+- **`GET /devices/credentials/pending` has no client.** The firmware document
+  describes it as what the terminal *would* use.
+- **A `REMOVING` placement has no sync job to carry it.** Listed in the document
+  as the third route; withdrawal is currently visible only through the pending
+  list ceasing to offer the credential.
+
+### 17.7 `ENROLL_FINGERPRINT` — operator-driven enrolment
 
 **A new `job_type` on the jobs endpoint the terminal already polls.** It does
 not bump `SyncProtocolVersion`: a new job type is the additive extension path,
@@ -2653,21 +3406,6 @@ did is a **field** event (`CREDENTIAL_ENROLLED`), carrying `decision: RECORDED`
 rather than `GRANTED` or `DENIED`, because nothing was admitted or refused and no
 door moved. Two authors, two trails, and neither is a summary of the other.
 
-### 17.6 What is still outstanding for the firmware side
-
-Recorded because the requirements document lists them as done on the device and
-they are not consumed today:
-
-- **The heartbeat response's `firmware_update` object is not parsed.**
-  `parseHeartbeatResponse` reads `protocol_version`, `pending_jobs` and
-  `server_time` only. The OTA *execution* path is complete and reachable from the
-  serial console; the network transport that feeds it is not wired.
-- **`GET /devices/credentials/pending` has no client.** The firmware document
-  describes it as what the terminal *would* use.
-- **A `REMOVING` placement has no sync job to carry it.** Listed in the document
-  as the third route; withdrawal is currently visible only through the pending
-  list ceasing to offer the credential.
-
 ---
 
 ## Known limitations
@@ -2685,8 +3423,9 @@ its return exists and passes.
 2. **`GET /members` is unpaginated.** `GET /console/people` is paginated and
    searchable; use it.
 3. **Rate limiting covers the credential endpoints only.** `POST /auth/login`,
-   `POST /auth/password`, `POST /auth/forgot-password`, `POST /auth/redeem` and
-   the platform login share per-address allowances and per-account lockout. The
+   `POST /auth/password`, `POST /auth/register`, `POST /auth/forgot-password`,
+   `POST /auth/redeem` and the platform login share per-address allowances and
+   per-account lockout. The
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
@@ -2743,7 +3482,14 @@ its return exists and passes.
 15. **Claim codes remove the credential exposure, not the serial cable.** The
     code still has to be typed into the unit over a serial console, because the
     fitted keypad cannot reach the admin menu on this hardware revision.
-16. **The 64-person on-device ceiling is a firmware constant.** The server no
+16. **Signup does not verify the address it registers.** `POST /auth/register`
+    creates the tenant immediately and signs the owner in, because the platform
+    has no transactional email — the same gap that makes `/auth/forgot-password`
+    unable to deliver a reset. A typo therefore produces a working company whose
+    owner cannot recover a lost password without help, and nothing stops
+    somebody registering an address they do not control. Verification, and the
+    delivery it depends on, is the next thing this flow needs.
+17. **The 64-person on-device ceiling is a firmware constant.** The server no
     longer fans a whole company at every terminal (SEC-04), which removes most
     of the pressure, but a single site with more than 64 permitted people will
     still exhaust a terminal's table. The server-side capacity model and the

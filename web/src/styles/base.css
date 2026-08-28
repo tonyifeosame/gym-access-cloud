@@ -10,11 +10,17 @@ body,
   height: 100%;
 }
 
+/*
+ * THE ONE SIZE EVERYTHING ELSE IS MEASURED AGAINST. Buttons, inputs and selects
+ * all say `font: inherit`, so this is their size too, and the whole console
+ * moves with it -- which is why the density pass is a token change here rather
+ * than a sweep through the pages.
+ */
 body {
   margin: 0;
   font-family: var(--font);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
   color: var(--text);
   background: var(--surface-sunken);
   -webkit-font-smoothing: antialiased;
@@ -24,7 +30,7 @@ h1,
 h2,
 h3 {
   margin: 0;
-  line-height: 1.25;
+  line-height: var(--leading-tight);
 }
 
 a {
@@ -88,11 +94,11 @@ code {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  line-height: 1.2;
+  line-height: var(--leading-tight);
 }
 
 .topbar__role {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
@@ -102,12 +108,36 @@ code {
   align-items: flex-start;
 }
 
+/* 200px rather than 220px: the longest label in the navigation is "Applications",
+ * and the column was sized with room to spare that the content never used. */
 .sidenav {
-  flex: 0 0 220px;
-  padding: var(--space-5) var(--space-3);
+  flex: 0 0 200px;
+  padding: var(--space-4) var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-4);
+}
+
+/*
+ * The collapsible half of the navigation.
+ *
+ * On the desktop column this is simply the list, laid out as it always was. It
+ * exists as an element so that the small-screen rule has something to hide
+ * WITHOUT removing anything from the DOM -- see .sidenav__toggle below.
+ */
+.sidenav__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/*
+ * The menu button. NOT RENDERED ON THE DESKTOP COLUMN, where the links are
+ * always visible and a button to reveal them would be a control that does
+ * nothing. It is shown only below the breakpoint that flattens the column.
+ */
+.sidenav__toggle {
+  display: none;
 }
 
 .sidenav__section {
@@ -117,7 +147,7 @@ code {
 }
 
 .sidenav__title {
-  font-size: 11px;
+  font-size: var(--font-size-3xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
@@ -127,7 +157,8 @@ code {
 .sidenav__note {
   margin: 0;
   padding-inline: var(--space-3);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -175,19 +206,50 @@ code {
   gap: var(--space-5);
 }
 
+/*
+ * THE SCREENS THAT ARE NOT PROSE.
+ *
+ * 1000px is a measure, and it is the right one for every page built out of
+ * forms and explanatory paragraphs -- sign-in, settings, a person, a site's
+ * offline policy. A form field two-thirds the width of a monitor is harder to
+ * use than a narrow one, not easier, and the console explains what disable,
+ * revoke and retire each do at every one of those controls.
+ *
+ * An operations screen is the opposite shape. The overview is a grid of counts,
+ * proportions and a log; it has no measure to protect, and at the cap it spent
+ * roughly 40% of a 1920px canvas on empty space to the right of itself --
+ * left-aligned, so all of it collected on one side, which is what read as
+ * unfinished rather than as spacious.
+ *
+ * SO THIS IS A MODIFIER RATHER THAN A NEW DEFAULT. Widening `.page` itself would
+ * stretch every form in the product to fix one dashboard. Terminals and Events
+ * are the other two screens that are tables inside a measure and are the
+ * obvious next callers; neither is changed here.
+ *
+ * Left-aligned, deliberately, and not centred. Past about 1840px the column
+ * stops growing and the surplus sits to the right of a console whose navigation
+ * is on the left, which is the conventional shape and reads better than an
+ * island with a void on each side.
+ */
+.page--wide {
+  max-width: 1600px;
+}
+
 .page__header h1 {
-  font-size: 22px;
+  font-size: var(--font-size-2xl);
 }
 
 .page__lead {
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
 }
 
 .card,
@@ -200,7 +262,7 @@ code {
 }
 
 .card__title {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-muted);
@@ -208,19 +270,20 @@ code {
 
 .card__value {
   margin: var(--space-2) 0 0;
-  font-size: 26px;
+  font-size: var(--font-size-2xl);
   font-weight: 600;
 }
 
 .card__detail {
   margin: var(--space-1) 0 0;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .panel__title {
-  font-size: 16px;
-  margin-bottom: var(--space-4);
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-3);
 }
 
 .tiles {
@@ -253,12 +316,13 @@ code {
 }
 
 .tile__description {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
 .notice__title {
-  font-size: 15px;
+  font-size: var(--font-size-md);
   margin-bottom: var(--space-2);
 }
 
@@ -269,6 +333,7 @@ code {
 .notice p {
   margin: 0 0 var(--space-2);
   color: var(--text-muted);
+  line-height: var(--leading-snug);
 }
 
 .notice p:last-child {
@@ -294,7 +359,7 @@ code {
 }
 
 .state__meta {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted);
 }
 
@@ -367,7 +432,8 @@ code {
 }
 
 .field__label {
-  font-size: 13px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
   color: var(--text-muted);
 }
 
@@ -387,7 +453,7 @@ code {
 }
 
 .site-switcher__label {
-  font-size: 12px;
+  font-size: var(--font-size-2xs);
   color: var(--text-muted);
 }
 
@@ -402,22 +468,36 @@ code {
 
 .site-switcher--static {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--font-size-xs);
 }
 
 /* --------------------------------------------------------------------- */
 /* Login                                                                  */
 /* --------------------------------------------------------------------- */
 
+/*
+ * ONE CARD, FIVE SCREENS. Sign in, create an account, forgotten password,
+ * redeem an invitation, and platform sign-in all render this block and nothing
+ * else -- so the rules below are the whole visual language of the pages a
+ * customer meets before they are anybody. They have to agree with each other,
+ * because a person moves between two of them in the space of a minute.
+ */
+
 .login {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-4);
 }
 
 .login__card {
-  width: min(360px, 100%);
+  /*
+   * Wide enough for "Forgotten your password?" and a 12-character password hint
+   * on one line, and no wider. A card that grows to fill a desktop screen reads
+   * as a page rather than as a form, and the fields would then be far longer
+   * than anything typed into them.
+   */
+  width: min(380px, 100%);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -429,22 +509,43 @@ code {
 }
 
 .login__title {
-  font-size: 20px;
+  font-size: var(--font-size-xl);
 }
 
+/*
+ * The subtitle belongs TO the title, so it sits a hair under it rather than a
+ * full card gap away.
+ *
+ * The negative margin cancels that gap and re-adds a small one, which is why it
+ * is written as the subtraction it is instead of as a magic number -- change
+ * --space-4 and this still means "one small step below the heading".
+ */
 .login__subtitle {
-  margin: calc(var(--space-3) * -1) 0 0;
+  margin: calc(var(--space-1) - var(--space-4)) 0 0;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
+/*
+ * A failure that has to be read, not glanced at: body size rather than hint
+ * size, snug leading because several of these run to two lines, and a soft
+ * danger panel rather than red text alone -- colour is not the only signal.
+ *
+ * It renders ABOVE the fields, where a screen reader reaches it on the way into
+ * the form and a sighted reader sees it without hunting. The card grows by one
+ * panel when a submission fails, which is the only movement on these screens:
+ * everything that reacts as somebody TYPES is a reserved line that was already
+ * there.
+ */
 .login__error {
   margin: 0;
   padding: var(--space-3);
   border-radius: var(--radius-sm);
   background: var(--danger-soft);
   color: var(--danger);
-  font-size: 14px;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-snug);
 }
 
 /* Supporting prose on the unauthenticated screens: why a link is needed, what
@@ -454,12 +555,140 @@ code {
 .login__note {
   margin: 0;
   color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
-/* The login card centres its controls; a wider card on the credential screens
- * would reflow the whole layout, so the prose wraps instead. */
+/*
+ * THE SMALL LINKS OFF THESE CARDS ARE STILL TARGETS.
+ *
+ * WCAG 2.2 SC 2.5.8 (AA) puts the floor at 24x24 CSS pixels. These anchors --
+ * "Forgotten your password?", "Have an invitation code?", "Back to sign in" --
+ * are inline text at the xs size, which measured 150x17 and 83x17 on a phone.
+ * Seventeen pixels of height, on a touch screen.
+ *
+ * WHO MISSES THEM IS THE POINT. Every one of these is the route out for
+ * somebody who cannot use the form above it: a person who has forgotten their
+ * password, a person holding an invitation whose link a chat client mangled, a
+ * person who opened the wrong screen. There is no second way to any of those
+ * places. A target that is hard to hit on a phone is, for exactly those
+ * readers, a dead end.
+ *
+ * PADDING RATHER THAN A BIGGER FONT. The type scale is deliberate and these are
+ * secondary to the card's primary action; enlarging the text would make them
+ * compete with it. `inline-flex` with a minimum height grows the BOX and leaves
+ * the words the size they were meant to be.
+ *
+ * SCOPED TO `.login__note`, so it cannot reach `.login__secondary` -- the
+ * full-width <a> styled as a button, which is `display: block` on purpose and
+ * is already far above the floor.
+ */
+.login__note a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+/* The two routes back into a locked-out account.
+ *
+ * A LIST BECAUSE THEY ARE ALTERNATIVES, not a sequence: exactly one of them
+ * applies to any given reader, and running them together as prose made somebody
+ * read the half that was not about them first. The markers are kept — they are
+ * what says "these are two separate cases" without a word doing it.
+ *
+ * Inherits the note's muted colour and size so the card keeps one voice; only
+ * the structure differs. */
+.login__routes {
+  margin: 0;
+  padding-inline-start: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+}
+
+.login__routes strong {
+  /* The case-identifying half of each item, so somebody can find their own
+     situation without reading both in full. */
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* A hint under a field on these cards sits closer to its input than the card
+ * gap allows, for the same reason the subtitle does: it belongs to the control
+ * above it rather than being the next thing on the card. */
 .login__card .field__hint {
-  margin-block-start: var(--space-1);
+  margin-block-start: calc(var(--space-1) - var(--space-4));
+  margin-block-end: 0;
+}
+
+/* A labelled rule introducing the card's OTHER action.
+ *
+ * Signing in and signing up are different intentions rather than steps in a
+ * sequence, and a second button directly under the first reads as the next
+ * step. The rule is what says "or, if none of the above is you". */
+.login__divider {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
+}
+
+.login__divider::before,
+.login__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* The card's secondary action: a LINK that has to read as a control.
+ *
+ * Sign in offers "Create an account" and signup offers "Sign in", each as the
+ * outlined twin of the filled button above it — so the two screens are the same
+ * card with the two actions swapped, which is what makes moving between them
+ * feel like one flow rather than two products.
+ *
+ * .button is written for <button>, which is already block-level, centred and
+ * free of text decoration. An <a> is none of those, so these three lines are
+ * what make the two look like the same control rather than nearly the same
+ * control. Nothing else about the button is restated here. */
+.login__secondary {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* Small screens. The card already fills the width; what is left is the air
+ * around and inside it, which at phone size is the difference between a form
+ * that fits above the keyboard and one that does not. */
+@media (max-width: 680px) {
+  .login {
+    padding: var(--space-4) var(--space-3);
+    /* Top-aligned rather than centred: a centred card whose height exceeds the
+     * viewport is centred by pushing its own heading off the top of the screen. */
+    align-content: start;
+  }
+
+  .login__card {
+    padding: var(--space-5) var(--space-4);
+  }
+
+  /*
+   * 16px, and the one hard-coded size in this file.
+   *
+   * iOS Safari zooms the page when a focused input's text is smaller than 16px,
+   * and it does not zoom back out afterwards -- so a 14px field leaves somebody
+   * signing up on a phone in a magnified, horizontally scrolling page for the
+   * rest of the form. This is the browser's threshold, not a design choice, and
+   * a token would imply it moves with the type scale when it cannot.
+   */
+  .login__card .field__input {
+    font-size: 16px;
+  }
 }

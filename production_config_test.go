@@ -258,3 +258,117 @@ func TestSessionPurgeLeavesLiveSessionsAlone(t *testing.T) {
 		t.Error("a zero-day retention purge deleted the live session")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The sealing master key, and the one startup decision nothing else can catch
+// ---------------------------------------------------------------------------
+//
+// docs/sealing-key-lifecycle.md §3 L6 says this assertion belongs here, and it
+// is right to insist. A deployment holding wrapped sealing keys with no master
+// key configured is broken in a way that is INVISIBLE FROM EVERY REQUEST: doors
+// keep opening, heartbeats keep arriving, the console looks healthy, and the
+// only symptom is that terminals claimed from then on quietly never learn
+// anybody. The customer finds out weeks later.
+//
+// Refusing to boot converts that into a failure at deploy time, when somebody is
+// looking. But a refusal that only exists inside main() can never be exercised,
+// so the decision is a function and this is what holds it to its meaning.
+//
+// FOUR CASES, and three of them must NOT refuse. The dangerous mistake here is
+// not failing to catch the bad state -- it is catching a good one, because a
+// server that refuses to start on an installation which simply has not turned
+// this feature on is a self-inflicted outage of the whole API.
+
+// storeASealingKey puts one wrapped key in the table, through the real code
+// path, so the row is shaped exactly as production's would be.
+func storeASealingKey(t *testing.T, companyID int64) {
+	t.Helper()
+
+	t.Setenv(database.EnvSealingMasterKey, testSealingMasterKey)
+	database.ResetSealingMasterKeyCache()
+
+	tx, err := database.DB.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	if _, _, err := database.EnsureCompanySealingKeyTx(tx, companyID); err != nil {
+		t.Fatalf("creating a sealing key: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func TestStartupRefusesOnlyWhenSealingKeysAreUnreadable(t *testing.T) {
+	newTestEnv(t)
+	companyID := int64(queryInt(t, `SELECT id FROM companies WHERE slug = 'one'`))
+
+	// -----------------------------------------------------------------------
+	// No keys, no master key: an installation that has not turned this on.
+	// -----------------------------------------------------------------------
+	//
+	// THE CASE MOST WORTH GETTING RIGHT. Every deployment in the field today is
+	// in exactly this state, and a check that fired here would take the entire
+	// API down for a feature nobody had asked for.
+	t.Setenv(database.EnvSealingMasterKey, "")
+	database.ResetSealingMasterKeyCache()
+	t.Cleanup(database.ResetSealingMasterKeyCache)
+
+	refuse, err := sealingKeyStartupFault()
+	if err != nil {
+		t.Fatalf("checking an installation with no keys: %v", err)
+	}
+	if refuse {
+		t.Fatal("refused to start on an installation that holds no sealing keys at all")
+	}
+
+	// -----------------------------------------------------------------------
+	// A key exists and the master key can read it: the working deployment.
+	// -----------------------------------------------------------------------
+	storeASealingKey(t, companyID)
+
+	refuse, err = sealingKeyStartupFault()
+	if err != nil {
+		t.Fatalf("checking a configured installation: %v", err)
+	}
+	if refuse {
+		t.Fatal("refused to start on a deployment whose keys it can read")
+	}
+
+	// -----------------------------------------------------------------------
+	// The same database with the master key taken away. THE FAILURE.
+	// -----------------------------------------------------------------------
+	//
+	// Nothing about the data changed -- only the environment -- which is
+	// precisely the deploy accident this exists for.
+	t.Setenv(database.EnvSealingMasterKey, "")
+	database.ResetSealingMasterKeyCache()
+
+	refuse, err = sealingKeyStartupFault()
+	if err != nil {
+		t.Fatalf("checking an unreadable installation: %v", err)
+	}
+	if !refuse {
+		t.Fatal("started against sealing keys it cannot read: every terminal " +
+			"claimed from now on would silently collect no key")
+	}
+
+	// -----------------------------------------------------------------------
+	// And a master key that is present but malformed is the same failure.
+	// -----------------------------------------------------------------------
+	//
+	// Set-but-wrong is not better than absent: it cannot unwrap either, and a
+	// truncated or re-pasted variable is a likelier accident than a deleted one.
+	t.Setenv(database.EnvSealingMasterKey, "not-base64-and-not-32-bytes")
+	database.ResetSealingMasterKeyCache()
+
+	refuse, err = sealingKeyStartupFault()
+	if err != nil {
+		t.Fatalf("checking a malformed master key: %v", err)
+	}
+	if !refuse {
+		t.Fatal("started with a master key that cannot decode, holding keys it cannot read")
+	}
+}

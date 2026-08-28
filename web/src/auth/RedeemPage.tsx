@@ -87,7 +87,7 @@ export function RedeemPage() {
 
   if (done) {
     return (
-      <div className="login">
+      <main className="login">
         <div className="login__card">
           <h1 className="login__title">Password set</h1>
           <p className="login__subtitle">
@@ -102,12 +102,12 @@ export function RedeemPage() {
             Go to sign in
           </button>
         </div>
-      </div>
+      </main>
     )
   }
 
   return (
-    <div className="login">
+    <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">Set your password</h1>
         <p className="login__subtitle">
@@ -200,7 +200,7 @@ export function RedeemPage() {
           <Link to="/login">Back to sign in</Link>
         </p>
       </form>
-    </div>
+    </main>
   )
 }
 

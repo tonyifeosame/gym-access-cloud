@@ -50,7 +50,11 @@ export function LoginPage() {
   }
 
   return (
-    <div className="login">
+    // <main> rather than a bare div, matching the signup screen: an
+    // unauthenticated page renders outside the app shell, so it has to carry its
+    // own landmark or nothing on it is inside one. Markup only — nothing about
+    // signing in changes.
+    <main className="login">
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">AccessLink</h1>
         <p className="login__subtitle">Operator console</p>
@@ -92,18 +96,39 @@ export function LoginPage() {
         </button>
 
         {/*
-          Both destinations are unauthenticated by necessity. The second is the
-          one people arrive at from a link and would not otherwise find, and it
-          matters that they can: an invitation whose URL was mangled in a chat
-          client still has a code that can be pasted.
+          Every destination here is unauthenticated by necessity. The redemption
+          link is the one people arrive at from a message and would not otherwise
+          find, and it matters that they can: an invitation whose URL was mangled
+          in a chat client still has a code that can be pasted.
         */}
         <p className="login__note">
           <Link to="/forgot-password">Forgotten your password?</Link>
           {' · '}
           <Link to="/redeem">Have an invitation code?</Link>
         </p>
+
+        {/*
+          NEW CUSTOMERS, AND A CONTROL RATHER THAN A LINE OF PROSE.
+
+          This was a sentence in the muted note style, sitting third in a stack
+          of small grey links below the button — which is to say it was invisible
+          to the one person on this screen who has no account at all. Somebody
+          with no account is not scanning for a password reset; they are looking
+          for a way in, and if they do not find it here there is no other route
+          into the product.
+
+          So it is a button, and the SECOND button on the card: outlined rather
+          than filled, because signing in is still the action almost every
+          visitor wants. Same control, same size, same rhythm as everything else
+          on the card — an alternative, not a competitor.
+        */}
+        <p className="login__divider">New to AccessLink?</p>
+
+        <Link className="button login__secondary" to="/register">
+          Create an account
+        </Link>
       </form>
-    </div>
+    </main>
   )
 }
 

@@ -5,6 +5,7 @@ import { Dialog } from '../../components/Dialog'
 import { useNotifications } from '../../components/Notifications'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import { useCreatePerson, useUpdatePerson } from '../../data/console'
+import { PERSON_ID_HINT, PERSON_ID_LABEL } from './personVocabulary'
 
 /**
  * Creating and editing a person.
@@ -20,7 +21,7 @@ import { useCreatePerson, useUpdatePerson } from '../../data/console'
  * write credentials and the API does not accept them here. `biometric_enrolled`
  * is a read-only fact reported back.
  *
- * `external_id` IS IMMUTABLE AFTER CREATION. It is the identifier terminals hold
+ * `external_id` IS IMMUTABLE AFTER CREATION. It is the ID number terminals hold
  * and sync against, so the API addresses a person by it and offers no way to
  * change it. The field is therefore disabled when editing rather than absent —
  * an operator needs to see the id they are editing.
@@ -60,8 +61,8 @@ export function PersonFormDialog({
     validate: (values) => ({
       external_id: editing
         ? undefined
-        : validators.required(values.external_id, 'Identifier') ??
-          validators.maxLength(values.external_id, 50, 'Identifier'),
+        : validators.required(values.external_id, PERSON_ID_LABEL) ??
+          validators.maxLength(values.external_id, 50, PERSON_ID_LABEL),
       full_name:
         validators.required(values.full_name, 'Full name') ??
         validators.maxLength(values.full_name, 100, 'Full name'),
@@ -107,7 +108,7 @@ export function PersonFormDialog({
     >
       <form className="form" onSubmit={(event) => void form.handleSubmit(event)} noValidate>
         <TextField
-          label="Identifier"
+          label={PERSON_ID_LABEL}
           required={!editing}
           value={form.values.external_id}
           error={form.errors.external_id}
@@ -120,7 +121,7 @@ export function PersonFormDialog({
           hint={
             editing
               ? 'Cannot be changed — terminals identify this person by it.'
-              : 'The badge, staff, student or reference number your organisation already uses. Unique within your company.'
+              : PERSON_ID_HINT
           }
         />
 
@@ -158,7 +159,7 @@ export function PersonFormDialog({
         <FormError
           message={
             conflict
-              ? 'Someone with that identifier already exists in your company.'
+              ? `Someone with that ${PERSON_ID_LABEL} already exists in your company.`
               : submitErrorMessage(error)
           }
           requestId={error instanceof ApiError ? error.requestId : null}

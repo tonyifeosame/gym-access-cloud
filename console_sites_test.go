@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,6 +40,175 @@ func credentialOf(t *testing.T, body map[string]any) map[string]any {
 		t.Fatalf("response carries no credential object: %v", body)
 	}
 	return credential
+}
+
+// ---------------------------------------------------------------------------
+// Listing and search
+// ---------------------------------------------------------------------------
+
+// siteNamesFrom pulls the site names out of a list response, in order.
+func siteNamesFrom(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	var names []string
+	for _, entry := range listOf(t, body, "sites") {
+		site, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("a site in the list is not an object: %v", entry)
+		}
+		name, _ := site["name"].(string)
+		names = append(names, name)
+	}
+	return names
+}
+
+// The console's sites list is searchable, and the search happens HERE.
+//
+// A console that narrowed a fetched list in the browser would search whatever
+// one response happened to carry rather than the estate. That is silently wrong
+// the moment a company has more locations than the screen was built around, and
+// silently right in every test with two fixtures -- which is exactly why the
+// predicate belongs in SQL and why these tests assert on what the API returns
+// rather than on what a page renders.
+func TestConsoleSiteSearchMatchesNameAndAddress(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "search-site@example.com", models.RoleAdmin)
+
+	// An address that shares no substring with any site name, so a match on it
+	// cannot be a name match wearing a disguise.
+	if code, body := createSite(t, env, token, csrf, "Riverside Works"); code != http.StatusCreated {
+		t.Fatalf("seeding a site = %d (%v)", code, body)
+	}
+	mustExec(t, `UPDATE sites SET address = 'Quayside Parade' WHERE site_name = 'Riverside Works'`)
+
+	for _, check := range []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"a whole name", "Riverside Works", []string{"Riverside Works"}},
+		{"part of a name", "versid", []string{"Riverside Works"}},
+		{"a different case", "RIVERSIDE", []string{"Riverside Works"}},
+		{"an address", "Quayside", []string{"Riverside Works"}},
+		{"nothing at all", "no such location", nil},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			code, body := consoleCall(t, env.router, "GET",
+				"/api/v1/console/sites?q="+url.QueryEscape(check.query), "", token, csrf)
+			if code != http.StatusOK {
+				t.Fatalf("searching = %d (%v)", code, body)
+			}
+			got := siteNamesFrom(t, body)
+			if len(got) != len(check.want) {
+				t.Fatalf("q=%q returned %v, want %v", check.query, got, check.want)
+			}
+			for i, want := range check.want {
+				if got[i] != want {
+					t.Errorf("q=%q returned %v, want %v", check.query, got, check.want)
+				}
+			}
+			// `count` describes the match, not the company.
+			if count, _ := body["count"].(float64); int(count) != len(check.want) {
+				t.Errorf("q=%q reported count %v for %d rows", check.query, body["count"], len(check.want))
+			}
+		})
+	}
+
+	// No term at all is not the same question as a term matching everything: it
+	// must return the company's whole estate.
+	code, body := consoleCall(t, env.router, "GET", "/api/v1/console/sites", "", token, csrf)
+	if code != http.StatusOK {
+		t.Fatalf("listing without a term = %d (%v)", code, body)
+	}
+	if len(siteNamesFrom(t, body)) < 3 {
+		t.Errorf("an unsearched list returned %v, want every site in the company", siteNamesFrom(t, body))
+	}
+}
+
+// The search NARROWS WITHIN A GRANT AND NEVER WIDENS IT.
+//
+// The scope predicate and the search predicate are applied in one statement, so
+// there is no path on which a term is honoured and a grant is not. This is the
+// test that would fail if those two were ever separated into "filter, then
+// search" -- the shape the query had before search existed, and the shape that
+// invites the mistake.
+func TestConsoleSiteSearchCannotEscapeAnOperatorsGrants(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+	siteA := operatorSitePublicID(t, "Site A")
+
+	admin, adminToken, adminCSRF := consoleOperatorSession(t, env.router, one,
+		"grant-admin@example.com", models.RoleAdmin)
+	_ = admin
+
+	scoped, scopedToken, scopedCSRF := consoleOperatorSession(t, env.router, one,
+		"scoped-search@example.com", models.RoleManager)
+
+	if code, body := consoleCall(t, env.router, "PUT",
+		"/api/v1/console/operators/"+scoped.PublicID+"/sites",
+		fmt.Sprintf(`{"site_ids":[%q]}`, siteA), adminToken, adminCSRF); code != http.StatusOK {
+		t.Fatalf("granting Site A = %d (%v)", code, body)
+	}
+
+	// Searching for a site in the same company that the operator is NOT granted.
+	code, body := consoleCall(t, env.router, "GET",
+		"/api/v1/console/sites?q="+url.QueryEscape("Site B"), "", scopedToken, scopedCSRF)
+	if code != http.StatusOK {
+		t.Fatalf("a scoped search = %d (%v)", code, body)
+	}
+	if names := siteNamesFrom(t, body); len(names) != 0 {
+		t.Errorf("a search surfaced sites outside the operator's grants: %v", names)
+	}
+
+	// And the grant itself is still reachable, so the empty result above is the
+	// scope working rather than the search being broken.
+	code, body = consoleCall(t, env.router, "GET",
+		"/api/v1/console/sites?q="+url.QueryEscape("Site A"), "", scopedToken, scopedCSRF)
+	if code != http.StatusOK {
+		t.Fatalf("searching within a grant = %d (%v)", code, body)
+	}
+	if names := siteNamesFrom(t, body); len(names) != 1 || names[0] != "Site A" {
+		t.Errorf("searching within a grant returned %v, want [Site A]", names)
+	}
+}
+
+// LIKE metacharacters in a search term are matched literally.
+//
+// Without escaping, "%" selects every site, "_" matches any single character and
+// a trailing backslash produces a malformed pattern. A search box can be handed
+// any of them, and the first is the one that matters: a term that quietly
+// returns everything reads as "no filter applied" rather than as "no match".
+func TestConsoleSiteSearchTreatsWildcardsLiterally(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+	one := operatorCompanyID(t, "one")
+
+	_, token, csrf := consoleOperatorSession(t, env.router, one, "wildcard-site@example.com", models.RoleAdmin)
+
+	for _, term := range []string{"%", "_", `\`, "%%"} {
+		code, body := consoleCall(t, env.router, "GET",
+			"/api/v1/console/sites?q="+url.QueryEscape(term), "", token, csrf)
+		if code != http.StatusOK {
+			t.Fatalf("q=%q = %d (%v)", term, code, body)
+		}
+		if names := siteNamesFrom(t, body); len(names) != 0 {
+			t.Errorf("q=%q was treated as a wildcard and returned %v", term, names)
+		}
+	}
+}
+
+// A site key is not a session, and the search does not change that.
+func TestConsoleSiteSearchStillRequiresAnOperatorSession(t *testing.T) {
+	cheapBcrypt(t)
+	env := newTestEnv(t)
+
+	req := newRequestWithSiteKey(t, "GET", "/api/v1/console/sites?q=Site", "", env.siteAKey)
+	if status := serve(env.router, req); status != http.StatusUnauthorized {
+		t.Errorf("a site key reached the console sites search: %d", status)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -35,9 +35,8 @@ export function Pagination({
   noun,
   busy,
 }: PaginationProps) {
-  // Nothing to page through: one page holding everything needs no controls, and
-  // an empty result has its own empty state above.
-  if (total === 0 || (offset === 0 && !hasMore)) {
+  // An empty result has its own empty state above and needs nothing from here.
+  if (total === 0) {
     return null
   }
 
@@ -45,6 +44,21 @@ export function Pagination({
   const last = offset + count
   const page = Math.floor(offset / limit) + 1
   const pages = Math.max(1, Math.ceil(total / limit))
+
+  /*
+    THE COUNT IS SHOWN EVEN WHEN THERE IS ONLY ONE PAGE; ONLY THE CONTROLS HIDE.
+
+    This component used to return null whenever everything fitted on one page,
+    and the count line lives inside it -- so "how many matched" disappeared in
+    exactly the case where it is the answer. On the audit trail that is the
+    normal case: an operator narrows to one person and a fortnight, and "three
+    records match" IS the finding. The table showed three rows and said nothing
+    about whether that was all of them.
+
+    Prev/Next are still suppressed for a single page, because a pair of disabled
+    buttons is a worse statement of "there is no more" than their absence.
+  */
+  const paged = pages > 1
 
   return (
     <nav className="pagination" aria-label={`${noun} pagination`}>
@@ -54,6 +68,7 @@ export function Pagination({
         Showing <strong>{first}</strong>–<strong>{last}</strong> of <strong>{total}</strong> {noun}
       </p>
 
+      {paged ? (
       <div className="pagination__controls">
         <button
           type="button"
@@ -75,6 +90,7 @@ export function Pagination({
           Next
         </button>
       </div>
+      ) : null}
     </nav>
   )
 }

@@ -285,6 +285,21 @@ export interface CheckboxGroupProps {
   disabled?: boolean
   /** Shown when there is nothing to choose from. */
   empty?: ReactNode
+  /**
+   * Whether the options are still being fetched.
+   *
+   * SEPARATE FROM "THERE ARE NONE", and conflating the two is the failure this
+   * exists to close. An unloaded group is indistinguishable from an empty one by
+   * `options.length` alone, so a group whose data was in flight rendered its
+   * `empty` message — and every caller's empty message is a statement of FACT
+   * about the customer's account. The site pickers said "Your company has no
+   * sites yet" to companies with sites, for as long as the request took, with no
+   * indication anything was loading.
+   *
+   * Callers pass their query's pending state. Nothing is claimed until it
+   * resolves.
+   */
+  loading?: boolean
 }
 
 export function CheckboxGroup({
@@ -295,6 +310,7 @@ export function CheckboxGroup({
   onChange,
   disabled,
   empty,
+  loading = false,
 }: CheckboxGroupProps) {
   const hintId = useId()
 
@@ -311,7 +327,13 @@ export function CheckboxGroup({
         </p>
       ) : null}
 
-      {options.length === 0 ? (
+      {loading ? (
+        // A live region: the options arrive without focus moving, so a screen
+        // reader is told the wait ended rather than left on a stale "Loading".
+        <p className="field__hint" role="status" aria-live="polite">
+          <span className="spinner spinner--inline" aria-hidden="true" /> Loading…
+        </p>
+      ) : options.length === 0 ? (
         <p className="field__hint">{empty ?? 'Nothing to choose from.'}</p>
       ) : (
         <div className="fieldset__options">

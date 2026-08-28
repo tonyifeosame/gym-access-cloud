@@ -130,3 +130,22 @@ export interface FirstOperatorResponse {
   invitation?: CredentialToken
   delivery?: string
 }
+
+/**
+ * What issuing a recovery answers with.
+ *
+ * NAMES THE ACCOUNT AS WELL AS CARRYING THE LINK, because whoever is about to
+ * send it needs to check they are sending it to the right person — this surface
+ * cannot list a tenant's operators, so the response is the only place the
+ * address appears.
+ */
+export interface OwnerRecoveryResponse {
+  operator: {
+    id: string
+    email: string
+    full_name: string
+    role: Role
+  }
+  reset: CredentialToken
+  delivery?: string
+}

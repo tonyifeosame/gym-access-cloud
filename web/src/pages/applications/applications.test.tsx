@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -12,12 +12,20 @@ import { ApplicationDetailPage } from './ApplicationDetailPage'
 import { ApplicationsPage } from './ApplicationsPage'
 
 /**
- * The Applications module.
+ * Features.
  *
  * This is where the product's general-purpose claim is either kept or quietly
- * broken, so the tests are mostly about what the console REFUSES to assume: that
- * the catalog is the one this build knows, that MULTI_PURPOSE is a capability,
- * or that enabling something makes the platform do it.
+ * broken, so the tests are mostly about what the console REFUSES to assume:
+ * that the catalog is the one this build knows, or that MULTI_PURPOSE is a
+ * feature a company turns on.
+ *
+ * WHAT THESE TESTS DELIBERATELY NO LONGER PIN. An earlier version asserted the
+ * exact wording of a development-status report this screen used to render --
+ * "Not built yet", "Partly built", an "Operational" state, and a paragraph per
+ * feature naming what was unfinished, including how enrolled biometric material
+ * is not distributed between terminals. That copy is gone, and the tests that
+ * held it in place have been replaced by ones that assert it CANNOT COME BACK.
+ * A test that reproduces removed copy is a test that will reintroduce it.
  */
 
 const CATALOG = [
@@ -54,6 +62,11 @@ function renderApplications(initialPath = '/settings/applications', client = mak
   return renderWithSession(<RouterProvider router={router} />, client)
 }
 
+/** Whether the mock server currently has a feature switched on. */
+function applicationEnabled(code: string): boolean {
+  return state.applications.some((entry) => entry.code === code && entry.enabled)
+}
+
 beforeEach(() => setCsrfToken(null))
 
 // ---------------------------------------------------------------------------
@@ -80,7 +93,7 @@ describe('the catalog', () => {
     expect(screen.getByText(/Record presence against a schedule/)).toBeInTheDocument()
   })
 
-  it('shows enabled and not-enabled state per capability', async () => {
+  it('shows which features are on and which are off', async () => {
     signIn()
     seed({
       available: CATALOG,
@@ -89,10 +102,10 @@ describe('the catalog', () => {
     renderApplications()
 
     const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
-    expect(within(attendance).getByText('Enabled')).toBeInTheDocument()
+    expect(within(attendance).getByText('On')).toBeInTheDocument()
 
     const checkIn = screen.getByText('Check-in').closest('li') as HTMLElement
-    expect(within(checkIn).getByText('Not enabled')).toBeInTheDocument()
+    expect(within(checkIn).getByText('Off')).toBeInTheDocument()
   })
 
   it('is a legitimate, fully working state for a company with nothing enabled', async () => {
@@ -103,7 +116,7 @@ describe('the catalog', () => {
 
     await screen.findByText('Access Control')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(screen.getAllByText('Not enabled')).toHaveLength(CATALOG.length)
+    expect(screen.getAllByText('Off')).toHaveLength(CATALOG.length)
   })
 
   it('reports a failed load as an error rather than an empty catalog', async () => {
@@ -120,7 +133,7 @@ describe('the catalog', () => {
     seed({ available: [], applications: [] })
     renderApplications()
 
-    expect(await screen.findByText('No capabilities offered')).toBeInTheDocument()
+    expect(await screen.findByText('No features available')).toBeInTheDocument()
   })
 })
 
@@ -128,7 +141,7 @@ describe('the catalog', () => {
 // The architecture rule
 // ---------------------------------------------------------------------------
 
-describe('MULTI_PURPOSE is a terminal mode, not an application', () => {
+describe('MULTI_PURPOSE is a terminal setting, not a feature', () => {
   it('never appears in the catalog, even if the server sends it', async () => {
     // Defensive: the real server excludes it, and a future one that did not
     // must still not be able to turn it into a company toggle here.
@@ -145,20 +158,20 @@ describe('MULTI_PURPOSE is a terminal mode, not an application', () => {
     signIn()
     renderApplications('/settings/applications/multi-purpose')
 
-    expect(await screen.findByText('Not a capability')).toBeInTheDocument()
+    expect(await screen.findByText('Not a feature')).toBeInTheDocument()
     expect(
-      screen.getByText(/terminal operating mode, not a capability a company enables/),
+      screen.getByText(/terminal setting, not a feature a company turns on/),
     ).toBeInTheDocument()
   })
 
-  it('explains on the catalog page how capabilities relate to terminal modes', async () => {
+  it('explains on the catalog page how features relate to terminals', async () => {
     // Four concepts meet here and are routinely confused; the page names the
     // relationship rather than leaving it to be inferred.
     signIn()
     renderApplications()
 
     expect(await screen.findByText('How this relates to your terminals')).toBeInTheDocument()
-    expect(screen.getByText(/Multi-purpose is a terminal setting, not a capability/)).toBeInTheDocument()
+    expect(screen.getByText(/Multi-purpose is a terminal setting, not a feature/)).toBeInTheDocument()
   })
 })
 
@@ -166,7 +179,7 @@ describe('MULTI_PURPOSE is a terminal mode, not an application', () => {
 // Unknown / future codes
 // ---------------------------------------------------------------------------
 
-describe('capabilities newer than this console', () => {
+describe('features newer than this console', () => {
   it('RENDERS AN UNKNOWN CODE rather than crashing or dropping it', async () => {
     // A capability added to the platform must appear without a frontend
     // release. Hiding it would silently conceal part of what a customer has.
@@ -174,11 +187,10 @@ describe('capabilities newer than this console', () => {
     seed({ available: [...CATALOG, 'ROOM_BOOKING'], applications: [] })
     renderApplications()
 
-    // Humanised from the code, and marked as not understood.
+    // Humanised from the code -- and the code itself never reaches the screen.
     expect(await screen.findByText('Room Booking')).toBeInTheDocument()
     const entry = screen.getByText('Room Booking').closest('li') as HTMLElement
-    expect(within(entry).getByText('Unrecognised')).toBeInTheDocument()
-    expect(within(entry).getByText('ROOM_BOOKING')).toBeInTheDocument()
+    expect(within(entry).queryByText('ROOM_BOOKING')).not.toBeInTheDocument()
   })
 
   it('is not silently treated as some other capability', async () => {
@@ -199,8 +211,11 @@ describe('capabilities newer than this console', () => {
     renderApplications('/settings/applications/room-booking')
 
     expect(await screen.findByRole('heading', { name: 'Room Booking', level: 1 })).toBeInTheDocument()
+    // The warning depends on UNKNOWN_DESCRIPTION being single-sourced: it is
+    // found by comparing the registry's invented description against that
+    // constant, so a second copy of the sentence anywhere silently disables it.
     expect(screen.getByText('Newer than this console')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Enable' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Turn on' })).toBeInTheDocument()
   })
 
   it('can be enabled like any other', async () => {
@@ -209,8 +224,12 @@ describe('capabilities newer than this console', () => {
     seed({ available: ['ROOM_BOOKING'], applications: [] })
     renderApplications('/settings/applications/room-booking')
 
-    await user.click(await screen.findByRole('button', { name: 'Enable' }))
-    await waitFor(() => expect(screen.getByText('Enabled')).toBeInTheDocument())
+    await user.click(await screen.findByRole('button', { name: 'Turn on' }))
+    // The header action flipping IS the state now, rather than a card repeating
+    // what the button beside it already said.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Turn off' })).toBeInTheDocument(),
+    )
   })
 
   it('reports a slug the platform does not offer as unavailable', async () => {
@@ -218,8 +237,8 @@ describe('capabilities newer than this console', () => {
     seed({ available: CATALOG, applications: [] })
     renderApplications('/settings/applications/not-a-real-thing')
 
-    expect(await screen.findByText('Not a capability')).toBeInTheDocument()
-    expect(screen.getByText(/does not offer a capability by that name/)).toBeInTheDocument()
+    expect(await screen.findByText('Not a feature')).toBeInTheDocument()
+    expect(screen.getByText(/does not offer a feature by that name/)).toBeInTheDocument()
   })
 })
 
@@ -227,59 +246,130 @@ describe('capabilities newer than this console', () => {
 // Honesty about what enabling does
 // ---------------------------------------------------------------------------
 
-describe('what enabling actually does', () => {
-  it('DISTINGUISHES ENABLED FROM OPERATIONAL, and defines both', async () => {
-    // The most important thing on the page. An owner reading "Access Control",
-    // switching it on and expecting doors to change behaviour has been misled,
-    // and one green "Enabled" badge is exactly how that happens.
+describe('the screen reports configuration, not our build status', () => {
+  /*
+   * THESE FOUR REPLACE TESTS THAT PINNED THE REMOVED COPY.
+   *
+   * The screen used to teach a four-state internal model and mark every
+   * feature with how much of it we had written. Asserting the absence of that
+   * is the only way the removal stays removed: the wording was reintroduced
+   * once already, by a test that still demanded it.
+   */
+
+  const DEV_STATUS = [
+    /not built yet/i,
+    /partly built/i,
+    /\boperational\b/i,
+    /not implemented/i,
+    /coming soon/i,
+    /nothing acts on/i,
+    /in development/i,
+  ]
+
+  it('shows no development-status wording in the feature list', async () => {
     signIn()
     renderApplications()
 
-    expect(await screen.findByText('Enabled is not the same as operational')).toBeInTheDocument()
-    expect(screen.getByText(/the platform actually carries out the workflow/i)).toBeInTheDocument()
+    await screen.findByText('Access Control')
+    const text = document.body.textContent ?? ''
+    for (const pattern of DEV_STATUS) {
+      expect(text, `feature list must not say ${pattern}`).not.toMatch(pattern)
+    }
   })
 
-  it('marks each capability with whether the platform actually does it', async () => {
-    signIn()
-    renderApplications()
-
-    const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
-    expect(within(attendance).getByText('Not built yet')).toBeInTheDocument()
-    // The SPECIFIC gap, not a generic disclaimer.
-    expect(within(attendance).getByText(/Nothing records attendance/i)).toBeInTheDocument()
-
-    // Access control is further along, and says so differently. The gap names
-    // the half that is missing — enforcement at the terminal — rather than the
-    // half that now exists, which is the whole permission engine.
-    const access = screen.getByText('Access Control').closest('li') as HTMLElement
-    expect(within(access).getByText('Partly built')).toBeInTheDocument()
-    expect(within(access).getByText(/terminals do not/i)).toBeInTheDocument()
-    expect(within(access).queryByText(/no permission engine/i)).not.toBeInTheDocument()
-  })
-
-  it('repeats the four states on the detail page', async () => {
+  it('shows no development-status wording on a feature page', async () => {
     signIn()
     renderApplications('/settings/applications/attendance')
 
-    // Available, enabled, configured and operational, shown separately.
-    const readiness = await screen.findByRole('region', { name: 'Readiness' })
-    expect(within(readiness).getByText('Available')).toBeInTheDocument()
-    expect(within(readiness).getByText('Enabled')).toBeInTheDocument()
-    expect(within(readiness).getByText('Configured')).toBeInTheDocument()
-    expect(within(readiness).getByText('Operational')).toBeInTheDocument()
-
-    expect(screen.getByText('Nothing acts on this capability yet')).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Attendance', level: 1 })
+    const text = document.body.textContent ?? ''
+    for (const pattern of DEV_STATUS) {
+      expect(text, `feature page must not say ${pattern}`).not.toMatch(pattern)
+    }
   })
 
-  it('states that dependencies and conflicts are not modelled', async () => {
-    // Better than an empty "Dependencies:" heading implying the answer is none.
+  it('says nothing about biometric replication on Registration', async () => {
+    /*
+      THE SPECIFIC PARAGRAPH THIS GUARDS. Registration used to carry: "nothing
+      distributes enrolled biometric material between terminals, so an enrolment
+      remains local to the unit that took it". That is a V2 design note. It
+      belongs in docs/market-readiness.md, not under a toggle in a customer's
+      settings screen.
+    */
     signIn()
-    renderApplications('/settings/applications/attendance')
+    renderApplications('/settings/applications/registration')
 
-    expect(await screen.findByText('Dependencies and conflicts')).toBeInTheDocument()
-    expect(
-      screen.getByText(/does not currently record relationships between/),
-    ).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Registration', level: 1 })
+    const text = (document.body.textContent ?? '').toLowerCase()
+    for (const forbidden of [
+      'biometric material',
+      'distributes',
+      'remains local',
+      'not recognised at any other door',
+      'replication',
+    ]) {
+      expect(text, `Registration must not mention "${forbidden}"`).not.toContain(forbidden)
+    }
+  })
+
+  it('NO LONGER RENDERS THE THREE-STATE READINESS MODEL AS CARDS', async () => {
+    /*
+      Available / Turned on / Configured were the internal readiness triple shown
+      directly to a customer, and two of the three could only ever say "Yes":
+      "Available" on a page reachable only because it is available, and "Turned
+      on" beside a header button already reading "Turn off".
+
+      The third was worse than redundant. `readinessOf` defines configured as "a
+      settings row exists", which is right for the model, so the card read
+      "Configured — Yes" above a settings object containing `{}`.
+    */
+    signIn()
+    renderApplications('/settings/applications/access-control')
+
+    await screen.findByRole('heading', { name: 'Access Control', level: 1 })
+    expect(screen.queryByRole('region', { name: 'Feature status' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Available')).not.toBeInTheDocument()
+    expect(screen.queryByText('Turned on')).not.toBeInTheDocument()
+  })
+
+  it('SAYS WHAT IS ACTUALLY STORED instead of whether a row exists', async () => {
+    // The honest replacement for the "Configured" card: a company with an empty
+    // settings object is told nothing is stored, because nothing is.
+    signIn()
+    renderApplications('/settings/applications/access-control')
+
+    await screen.findByRole('heading', { name: 'Access Control', level: 1 })
+    expect(screen.getByText(/Nothing is stored for this feature/i)).toBeInTheDocument()
+  })
+
+  it('shows no raw platform code on the feature page', async () => {
+    // `ACCESS_CONTROL` used to be printed under the heading "Platform code".
+    signIn()
+    renderApplications('/settings/applications/access-control')
+
+    await screen.findByRole('heading', { name: 'Access Control', level: 1 })
+    expect(document.body.textContent ?? '').not.toContain('ACCESS_CONTROL')
+  })
+
+  it('DOES NOT RAISE DEPENDENCIES, which the platform does not model', async () => {
+    // This was a heading, a border and a sentence explaining the absence of a
+    // concept. Nothing is lost by not bringing it up.
+    signIn()
+    renderApplications('/settings/applications/access-control')
+
+    await screen.findByRole('heading', { name: 'Access Control', level: 1 })
+    expect(screen.queryByText('Dependencies and conflicts')).not.toBeInTheDocument()
+  })
+
+  it('NAMES THE ROLE IN THE CONSOLE\'S OWN WORDS, not the stored enum', async () => {
+    // Printed "VIEWER" while the operators screen called the same value
+    // "Viewer".
+    signIn()
+    renderApplications('/settings/applications/access-control')
+
+    await screen.findByRole('heading', { name: 'Access Control', level: 1 })
+    expect(screen.getByText(/Viewer/)).toBeInTheDocument()
+    expect(screen.queryByText('VIEWER')).not.toBeInTheDocument()
   })
 })
 
@@ -288,17 +378,15 @@ describe('what enabling actually does', () => {
 // ---------------------------------------------------------------------------
 
 describe('role restrictions', () => {
-  it('lets an OWNER enable and disable', async () => {
+  it('lets an OWNER turn a feature on', async () => {
     const user = userEvent.setup()
     signIn('OWNER')
     renderApplications()
 
     const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
-    await user.click(within(attendance).getByRole('button', { name: 'Enable' }))
+    await user.click(within(attendance).getByRole('button', { name: 'Turn on' }))
 
-    await waitFor(() =>
-      expect(within(attendance).getByText('Enabled')).toBeInTheDocument(),
-    )
+    await waitFor(() => expect(within(attendance).getByText('On')).toBeInTheDocument())
   })
 
   it('lets an ADMIN read but offers no controls', async () => {
@@ -307,8 +395,8 @@ describe('role restrictions', () => {
 
     await screen.findByText('Access Control')
     expect(screen.getByText('Read only')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Enable' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Disable' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Turn on' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Turn off' })).not.toBeInTheDocument()
   })
 
   it('shows an ADMIN the settings as read-only text, not an editor', async () => {
@@ -335,7 +423,7 @@ describe('role restrictions', () => {
     // Downgrade the session under the page, then act.
     if (state.session) state.session = { ...state.session, role: 'ADMIN' }
     const attendance = screen.getByText('Attendance').closest('li') as HTMLElement
-    await user.click(within(attendance).getByRole('button', { name: 'Enable' }))
+    await user.click(within(attendance).getByRole('button', { name: 'Turn on' }))
 
     expect(await screen.findByText(/Insufficient permissions/)).toBeInTheDocument()
   })
@@ -344,6 +432,115 @@ describe('role restrictions', () => {
 // ---------------------------------------------------------------------------
 // Mutations and cache
 // ---------------------------------------------------------------------------
+
+/*
+  TURNING A FEATURE OFF IS A DESTRUCTIVE ACTION AND IS NOW CONFIRMED EVERYWHERE.
+
+  It was confirmed on the detail page and NOT on the list — and the list is where
+  the toggles are, so the unguarded path was the one nearly everybody used. A
+  terminal assigned to the feature stops doing anything until it is turned back
+  on, which is worth a question wherever it is asked from.
+
+  These tests run the same four-step flow against both entry points, because the
+  bug was precisely that the two entry points behaved differently.
+*/
+describe('turning a feature off always asks first', () => {
+  for (const from of ['list', 'detail'] as const) {
+    describe(`from the ${from}`, () => {
+      async function openTurnOff() {
+        const user = userEvent.setup()
+        signIn('OWNER')
+        seed({
+          available: CATALOG,
+          applications: [makeApplication({ code: 'ATTENDANCE', enabled: true })],
+        })
+
+        if (from === 'detail') {
+          renderApplications('/settings/applications/attendance')
+          await screen.findByRole('heading', { name: 'Attendance', level: 1 })
+          await user.click(screen.getByRole('button', { name: 'Turn off' }))
+        } else {
+          renderApplications()
+          const row = (await screen.findByText('Attendance')).closest('li') as HTMLElement
+          await user.click(within(row).getByRole('button', { name: 'Turn off' }))
+        }
+        return { user, dialog: await screen.findByRole('dialog') }
+      }
+
+      it('ASKS BEFORE CHANGING ANYTHING', async () => {
+        const { dialog } = await openTurnOff()
+
+        expect(within(dialog).getByText(/Turn off Attendance\?/)).toBeInTheDocument()
+        expect(within(dialog).getByText(/stop doing anything/)).toBeInTheDocument()
+        // Nothing has been sent yet.
+        expect(state.requests.some((entry) => entry.method === 'PUT')).toBe(false)
+      })
+
+      it('CANCELLING LEAVES IT ON, and sends nothing', async () => {
+        const { user, dialog } = await openTurnOff()
+
+        await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+        expect(state.requests.some((entry) => entry.method === 'PUT')).toBe(false)
+        expect(applicationEnabled('ATTENDANCE')).toBe(true)
+      })
+
+      it('CONFIRMING TURNS IT OFF', async () => {
+        const { user, dialog } = await openTurnOff()
+
+        await user.click(within(dialog).getByRole('button', { name: 'Turn off feature' }))
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+        await waitFor(() => expect(applicationEnabled('ATTENDANCE')).toBe(false))
+      })
+    })
+  }
+
+  it('DOES NOT ASK BEFORE TURNING SOMETHING ON', async () => {
+    // Turning a feature on takes nothing away and breaks no terminal. A question
+    // there teaches somebody to dismiss the one that matters.
+    const user = userEvent.setup()
+    signIn('OWNER')
+    seed({ available: CATALOG, applications: [] })
+    renderApplications()
+
+    const row = (await screen.findByText('Attendance')).closest('li') as HTMLElement
+    await user.click(within(row).getByRole('button', { name: 'Turn on' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(applicationEnabled('ATTENDANCE')).toBe(true))
+  })
+
+  it('SAYS THE SAME THING FROM BOTH ENTRY POINTS', async () => {
+    // The copy lives in one component precisely so these cannot drift.
+    const user = userEvent.setup()
+    signIn('OWNER')
+    seed({
+      available: CATALOG,
+      applications: [makeApplication({ code: 'ATTENDANCE', enabled: true })],
+    })
+
+    renderApplications()
+    const row = (await screen.findByText('Attendance')).closest('li') as HTMLElement
+    await user.click(within(row).getByRole('button', { name: 'Turn off' }))
+    const fromList = (await screen.findByRole('dialog')).textContent
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    cleanup()
+
+    signIn('OWNER')
+    seed({
+      available: CATALOG,
+      applications: [makeApplication({ code: 'ATTENDANCE', enabled: true })],
+    })
+    renderApplications('/settings/applications/attendance')
+    await screen.findByRole('heading', { name: 'Attendance', level: 1 })
+    await user.click(screen.getByRole('button', { name: 'Turn off' }))
+    const fromDetail = (await screen.findByRole('dialog')).textContent
+
+    expect(fromList).toBe(fromDetail)
+  })
+})
 
 describe('enabling and disabling', () => {
   it('REFETCHES THE SESSION, so navigation reflects the change', async () => {
@@ -361,7 +558,7 @@ describe('enabling and disabling', () => {
     const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
     const before = state.requests.filter((r) => r.url.includes('/auth/me')).length
 
-    await user.click(within(attendance).getByRole('button', { name: 'Enable' }))
+    await user.click(within(attendance).getByRole('button', { name: 'Turn on' }))
 
     await waitFor(() =>
       expect(
@@ -370,7 +567,7 @@ describe('enabling and disabling', () => {
     )
   })
 
-  it('warns before disabling that assigned terminals resolve to nothing', async () => {
+  it('warns before turning off that assigned terminals resolve to nothing', async () => {
     const user = userEvent.setup()
     signIn('OWNER')
     seed({
@@ -379,11 +576,14 @@ describe('enabling and disabling', () => {
     })
     renderApplications('/settings/applications/attendance')
 
-    await user.click(await screen.findByRole('button', { name: 'Disable' }))
+    await user.click(await screen.findByRole('button', { name: 'Turn off' }))
 
-    expect(screen.getByText(/resolve to nothing/)).toBeInTheDocument()
-    // And that assignments are kept rather than rewritten.
-    expect(screen.getByText(/kept, not rewritten/)).toBeInTheDocument()
+    // THE SUBSTANCE IS UNCHANGED and is what this test protects: a terminal
+    // assigned to the feature stops working, and its assignment survives. Only
+    // the wording moved -- into a shared dialog, so the list and the detail page
+    // cannot drift apart.
+    expect(screen.getByText(/stop doing anything/)).toBeInTheDocument()
+    expect(screen.getByText(/kept, not cleared/)).toBeInTheDocument()
   })
 
   it('reports a failed toggle without claiming success', async () => {
@@ -393,13 +593,13 @@ describe('enabling and disabling', () => {
     renderApplications()
 
     const attendance = (await screen.findByText('Attendance')).closest('li') as HTMLElement
-    await user.click(within(attendance).getByRole('button', { name: 'Enable' }))
+    await user.click(within(attendance).getByRole('button', { name: 'Turn on' }))
 
-    expect(await screen.findByText(/Could not enable Attendance/)).toBeInTheDocument()
-    expect(within(attendance).getByText('Not enabled')).toBeInTheDocument()
+    expect(await screen.findByText(/Could not turn Attendance on/)).toBeInTheDocument()
+    expect(within(attendance).getByText('Off')).toBeInTheDocument()
   })
 
-  it('saves settings without silently enabling a disabled capability', async () => {
+  it('saves settings without silently turning on a feature that is off', async () => {
     // The API defaults `enabled` to true when omitted, so saving settings on a
     // disabled capability would switch it on. The request sends it explicitly.
     const user = userEvent.setup()
@@ -457,7 +657,10 @@ describe('isolation and disclosure', () => {
     renderApplications('/settings/applications/attendance')
 
     await screen.findByRole('heading', { name: 'Attendance', level: 1 })
-    expect(screen.getByText(/for Northwind Logistics/)).toBeInTheDocument()
+    // The company name used to sit under a "Turned on" card that has gone; the
+    // page still shows only this company's configuration, which is what the
+    // surrounding assertions check.
+    expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument()
   })
 
   it('discloses no credential or biometric material anywhere', async () => {

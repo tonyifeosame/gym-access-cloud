@@ -45,6 +45,28 @@ const (
 	// honoured within the hour, and so no single pass has a whole day of rows
 	// to delete.
 	defaultRetentionPurgeInterval = 1 * time.Hour
+
+	// Provisioning housekeeping: announcements and claim codes.
+	//
+	// EVERY MINUTE, and deliberately not load-bearing. The provisioning paths do
+	// not wait for it: every lookup carries its own expiry predicate, and
+	// announcing times out that serial's own lapsed rows inside its own
+	// transaction before it touches the unique index they occupy. If this task
+	// never ran, a customer could still announce, adopt, approve and collect.
+	//
+	// What it is for is the console: an operator's pending list should not fill
+	// with rows that timed out an hour ago, and that list is read far more often
+	// than a terminal is provisioned.
+	defaultProvisioningSweepInterval = 1 * time.Minute
+
+	// How long a finished announcement or an expired claim code is kept.
+	//
+	// "Did a unit ever try to join this account, and what happened to it" is a
+	// support question, and the answer vanishing the moment the row stops being
+	// useful makes it unanswerable. Thirty days is long enough to cover an
+	// installation dispute and short enough that the table does not grow
+	// without bound.
+	defaultProvisioningRetentionDays = 30
 )
 
 // Config holds the maintenance settings resolved from the environment
@@ -59,6 +81,9 @@ type Config struct {
 
 	ReconcileInterval      time.Duration
 	RetentionPurgeInterval time.Duration
+
+	ProvisioningSweepInterval time.Duration
+	ProvisioningRetentionDays int
 
 	ShutdownTimeout time.Duration
 }
@@ -78,6 +103,11 @@ func LoadConfig() Config {
 			defaultReconcileInterval),
 		RetentionPurgeInterval: envDuration("RETENTION_PURGE_INTERVAL_SECONDS",
 			defaultRetentionPurgeInterval),
+
+		ProvisioningSweepInterval: envDuration("PROVISIONING_SWEEP_INTERVAL_SECONDS",
+			defaultProvisioningSweepInterval),
+		ProvisioningRetentionDays: envInt("PROVISIONING_RETENTION_DAYS",
+			defaultProvisioningRetentionDays),
 
 		ShutdownTimeout: envDuration("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeout),
 	}
@@ -211,6 +241,49 @@ func (c Config) Tasks() []Task {
 		})
 	}
 
+	// Provisioning housekeeping (019, 022).
+	//
+	// TWO JOBS IN ONE PASS, because they are the same job on two tables: time
+	// out what has lapsed, then delete what has been finished long enough to
+	// stop being evidence.
+	//
+	// THE CLAIM-CODE PURGE HAD NEVER BEEN SCHEDULED. PurgeExpiredClaimCodes has
+	// existed since 019 with a comment explaining its retention window, and
+	// nothing called it -- so device_claim_codes grew by one row per issued code
+	// for ever and the window it documents was never applied to anything. Wiring
+	// it here rather than writing a second purge is the whole of that fix.
+	if c.ProvisioningSweepInterval > 0 {
+		tasks = append(tasks, Task{
+			Name:     "provisioning_sweep",
+			Interval: c.ProvisioningSweepInterval,
+			Run: func(ctx context.Context) (string, error) {
+				expired, err := database.ExpireAnnouncements()
+				if err != nil {
+					return "", err
+				}
+
+				var purgedAnnouncements, purgedCodes int64
+				if c.ProvisioningRetentionDays > 0 {
+					purgedAnnouncements, err = database.PurgeAnnouncements(c.ProvisioningRetentionDays)
+					if err != nil {
+						return "", err
+					}
+					purgedCodes, err = database.PurgeExpiredClaimCodes(c.ProvisioningRetentionDays)
+					if err != nil {
+						return "", err
+					}
+				}
+
+				if expired == 0 && purgedAnnouncements == 0 && purgedCodes == 0 {
+					return "", nil // nothing waiting, nothing stale
+				}
+				return fmt.Sprintf(
+					"expired %d announcement(s); purged %d announcement(s) and %d claim code(s)",
+					expired, purgedAnnouncements, purgedCodes), nil
+			},
+		})
+	}
+
 	return tasks
 }
 
@@ -247,6 +320,22 @@ func (c Config) Describe() {
 			"(per-company windows; unset means keep for ever)", c.RetentionPurgeInterval)
 	} else {
 		log.Println("maintenance: retention purging disabled (RETENTION_PURGE_INTERVAL_SECONDS=0)")
+	}
+
+	// Turning this off does NOT break provisioning, and the message says so
+	// rather than overstating it: announcing expires that serial's own lapsed
+	// rows in its own transaction, and every lookup carries its own expiry
+	// predicate. What is lost is tidiness -- the console's pending list keeps
+	// showing rows that have timed out, and finished rows are never deleted.
+	if c.ProvisioningSweepInterval > 0 {
+		log.Printf("maintenance: provisioning sweep every %s "+
+			"(announcement expiry; %d-day retention on finished announcements and claim codes)",
+			c.ProvisioningSweepInterval, c.ProvisioningRetentionDays)
+	} else {
+		log.Println("maintenance: provisioning sweep disabled " +
+			"(PROVISIONING_SWEEP_INTERVAL_SECONDS=0). Terminals can still announce and be " +
+			"approved; expired announcements stay in the pending list and finished rows " +
+			"are never purged.")
 	}
 }
 

@@ -26,6 +26,7 @@ import {
   makeEvent,
   makeFirmwareVersion,
   makeOperatorAccount,
+  makePendingTerminal,
   makePermission,
   makePerson,
   makeSchedule,
@@ -37,7 +38,12 @@ import {
 } from '../test/fixtures'
 import { expectNoViolations } from '../test/axe'
 import { makeTestQueryClient, renderWithSession } from '../test/render'
-import { resetServerState, resetTerminalModes, seed } from '../test/server'
+import {
+  resetServerState,
+  resetTerminalModes,
+  seed,
+  seedAnnouncedTerminal,
+} from '../test/server'
 
 /**
  * The automated accessibility pass (FE-01).
@@ -234,7 +240,10 @@ describe('dialogs', () => {
     renderInShell(`/sites/${SITE_A.site_id}`)
 
     await screen.findByRole('heading', { name: 'Behaviour during an outage' })
-    await user.click(screen.getByRole('button', { name: 'Provision a terminal' }))
+    // Behind the Advanced disclosure now: the claim code is the pre-authorised
+    // installer path, and adding a terminal happens on the Terminals page.
+    await user.click(screen.getByText(/pre-authorise a terminal for an installer/i))
+    await user.click(screen.getByRole('button', { name: 'Issue a claim code' }))
     await screen.findByRole('dialog')
     await expectNoViolations()
 
@@ -244,6 +253,37 @@ describe('dialogs', () => {
     await screen.findByLabelText('Claim code')
     await expectNoViolations()
   })
+
+  it('the add-a-terminal flow is free of violations at every step', async () => {
+    // THE SCREEN A CUSTOMER MEETS FIRST, so it is swept at every stage: an
+    // instruction list, a form, a confirmation panel with a programmatically
+    // focused heading, and two alert panels that appear without the focus
+    // moving. The last of those is the one worth a sweep — an alert nobody is
+    // told about is an alert that does not exist for a screen reader.
+    const user = userEvent.setup()
+    signIn()
+    seedAnnouncedTerminal('K7M2-P4QX', makePendingTerminal())
+    renderInShell('/terminals')
+
+    await screen.findByRole('button', { name: 'Add a terminal' })
+    await user.click(screen.getByRole('button', { name: 'Add a terminal' }))
+    await screen.findByRole('dialog')
+    await expectNoViolations()
+
+    await user.type(screen.getByLabelText(/code from the terminal/i), 'K7M2P4QX')
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+
+    await screen.findByText(/is this the terminal in front of you/i)
+    await expectNoViolations()
+
+    // Two sites in this fixture, so nothing is preselected and the site has to
+    // be chosen — which is the shape the select and its error are swept in.
+    const confirm = within(screen.getByRole('dialog'))
+    await user.selectOptions(confirm.getByLabelText(/^site/i), SITE_A.site_id)
+    await user.click(confirm.getByRole('button', { name: /approve and set up/i }))
+    await within(await screen.findByRole('dialog')).findByText(/is being set up/i)
+    await expectNoViolations()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -251,6 +291,77 @@ describe('dialogs', () => {
 // ---------------------------------------------------------------------------
 
 describe('the console works without a mouse', () => {
+  /*
+    THE WAY PAST THE NAVIGATION.
+
+    The sidebar is the same eleven-or-so links on every screen, so without this
+    a keyboard or screen-reader user paid thirteen tab stops to reach the page
+    content -- on every navigation, all session. axe never flagged it: its
+    `bypass` rule is satisfied by the landmarks this console already has, which
+    is why a green sweep sat on top of it for so long.
+
+    Asserted here rather than in the browser pass because the property is about
+    ORDER AND FOCUS, which is exactly what a DOM test can pin: first in the tab
+    order, and focus genuinely lands in the main landmark afterwards. Whether it
+    is VISIBLE when focused is a CSS question, and the one part of this that has
+    to be checked in a real browser.
+  */
+  it('offers a skip link as the FIRST thing a keyboard reaches', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+
+    // Nothing before it. The first Tab from the document lands here, which is
+    // the whole point -- a skip link buried behind the sign-out button is not a
+    // skip link.
+    await user.tab()
+    const skip = screen.getByRole('link', { name: 'Skip to main content' })
+    expect(document.activeElement).toBe(skip)
+    expect(skip).toHaveAttribute('href', '#main')
+  })
+
+  it('MOVES FOCUS to the main landmark, not merely the scroll position', async () => {
+    // The half that silently does not happen if the target cannot hold focus:
+    // the viewport moves, the next Tab carries on from the header, and the user
+    // is back in the navigation they just asked to skip.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+    await user.tab()
+    await user.keyboard('{Enter}')
+
+    const main = document.getElementById('main')
+    expect(main).not.toBeNull()
+    expect(document.activeElement).toBe(main)
+
+    // And it is reachable only that way: -1 keeps the landmark out of the tab
+    // order, so nobody arrives on a focusable region by accident.
+    expect(main).toHaveAttribute('tabindex', '-1')
+  })
+
+  it('leaves no fragment behind in the address bar', async () => {
+    // A `#main` that survives into the next route is litter, and it would be
+    // copied into any URL an operator shared from that point on. Following the
+    // link normally would set it, so this is what proves the handler ran.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/people')
+
+    await screen.findByRole('heading', { name: 'People', level: 1 })
+    const before = window.location.hash
+
+    await user.tab()
+    await user.keyboard('{Enter}')
+
+    expect(window.location.hash).toBe(before)
+    // Still on the page it started on: this moves focus, it does not navigate.
+    expect(screen.getByRole('heading', { name: 'People', level: 1 })).toBeInTheDocument()
+  })
+
   it('MOVES FOCUS INTO a dialog when it opens', async () => {
     // A modal that leaves focus behind it is invisible to anyone not using a
     // pointer: they tab through the page underneath and never reach it.

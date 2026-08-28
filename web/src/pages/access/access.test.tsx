@@ -249,6 +249,33 @@ describe('a person’s access rules', () => {
     expect(await screen.findByText(SITE_A.site_name)).toBeInTheDocument()
   })
 
+  it('OFFERS FEATURES BY NAME, never as the raw platform code', async () => {
+    /*
+      "Only for one feature" built its options straight off `session.applications`
+      and used `application.code` as BOTH the value and the label -- so somebody
+      narrowing a rule chose between ACCESS_CONTROL and VISITOR_MANAGEMENT: the
+      device protocol's own constants, shouted, on the screen where an operator
+      decides who gets through a door.
+
+      THE VALUE IS UNCHANGED and still the code, because that is what the API
+      accepts. Only the label moved, and it moved to `describeApplication` --
+      the registry every other surface already reads.
+    */
+    const user = userEvent.setup()
+    signIn()
+    render('/people/P-0001')
+
+    await screen.findByText('This person cannot get in anywhere')
+    await user.click(screen.getByRole('button', { name: 'Grant access' }))
+
+    const select = within(screen.getByRole('dialog')).getByLabelText(/Only for one feature/)
+    const option = within(select).getByRole('option', { name: 'Access Control' })
+    expect(option).toHaveValue('ACCESS_CONTROL')
+
+    // The code itself must not be readable anywhere in the dialog.
+    expect(screen.getByRole('dialog').textContent ?? '').not.toContain('ACCESS_CONTROL')
+  })
+
   it('WARNS THAT A COMPANY-WIDE RULE COVERS TERMINALS THAT DO NOT EXIST YET', async () => {
     // Often what somebody wants for staff, and rarely what they want for a
     // visitor — and it is not obvious from the word "everywhere".
@@ -486,7 +513,7 @@ describe('“would this person get in”', () => {
     await user.click(screen.getByRole('button', { name: 'Check access' }))
 
     const dialog = screen.getByRole('dialog')
-    await user.type(within(dialog).getByLabelText(/Person identifier/), 'P-0001')
+    await user.type(within(dialog).getByLabelText(/ID number/), 'P-0001')
     await user.click(within(dialog).getByRole('button', { name: 'Check' }))
 
     expect(await within(dialog).findByText('Would be refused')).toBeInTheDocument()
@@ -506,7 +533,7 @@ describe('“would this person get in”', () => {
 
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
-    await user.type(screen.getByLabelText(/Person identifier/), 'P-0001')
+    await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
 
     expect(await screen.findByText('Would be let in')).toBeInTheDocument()
@@ -532,7 +559,7 @@ describe('“would this person get in”', () => {
 
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
-    await user.type(screen.getByLabelText(/Person identifier/), 'P-0001')
+    await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
 
     expect(await screen.findByText('Would be refused')).toBeInTheDocument()
@@ -560,11 +587,11 @@ describe('“would this person get in”', () => {
 
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
-    await user.type(screen.getByLabelText(/Person identifier/), 'P-0001')
+    await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
     await screen.findByText('Would be refused')
 
-    await user.type(screen.getByLabelText(/Person identifier/), '9')
+    await user.type(screen.getByLabelText(/ID number/), '9')
     expect(screen.queryByText('Would be refused')).not.toBeInTheDocument()
   })
 
@@ -575,7 +602,7 @@ describe('“would this person get in”', () => {
 
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
-    await user.type(screen.getByLabelText(/Person identifier/), 'NOT-A-PERSON')
+    await user.type(screen.getByLabelText(/ID number/), 'NOT-A-PERSON')
     await user.click(screen.getByRole('button', { name: 'Check' }))
 
     expect(await screen.findByText('Not recognised')).toBeInTheDocument()
@@ -590,7 +617,7 @@ describe('“would this person get in”', () => {
 
     await screen.findByRole('heading', { name: 'Lifecycle' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
-    await user.type(screen.getByLabelText(/Person identifier/), 'P-0001')
+    await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
 
     await screen.findByText('Would be refused')

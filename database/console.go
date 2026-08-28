@@ -63,32 +63,40 @@ func scanConsoleSites(rows *sql.Rows) ([]models.ConsoleSite, error) {
 }
 
 // ListConsoleSites returns a company's sites, optionally narrowed to the ones an
-// operator has been granted.
+// operator has been granted and optionally matched against a search term.
 //
 // A nil siteIDs means "every site in the company", which is what an unscoped
 // operator and every ADMIN or OWNER gets. An EMPTY-but-non-nil slice would mean
 // "no sites at all" -- a distinction the caller has to make deliberately, so
 // nil and empty are not conflated here.
-func ListConsoleSites(companyID int64, siteIDs []int64) ([]models.ConsoleSite, error) {
-	if siteIDs == nil {
-		rows, err := DB.Query(`
-			SELECT `+consoleSiteColumns+`
-			  FROM sites s
-			 WHERE s.company_id = $1 AND s.deleted_at IS NULL
-			 ORDER BY s.site_name`, companyID)
-		if err != nil {
-			return nil, err
-		}
-		return scanConsoleSites(rows)
-	}
+//
+// SEARCH IS IN SQL, for the same reason it is for people and terminals: a
+// console that narrowed a fetched list in the browser would search what it had
+// already been given rather than the estate, which is silently wrong the moment
+// a company has more locations than one response carries -- and silently right
+// in every test with two fixtures.
+//
+// ONE STATEMENT SERVES EVERY COMBINATION, in the shape ListConsolePeople below
+// already uses: a "is this narrowing on" flag beside each value. The two
+// hand-built variants this replaces were the same query differing by one
+// predicate, which is how a tenancy filter ends up present on one path and
+// absent on the other.
+func ListConsoleSites(companyID int64, siteIDs []int64, search string) ([]models.ConsoleSite, error) {
+	scoped := siteIDs != nil
+	searching := search != ""
+	pattern := "%" + escapeLikePattern(search) + "%"
 
 	rows, err := DB.Query(`
 		SELECT `+consoleSiteColumns+`
 		  FROM sites s
 		 WHERE s.company_id = $1
 		   AND s.deleted_at IS NULL
-		   AND s.id = ANY($2)
-		 ORDER BY s.site_name`, companyID, pq.Array(siteIDs))
+		   AND (NOT $2 OR s.id = ANY($3::bigint[]))
+		   AND (NOT $4
+		        OR s.site_name ILIKE $5 ESCAPE '\'
+		        OR COALESCE(s.address, '') ILIKE $5 ESCAPE '\')
+		 ORDER BY s.site_name`,
+		companyID, scoped, pq.Array(siteIDs), searching, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -103,18 +111,45 @@ func ListConsoleSites(companyID int64, siteIDs []int64) ([]models.ConsoleSite, e
 // relying on being complete. This is a separate query for a separate caller.
 
 // PeopleQuery is one page of a people search.
+//
+// THE FILTERS ARE POINTERS, and that is load-bearing rather than stylistic: an
+// ABSENT filter is not the same question as `false`. `enrolled=false` means
+// "show me the people with no credential", which is what an operator asks
+// before a rollout; no `enrolled` at all means "show me everybody". A plain bool
+// would collapse the second into the first and silently hide every enrolled
+// person from an unfiltered list.
 type PeopleQuery struct {
 	// Search matches the external id or the full name, case-insensitively and
 	// anywhere in the value. Empty matches everything.
 	Search string
+
+	// Enrolled narrows by whether the person is enrolled AT ALL --
+	// personEnrolledPredicate, the union of the structured record and the legacy
+	// column. It is the same rule the person projection reports, so the filter
+	// and the badge beside each row cannot disagree.
+	Enrolled *bool
+
+	// Active narrows by people.active.
+	Active *bool
+
 	Limit  int
 	Offset int
+}
+
+// ConsolePersonRow is one person plus what the two enrolment stores say.
+//
+// The enrolment is read as COLUMNS ON THE PAGE QUERY rather than by asking per
+// row: a page of fifty would otherwise be fifty extra round trips to answer a
+// question the same statement can answer for free.
+type ConsolePersonRow struct {
+	Member    models.Member
+	Enrolment PersonEnrolment
 }
 
 // PeoplePage is a page of results plus what a caller needs to ask for the next
 // one. Total is the size of the whole match, not of this page.
 type PeoplePage struct {
-	People []models.Member
+	People []ConsolePersonRow
 	Total  int
 }
 
@@ -128,37 +163,67 @@ func ListConsolePeople(companyID int64, query PeopleQuery) (*PeoplePage, error) 
 	pattern := "%" + escapeLikePattern(query.Search) + "%"
 	searching := query.Search != ""
 
+	// The optional filters, in the shape this file already uses for search: a
+	// "is this filter on" flag beside the value, so one statement serves every
+	// combination and there is no string-built WHERE clause to get wrong.
+	//
+	// THE COUNT AND THE PAGE APPLY THE SAME PREDICATE, from the same constant.
+	// If they ever diverged, `total` would describe a different set from the
+	// rows -- and the symptom is a "next page" button that leads nowhere, or a
+	// page that stops before the end of the match.
+	filterEnrolled := query.Enrolled != nil
+	wantEnrolled := filterEnrolled && *query.Enrolled
+	filterActive := query.Active != nil
+	wantActive := filterActive && *query.Active
+
+	const where = `
+		 WHERE p.company_id = $1
+		   AND p.deleted_at IS NULL
+		   AND (NOT $2 OR p.external_id ILIKE $3 ESCAPE '\' OR p.full_name ILIKE $3 ESCAPE '\')
+		   AND (NOT $4 OR ` + personEnrolledPredicate + ` = $5)
+		   AND (NOT $6 OR p.active = $7)`
+
+	args := []any{companyID, searching, pattern,
+		filterEnrolled, wantEnrolled, filterActive, wantActive}
+
 	var page PeoplePage
-	err := DB.QueryRow(`
-		SELECT count(*)
-		  FROM people
-		 WHERE company_id = $1
-		   AND deleted_at IS NULL
-		   AND (NOT $2 OR external_id ILIKE $3 ESCAPE '\' OR full_name ILIKE $3 ESCAPE '\')`,
-		companyID, searching, pattern).Scan(&page.Total)
-	if err != nil {
+	if err := DB.QueryRow(`SELECT count(*) FROM people p`+where, args...).
+		Scan(&page.Total); err != nil {
 		return nil, err
 	}
 
+	// The member columns, aliased to `p`, plus the two enrolment facts. The
+	// projection is otherwise exactly memberColumns -- see the note there.
 	rows, err := DB.Query(`
-		SELECT `+memberColumns+`
-		  FROM people
-		 WHERE company_id = $1
-		   AND deleted_at IS NULL
-		   AND (NOT $2 OR external_id ILIKE $3 ESCAPE '\' OR full_name ILIKE $3 ESCAPE '\')
-		 ORDER BY created_at DESC, id DESC
-		 LIMIT $4 OFFSET $5`,
-		companyID, searching, pattern, query.Limit, query.Offset)
+		SELECT p.id, p.public_id, p.external_id, p.full_name, p.membership_type,
+		       p.active, COALESCE(p.fingerprint_template, ''),
+		       p.created_at, p.updated_at,
+		       `+personHasCredentialExpr+`,
+		       COALESCE(p.fingerprint_template, '') <> ''
+		  FROM people p`+where+`
+		 ORDER BY p.created_at DESC, p.id DESC
+		 LIMIT $8 OFFSET $9`,
+		append(args, query.Limit, query.Offset)...)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
-	people, err := scanMembers(rows)
-	if err != nil {
-		return nil, err
+	people := make([]ConsolePersonRow, 0, 16)
+	for rows.Next() {
+		var row ConsolePersonRow
+		if err := rows.Scan(
+			&row.Member.ID, &row.Member.PublicID, &row.Member.MemberID,
+			&row.Member.FullName, &row.Member.MembershipType, &row.Member.Active,
+			&row.Member.FingerprintTemplate, &row.Member.CreatedAt, &row.Member.UpdatedAt,
+			&row.Enrolment.HasCredential, &row.Enrolment.HasLegacy,
+		); err != nil {
+			return nil, err
+		}
+		people = append(people, row)
 	}
-	if people == nil {
-		people = []models.Member{}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	page.People = people
 

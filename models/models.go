@@ -375,7 +375,51 @@ type DeviceRegistrationRequest struct {
 	BuildNumber      string `json:"build_number,omitempty"`
 	ReleaseChannel   string `json:"release_channel,omitempty" binding:"omitempty,oneof=STABLE BETA CANARY"`
 	IPAddress        string `json:"ip_address,omitempty"`
+
+	// Capabilities carries the same list the heartbeat sends (025), so a
+	// terminal is gated correctly from the moment it registers rather than from
+	// its first heartbeat a minute later. Same nil-versus-empty rule.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
+
+// TerminalCapability names something a terminal can do, as reported by the
+// firmware (025). The tokens are the firmware's own, from
+// include/device_info.h, and are matched exactly -- no prefixes, no wildcards
+// and no version inference.
+const (
+	// CapabilityWifiProvisioning is Wi-Fi setup from a phone through the
+	// terminal's own captive portal.
+	CapabilityWifiProvisioning = "wifi_provisioning"
+
+	// CapabilityWifiRecovery is the console's Change Wi-Fi command: the image
+	// parses the WIFI_RECOVERY sync job and ACTS on it, rather than reading it
+	// as an unknown type and acknowledging it as applied.
+	CapabilityWifiRecovery = "wifi_recovery"
+
+	// CapabilityTerminalAnnounce is announce-and-approve: the terminal
+	// introduces itself and displays a pairing code.
+	CapabilityTerminalAnnounce = "terminal_announce"
+
+	// CapabilityBiometricExport is: this terminal can read a template off its
+	// own sensor and seal it.
+	//
+	// TWO CAPABILITIES, NOT ONE, because export and import are separate driver
+	// features that fail separately and are verified separately. The fitted
+	// Adafruit driver has neither working -- getModel() sends UpChar and never
+	// reads the data packets back, and DownChar (0x09) is not even defined --
+	// so a build can plausibly ship with one half done and not the other.
+	CapabilityBiometricExport = "biometric_export"
+
+	// CapabilityBiometricImport is: this terminal can unseal a template and
+	// write it into its own sensor.
+	//
+	// A CAPABILITY IS A STATEMENT OF TESTED FACT, which is the whole reason 025
+	// exists instead of a version check. Firmware must advertise this only in a
+	// build where the import path is compiled AND has been shown to work on the
+	// module actually fitted. Nothing on the platform side can check that, which
+	// is exactly why the platform asks rather than infers.
+	CapabilityBiometricImport = "biometric_import"
+)
 
 // DeviceRegistrationResponse carries the issued credential. The plaintext key is
 // returned exactly once and is not recoverable afterwards.
@@ -397,6 +441,32 @@ type DeviceHeartbeatRequest struct {
 	Status           string `json:"status,omitempty"` // ONLINE, UPDATING or ERROR
 	Error            string `json:"error,omitempty"`
 	IPAddress        string `json:"ip_address,omitempty"`
+
+	// SensorProfile is what this terminal's fingerprint module actually
+	// answered when asked -- `vendor:system_id:capacity`, e.g. `ZFM:0x0009:1000`
+	// (026).
+	//
+	// IT IS NOT A BUILD CONSTANT and must not become one. The whole value of the
+	// field is that it reports the part that is physically fitted, so that a
+	// replaced or second-source module is VISIBLE rather than assumed to be the
+	// same as the last one.
+	//
+	// This is the only compatibility rule for replicating a template: material
+	// moves between byte-equal profiles and nowhere else. Empty means unchanged,
+	// on the same COALESCE terms as capabilities.
+	SensorProfile string `json:"sensor_profile,omitempty"`
+
+	// Capabilities is what this image says it can do (025).
+	//
+	// NIL AND EMPTY ARE DIFFERENT, and the difference is the whole reason this
+	// is a slice rather than a comma-joined string. nil is "this heartbeat did
+	// not mention capabilities", which merges as "unchanged"; a non-nil empty
+	// slice is "this terminal reports its capabilities and has none of them",
+	// which is a real answer and is stored.
+	//
+	// The distinction survives encoding/json exactly: an absent key decodes to
+	// nil, and `[]` decodes to a non-nil slice of length zero.
+	Capabilities []string `json:"capabilities,omitempty"`
 
 	// MemberCapacity is how many people this terminal can hold at once (FW-01).
 	//
@@ -451,6 +521,18 @@ type DeviceInventory struct {
 	CurrentFirmwareVersion string     `json:"current_firmware_version"`
 	FirmwareOutdated       bool       `json:"firmware_outdated"`
 
+	// Capabilities is what this terminal reported it can do (025).
+	//
+	// OMITTED WHERE IT HAS NEVER REPORTED, and a client must render that as
+	// "unknown" rather than as "none". A brand-new unit that has not heartbeat
+	// yet and a build that predates capability reporting are both absent here,
+	// and they deserve different answers -- so a console must not draw a
+	// conclusion from absence alone.
+	//
+	// An empty array IS a conclusion: it means the terminal reports its
+	// capabilities and has none of these.
+	Capabilities []string `json:"capabilities,omitempty"`
+
 	// Capacity (FW-01).
 	//
 	// MemberCapacity is OMITTED when the terminal has never reported one, and a
@@ -464,6 +546,15 @@ type DeviceInventory struct {
 	MemberCapacity      *int       `json:"member_capacity,omitempty"`
 	RosterOverflowAt    *time.Time `json:"roster_overflow_at,omitempty"`
 	RosterOverflowCount *int       `json:"roster_overflow_count,omitempty"`
+
+	// ProvisionedVia is how this terminal's CURRENT credential was issued:
+	// SITE_KEY, CLAIM_CODE or ANNOUNCEMENT (023).
+	//
+	// OMITTED on rows that predate the column, and a client must render that as
+	// "not recorded" rather than guessing. Backfilling every existing row to
+	// SITE_KEY would be probably-true and occasionally false, and a console
+	// cannot un-say "site key".
+	ProvisionedVia string `json:"provisioned_via,omitempty"`
 }
 
 // FleetSummary is the device-count rollup a dashboard header shows

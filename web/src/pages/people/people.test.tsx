@@ -84,6 +84,49 @@ describe('people list', () => {
     expect(within(inactive).getByText('Inactive')).toBeInTheDocument()
   })
 
+  it('heads the reference column "ID number" — not "Identifier", and not "Member ID"', async () => {
+    /*
+      ONE NEUTRAL NAME FOR THE FIELD, ASSERTED FROM BOTH SIDES.
+
+      "Identifier" is what the schema calls the column, not what an operator
+      calls the person. "Member ID" was the fix for that and was wrong in a
+      different way: ACCESSLINK IS NOT GYM SOFTWARE, and the same build runs at
+      an office, a school, a warehouse and a factory, none of which has members.
+      A supervisor reading "Member ID" over a column of employee numbers is
+      being told they are using somebody else's product.
+
+      Both rejected spellings are asserted absent, because the failure this
+      guards against is a partial rename — one screen moving and the rest
+      staying put, which is the state this replaced.
+    */
+    signIn()
+    renderPeople()
+
+    await screen.findByText('P-0000')
+    expect(screen.getByRole('columnheader', { name: 'ID number' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('columnheader', { name: 'Identifier' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Member ID' })).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Name or ID number')).toBeInTheDocument()
+    expect(document.body.textContent ?? '').not.toMatch(/member id/i)
+  })
+
+  it('does not spend a column on when the record was last touched', async () => {
+    /*
+      "Updated" was a sixth of the table's width for a timestamp nobody sorts
+      by, filters on or acts on -- and a sixth line on every card on a phone.
+      It is still on the person's own page, which is where somebody asking
+      "when did this change" is going anyway.
+    */
+    signIn()
+    renderPeople()
+
+    await screen.findByText('P-0000')
+    expect(screen.queryByRole('columnheader', { name: 'Updated' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader')).toHaveLength(5)
+  })
+
   it('SEARCHES ON THE SERVER, not by filtering the page', async () => {
     // The failure this guards against passes every test with three fixtures and
     // is silently wrong the moment a company outgrows one page.
@@ -243,7 +286,7 @@ describe('creating a person', () => {
     renderPeople('/people', client)
 
     await user.click(await screen.findByRole('button', { name: 'Add a person' }))
-    await user.type(screen.getByLabelText(/Identifier/), 'P-NEW')
+    await user.type(screen.getByLabelText(/ID number/), 'P-NEW')
     await user.type(screen.getByLabelText(/Full name/), 'Chidi Okafor')
     await user.click(screen.getByRole('button', { name: 'Add person' }))
 
@@ -260,7 +303,7 @@ describe('creating a person', () => {
     const before = state.requests.filter((r) => r.method === 'POST').length
     await user.click(screen.getByRole('button', { name: 'Add person' }))
 
-    expect(await screen.findByText(/Identifier is required/)).toBeInTheDocument()
+    expect(await screen.findByText(/ID number is required/)).toBeInTheDocument()
     expect(screen.getByText(/Full name is required/)).toBeInTheDocument()
     expect(state.requests.filter((r) => r.method === 'POST')).toHaveLength(before)
   })
@@ -271,15 +314,15 @@ describe('creating a person', () => {
     renderPeople()
 
     await user.click(await screen.findByRole('button', { name: 'Add a person' }))
-    await user.type(screen.getByLabelText(/Identifier/), 'P-0000')
+    await user.type(screen.getByLabelText(/ID number/), 'P-0000')
     await user.type(screen.getByLabelText(/Full name/), 'Duplicate')
     await user.click(screen.getByRole('button', { name: 'Add person' }))
 
     expect(
-      await screen.findByText('Someone with that identifier already exists in your company.'),
+      await screen.findByText('Someone with that ID number already exists in your company.'),
     ).toBeInTheDocument()
     // Values kept so the identifier can be corrected.
-    expect(screen.getByLabelText(/Identifier/)).toHaveValue('P-0000')
+    expect(screen.getByLabelText(/ID number/)).toHaveValue('P-0000')
   })
 
   it('offers no credential field in either direction', async () => {
@@ -333,7 +376,7 @@ describe('editing a person', () => {
     renderPeople('/people/P-0000')
 
     await user.click(await screen.findByRole('button', { name: 'Edit' }))
-    expect(screen.getByLabelText(/Identifier/)).toBeDisabled()
+    expect(screen.getByLabelText(/ID number/)).toBeDisabled()
     expect(screen.getByText(/Cannot be changed/)).toBeInTheDocument()
   })
 
@@ -375,6 +418,29 @@ describe('activation', () => {
       within(screen.getByRole('dialog')).getByRole('button', { name: 'Deactivate' }),
     )
     expect(await screen.findByText('This person is inactive')).toBeInTheDocument()
+  })
+
+  it('says a person is inactive once, not twice', async () => {
+    /*
+      THE BANNER AND THE CARD SAID THE SAME THING A CENTIMETRE APART. The banner
+      explains what inactive MEANS -- terminals have been told to stop admitting
+      them, the record is kept -- so a card whose whole content was the word
+      "Inactive" added nothing, and on a phone it was a whole card for one word.
+      An active person needed no card at all to say nothing was wrong.
+
+      The state is still on this page in the banner, and still on the row in the
+      People list.
+    */
+    signIn()
+    renderPeople('/people/P-0003')
+
+    expect(await screen.findByText('This person is inactive')).toBeInTheDocument()
+
+    const summary = screen.getByRole('region', { name: 'Summary' })
+    expect(within(summary).queryByText('Status')).not.toBeInTheDocument()
+    expect(within(summary).queryByText('Inactive')).not.toBeInTheDocument()
+    // The cards that remain are the ones the banner does not cover.
+    expect(within(summary).getByText('Person type')).toBeInTheDocument()
   })
 })
 
@@ -483,6 +549,29 @@ describe('biometric non-disclosure', () => {
     expect(
       screen.getByRole('button', { name: /enrol fingerprint/i }),
     ).toBeInTheDocument()
+  })
+
+  it('keeps the security statement without describing our API surface', async () => {
+    /*
+      THE SENTENCE THAT WAS REMOVED: "...there is currently no operator API to
+      start, review or clear an enrolment." A statement about our endpoints, on
+      a screen a customer administers their members from -- and stale besides,
+      since the platform gained a read endpoint for exactly that.
+
+      THE SENTENCE THAT STAYS: the console holds no copy of the biometric data.
+      That is a property of the product a customer is entitled to know, and it
+      is the reason this page can only show a yes or a no.
+    */
+    signIn()
+    renderPeople('/people/P-0000')
+
+    await screen.findByRole('heading', { name: 'Ada Number 0', level: 1 })
+    expect(screen.getByText(/holds no copy of the biometric data/i)).toBeInTheDocument()
+
+    const text = document.body.textContent ?? ''
+    for (const pattern of [/operator API/i, /\bAPI\b/, /endpoint/i, /not yet built/i]) {
+      expect(text, `the person page must not say ${pattern}`).not.toMatch(pattern)
+    }
   })
 
   it('carries nothing credential-shaped in any list response it holds', async () => {

@@ -55,7 +55,7 @@ export function SiteActivationDialog({
             <strong>
               all {site.terminal_count} terminal{site.terminal_count === 1 ? '' : 's'}
             </strong>{' '}
-            at this site stop working immediately. Doors will not open by
+            at this site stop working immediately. Nobody will get in by
             credential while it is deactivated.
           </>
         ) : (
@@ -112,14 +112,14 @@ export function RetireSiteDialog({
           <strong>
             {terminals} terminal{terminals === 1 ? '' : 's'}
           </strong>{' '}
-          installed at it. Every one of them stops opening doors immediately, and
-          this cannot be undone from the console.
+          installed at it. Every one of them stops letting anybody in immediately,
+          and this cannot be undone from the console.
         </>
       }
       detail={
         <>
           Terminals at a retired site stop authenticating on their own device
-          credentials as well as on the site key, so re-adding the site later
+          credentials as well as on the provisioning key, so re-adding the site later
           means re-provisioning the hardware. If you only need to suspend this
           location, <strong>deactivate it instead</strong> — that is reversible.
         </>
@@ -208,7 +208,7 @@ export function RotateSiteKeyDialog({
               The previous key stopped working the moment this was issued.{' '}
               {result.legacy_terminals === 0 ? (
                 <>
-                  No terminal at this site depends on the site key — every one of
+                  No terminal at this site depends on the provisioning key — every one of
                   them holds its own device credential, so none was affected.
                 </>
               ) : (
@@ -219,8 +219,8 @@ export function RotateSiteKeyDialog({
                   </strong>{' '}
                   at this site {result.legacy_terminals === 1 ? 'has' : 'have'} never
                   been issued a device credential and {result.legacy_terminals === 1 ? 'was' : 'were'}{' '}
-                  using the site key. {result.legacy_terminals === 1 ? 'It needs' : 'They need'}{' '}
-                  re-provisioning with the new key.
+                  using the provisioning key. {result.legacy_terminals === 1 ? 'It must' : 'They must'}{' '}
+                  be registered again with the new key.
                 </>
               )}
             </p>
@@ -234,7 +234,7 @@ export function RotateSiteKeyDialog({
   return (
     <ConfirmDialog
       open={open}
-      title={`Rotate the key for ${site.name}?`}
+      title={`Rotate the provisioning key for ${site.name}?`}
       consequence={
         <>
           The current provisioning key stops working <strong>immediately</strong>.
@@ -243,12 +243,12 @@ export function RotateSiteKeyDialog({
       }
       detail={
         <>
-          Any tooling holding the old key must be updated, and so must any terminal
-          that authenticates with the site key rather than its own device
-          credential. The new key is shown once, on the next screen.
+          Anything holding the old key must be given the new one, and so must any
+          terminal that authenticates with the site&apos;s provisioning key rather than
+          its own device credential. The new key is shown once, on the next screen.
         </>
       }
-      confirmLabel="Rotate key"
+      confirmLabel="Rotate provisioning key"
       onConfirm={async () => {
         const rotated = await rotate.mutateAsync()
         pendingCredential.current = true

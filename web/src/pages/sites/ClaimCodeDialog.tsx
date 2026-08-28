@@ -150,7 +150,7 @@ export function ClaimCodePanel({
         </p>
       ) : null}
 
-      <InfoNote title="What the installer does with it">
+      <InfoNote headingLevel={3} title="What the installer does with it">
         <p>
           At the terminal, they enter this code and its serial number. The platform
           checks the pair, issues that unit its own device credential, and the code is
@@ -274,8 +274,13 @@ export function ProvisionTerminalDialog({
   return (
     <Dialog
       open={open}
-      title={`Provision a terminal at ${site.name}`}
-      description="Issues a one-time code for one terminal. The site's provisioning key is not involved and is never handed out for this."
+      title={`Pre-authorise a terminal at ${site.name}`}
+      // THE SENTENCE ABOUT THE SITE KEY IS LOAD-BEARING AND STAYS. It is the
+      // one thing this dialog has always had to say, and it has a test of its
+      // own: the console must never let the provisioning key look like the
+      // easier alternative to a claim code. What is added is where a customer
+      // should be instead — this is now the specialist path, not the default.
+      description="Issues a one-time code for one serial number. The site's provisioning key is not involved and is never handed out for this."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"
@@ -302,19 +307,23 @@ export function ProvisionTerminalDialog({
           onChange={(value) => form.setValue('expires_in_minutes', value)}
           onBlur={() => form.touch('expires_in_minutes')}
           disabled={form.submitting}
-          hint={`Minutes. The platform allows up to ${MAX_CLAIM_MINUTES} (24 hours) and will silently shorten anything longer. Keep it to the window somebody is actually on site — a code that lives for a week is a site key with extra steps.`}
+          hint={`Minutes, up to ${MAX_CLAIM_MINUTES} (24 hours). Keep it to the window somebody is actually on site — a code that lives for a week is a provisioning key with extra steps.`}
         />
 
-        <InfoNote title="One code, one terminal, one use">
+        {/*
+          ONE FACT, NOT FOUR. "Shown once", "works once" and "expires" were said
+          here and then said again in full on the panel that follows — which is
+          where they matter, because that is the screen somebody has to act on
+          before closing.
+
+          What is left is the only one that cannot wait: re-issuing strands
+          whoever is already holding a code, and that decision is made HERE,
+          before the button, not after.
+        */}
+        <InfoNote headingLevel={3} title="Re-issuing cancels any earlier code">
           <p>
-            The code is shown once on the next screen and cannot be read back — the
-            platform stores only a hash of it. It is consumed the moment it is
-            redeemed, and it expires whether or not it is used.
-          </p>
-          <p>
-            <strong>Issuing a second code for the same serial cancels the first.</strong>{' '}
-            If somebody is already holding one for this unit, re-issuing here will strand
-            them.
+            If somebody is already holding a code for this serial, issuing another one
+            stops theirs working — on site, with no warning to them.
           </p>
         </InfoNote>
 

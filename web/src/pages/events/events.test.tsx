@@ -7,6 +7,7 @@ import { setCsrfToken } from '../../api/csrf'
 import type { FieldEvent, Role } from '../../api/types'
 import { makeEvent, makeSession, makeSite, SITE_A } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
+import { expectNoDoorWording } from '../../test/vocabulary'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { EventsPage } from './EventsPage'
 
@@ -59,6 +60,25 @@ const EVENTS: FieldEvent[] = [
     person_name: undefined,
     subject_external_id: 'UNKNOWN-CARD-99',
   }),
+  /*
+    THE PLATFORM'S OWN ERROR, and the shape that broke the "Why" column.
+
+    `ROSTER_CAPACITY_EXCEEDED` is written by the platform rather than by a door:
+    it carries `decision: ERROR`, names no person, and sets NO reason at all. The
+    column reads `reason`, so this rendered an em dash -- the most serious thing
+    the platform emits arriving with less explanation than a routine refusal.
+  */
+  makeEvent({
+    id: 'e6',
+    event_type: 'ROSTER_CAPACITY_EXCEEDED',
+    decision: 'ERROR',
+    reason: undefined,
+    person_id: undefined,
+    person_name: undefined,
+    subject_external_id: undefined,
+    occurred_at: '2026-08-15T07:00:00Z',
+    recorded_at: '2026-08-15T07:00:00Z',
+  }),
   // Buffered offline and uploaded hours later, with a clock the terminal could
   // not vouch for.
   makeEvent({
@@ -103,7 +123,7 @@ beforeEach(() => setCsrfToken(null))
 // The table
 // ---------------------------------------------------------------------------
 
-describe('the door log', () => {
+describe('the event log', () => {
   it('shows who, where, what and why', async () => {
     signIn()
     renderEvents()
@@ -144,7 +164,7 @@ describe('the door log', () => {
     renderEvents()
 
     const row = (await screen.findByText('Yusuf Bello')).closest('tr') as HTMLElement
-    expect(within(row).getByText('Terminal clock unverified')).toBeInTheDocument()
+    expect(within(row).getByText('Time not confirmed')).toBeInTheDocument()
   })
 
   it('EXPLAINS the refusals on the page, grouped by reason', async () => {
@@ -173,10 +193,160 @@ describe('the door log', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Explaining an outcome
+// ---------------------------------------------------------------------------
+
+describe('why an event went the way it did', () => {
+  it('SHOWS THE MEANING ON THE PAGE, not in a tooltip', async () => {
+    /*
+      The meaning used to live in a `title` attribute, which is unreachable three
+      ways at once: no hover on a touch screen, no keyboard route to it, and
+      inconsistent screen-reader treatment. On a phone -- where somebody is most
+      likely to be standing next to the person who was just refused -- the
+      explanation did not exist.
+    */
+    signIn()
+    renderEvents()
+
+    const row = (await screen.findByText('Ngozi Eze')).closest('tr') as HTMLElement
+    expect(within(row).getByText('Outside the schedule')).toBeInTheDocument()
+    expect(
+      within(row).getByText(/schedule does not include this moment/i),
+    ).toBeInTheDocument()
+  })
+
+  it('no longer hides the explanation in a title attribute', async () => {
+    signIn()
+    renderEvents()
+
+    const row = (await screen.findByText('Ngozi Eze')).closest('tr') as HTMLElement
+    const why = within(row).getByText('Outside the schedule').closest('span')
+    expect(why?.closest('[title]')).toBeNull()
+  })
+
+  it('EXPLAINS AN EVENT THAT CARRIES NO REASON, which is how the platform reports its own errors', async () => {
+    // `ROSTER_CAPACITY_EXCEEDED` sets no reason, so a column reading `reason`
+    // alone had nothing to say about it.
+    signIn()
+    renderEvents()
+
+    // Scoped to the table: "Error" is also an option in the Outcome filter.
+    const table = await screen.findByRole('table')
+    const row = within(table).getByText('Too many people for this terminal').closest('tr') as HTMLElement
+
+    expect(within(row).getByText('Error')).toBeInTheDocument()
+    expect(within(row).getByText(/outnumber the records it can hold/i)).toBeInTheDocument()
+  })
+
+  it('CARRIES THE REMEDY ON THE ROW, because no summary covers an error', async () => {
+    // The denial summary groups REFUSALS, and this refused nobody — so it is not
+    // in there, and the row is the only place its remedy can appear.
+    signIn()
+    renderEvents()
+
+    const table = await screen.findByRole('table')
+    const row = within(table)
+      .getByText('Too many people for this terminal')
+      .closest('tr') as HTMLElement
+
+    expect(within(row).getByText(/What to do:/)).toBeInTheDocument()
+    expect(within(row).getByText(/Narrow who is permitted at this terminal/i)).toBeInTheDocument()
+  })
+
+  it('does NOT repeat a denial remedy on every row, which the summary already states', async () => {
+    // Forty rows of the same advice buries the rows.
+    signIn()
+    renderEvents()
+
+    const table = await screen.findByRole('table')
+    const row = within(table).getByText('Ngozi Eze').closest('tr') as HTMLElement
+    expect(within(row).queryByText(/What to do:/)).not.toBeInTheDocument()
+  })
+
+  it('says plainly that the roster error refused nobody', async () => {
+    // The distinction that stops it being read as a mass denial: nothing was
+    // decided about anybody, the terminal simply stopped being updated.
+    signIn()
+    renderEvents()
+
+    const table = await screen.findByRole('table')
+    expect(
+      within(table).getByText(/Nobody was refused by this event/i),
+    ).toBeInTheDocument()
+  })
+
+  it('offers the roster error in the event-type filter it belongs to', async () => {
+    // The Outcome filter has always offered "Error" while the type list omitted
+    // the only thing that produces one.
+    signIn()
+    renderEvents()
+
+    const types = await screen.findByLabelText(/Kind of event/)
+    expect(
+      within(types).getByRole('option', { name: 'Too many people for a terminal' }),
+    ).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Reaching a person or a terminal from a row
+// ---------------------------------------------------------------------------
+
+describe('the links out of a row', () => {
+  it('CARRY THE SHARED TABLE-LINK TREATMENT, which is where the touch-target floor lives', async () => {
+    /*
+      These were bare `<Link>`s, so they measured 243x20 and 260x20 at 390px --
+      under the 24px WCAG 2.2 (2.5.8, AA) minimum, on roughly forty rows a page,
+      and on the two columns somebody on a phone is most likely to tap.
+      `table__link` is the class that carries that floor for every other table.
+    */
+    signIn()
+    renderEvents()
+
+    const person = await screen.findByRole('link', { name: 'Ada Okonkwo' })
+    expect(person).toHaveClass('table__link')
+
+    const row = person.closest('tr') as HTMLElement
+    expect(within(row).getByRole('link', { name: 'North Gate' })).toHaveClass('table__link')
+  })
+
+  it('does not uppercase the customer\'s own site name', async () => {
+    // `audit__role` uppercases and letterspaces, which suits an enum value. A
+    // site name is a proper noun and was being rendered as though it were a code.
+    signIn()
+    renderEvents()
+
+    const table = await screen.findByRole('table')
+    const sites = within(table).getAllByText('Lagos Depot')
+    expect(sites.length).toBeGreaterThan(0)
+    for (const site of sites) {
+      expect(site).not.toHaveClass('audit__role')
+      expect(site).toHaveClass('event__site')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Filtering
 // ---------------------------------------------------------------------------
 
 describe('filtering', () => {
+  it('searches by the same field name the People screen heads its column with', async () => {
+    /*
+      ONE NAME FOR ONE FIELD, ACROSS SCREENS. This box said "Name or identifier"
+      while People headed the same value "Member ID" and its form labelled it
+      "Identifier" -- three spellings of one thing, and somebody who found a
+      person on one screen had no way to know they were searching the same
+      column on another. All four now read from `personVocabulary`.
+    */
+    signIn()
+    renderEvents()
+
+    await screen.findByText('Ada Okonkwo')
+    expect(screen.getByPlaceholderText('Name or ID number')).toBeInTheDocument()
+    expect(document.body.textContent ?? '').not.toMatch(/member id/i)
+  })
+
   it('FILTERS ON THE SERVER, not by narrowing the page', async () => {
     const user = userEvent.setup()
     signIn()
@@ -267,9 +437,24 @@ describe('the two trails are kept apart', () => {
     renderEvents()
 
     expect(
-      await screen.findByText('This is the door log, not the operator trail'),
+      await screen.findByText('This is the event log, not the operator trail'),
     ).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Activity' })).toHaveAttribute('href', '/activity')
+  })
+
+  /*
+    THIS PAGE NAMES ITSELF, and it used to name itself after a door. The note
+    below the heading called this "the door log" while the page it links to
+    called it the same thing from the other side, so a customer with turnstiles,
+    barriers or lockers met the word twice in two clicks.
+  */
+  it('names itself the event log rather than the door log', async () => {
+    signIn()
+    renderEvents()
+
+    await screen.findByText('This is the event log, not the operator trail')
+    await screen.findByText('Ada Okonkwo')
+    expectNoDoorWording('Events', document.body.textContent ?? '')
   })
 
   it('is readable by a VIEWER, unlike the audit trail', async () => {

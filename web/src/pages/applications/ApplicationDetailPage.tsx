@@ -3,21 +3,23 @@ import { Link, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import { MULTI_PURPOSE } from '../../api/types'
-import { readinessOf } from '../../applications/readiness'
-import { describeApplication, findApplicationBySlug } from '../../applications/registry'
+import {
+  describeApplication,
+  findApplicationBySlug,
+  UNKNOWN_DESCRIPTION,
+} from '../../applications/registry'
 import { can } from '../../auth/permissions'
-import { Badge } from '../../components/Badge'
-import { ConfirmDialog } from '../../components/ConfirmDialog'
+import { roleLabel } from '../../auth/roles'
 import { FormActions, FormError, TextField } from '../../components/Form'
 import { useNotifications } from '../../components/Notifications'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useApplications, useUpdateApplication } from '../../data/console'
 import { useSession } from '../../session/useSession'
-import { UNKNOWN_DESCRIPTION } from './ApplicationsPage'
+import { TurnOffFeatureDialog } from './TurnOffFeatureDialog'
 
 /**
- * One capability.
+ * One feature.
  *
  * RESOLVED FROM THE SERVER'S CATALOG, NOT FROM A ROUTE TABLE. The URL carries a
  * slug, which is matched against what the API reports as available — so a
@@ -61,11 +63,11 @@ export function ApplicationDetailPage() {
     setRawError(null)
   }, [settings, record?.updated_at])
 
-  if (query.isPending) return <LoadingState label="Loading application…" />
+  if (query.isPending) return <LoadingState label="Loading feature…" />
   if (query.isError) {
     return (
       <div className="page">
-        <PageHeader title="Application" breadcrumb={<Link to="/settings/applications">Applications</Link>} />
+        <PageHeader title="Feature" breadcrumb={<Link to="/settings/applications">Features</Link>} />
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
       </div>
     )
@@ -75,13 +77,13 @@ export function ApplicationDetailPage() {
     return (
       <div className="page">
         <PageHeader
-          title="Not a capability"
-          breadcrumb={<Link to="/settings/applications">Applications</Link>}
+          title="Not a feature"
+          breadcrumb={<Link to="/settings/applications">Features</Link>}
         />
         <InfoNote title="Nothing here">
           {slug === slugify(MULTI_PURPOSE)
-            ? 'Multi-purpose is a terminal operating mode, not a capability a company enables. Assign it to a terminal under Terminals.'
-            : 'This platform does not offer a capability by that name.'}
+            ? 'Multi-purpose is a terminal setting, not a feature a company turns on. Assign it to a terminal under Terminals.'
+            : 'This platform does not offer a feature by that name.'}
         </InfoNote>
       </div>
     )
@@ -90,7 +92,10 @@ export function ApplicationDetailPage() {
   const definition = describeApplication(code)
   const isEnabled = query.data.enabled.includes(code)
   const recognised = definition.description !== UNKNOWN_DESCRIPTION
-  const readiness = readinessOf(code, query.data)
+  // What is STORED, which is a different question from whether a row exists --
+  // see the note where the old "Configured" card used to be.
+  const settingsKeyCount = settings ? Object.keys(settings).length : 0
+  const hasStoredSettings = settingsKeyCount > 0
 
   async function setEnabled(next: boolean) {
     try {
@@ -133,7 +138,7 @@ export function ApplicationDetailPage() {
     <div className="page">
       <PageHeader
         title={definition.label}
-        breadcrumb={<Link to="/settings/applications">Applications</Link>}
+        breadcrumb={<Link to="/settings/applications">Features</Link>}
         lead={definition.description}
         actions={
           mayConfigure ? (
@@ -143,7 +148,7 @@ export function ApplicationDetailPage() {
                 className="button"
                 onClick={() => setConfirmingDisable(true)}
               >
-                Disable
+                Turn off
               </button>
             ) : (
               <button
@@ -152,7 +157,7 @@ export function ApplicationDetailPage() {
                 disabled={update.isPending}
                 onClick={() => void setEnabled(true)}
               >
-                Enable
+                Turn on
               </button>
             )
           ) : null
@@ -161,139 +166,108 @@ export function ApplicationDetailPage() {
 
       {!recognised ? (
         <InfoNote tone="warning" title="Newer than this console">
-          The platform offers this capability but this version of the console has no
-          description for it. You can still enable and configure it; the label above
-          is derived from its code.
+          The platform offers this feature but this version of the console has no
+          description for it. You can still turn it on and configure it; the name
+          above is derived from the platform's own.
         </InfoNote>
       ) : null}
 
       {/*
-        FOUR STATES, SHOWN SEPARATELY. Collapsing them into one "status" is how a
-        configuration screen becomes a false claim: an owner who enables a
-        capability, stores settings for it and assigns a terminal has done three
-        real things and still has a platform that does nothing with any of them.
+        THE STATUS CARDS AND THE RELATIONSHIPS PANEL ARE GONE, and each for its
+        own reason rather than a general wish for less.
+
+        "AVAILABLE: YES — offered by this platform" appeared on a page the reader
+        could only have reached BECAUSE it is available. The only interesting
+        value of that card was "No", which is already covered: a feature the
+        platform does not offer cannot be resolved from the catalogue and lands
+        on the "not a feature" page instead.
+
+        "TURNED ON: YES" was the third statement of the same fact on one screen —
+        the header button reads "Turn off", the list carries an On badge, and
+        this card said it again.
+
+        "CONFIGURED: YES" WAS ACTIVELY MISLEADING. `readinessOf` defines
+        configured as "a settings row exists", not "has settings" — deliberately,
+        and correctly for the model. But the card rendered "Configured — Yes,
+        changed 8 months ago" directly above a settings object containing `{}`.
+        Two statements on one screen that contradict each other in plain reading.
+        What is true and useful — whether anything is stored, and when it last
+        changed — now sits with the settings themselves, where it describes what
+        the reader is looking at.
+
+        "DEPENDENCIES AND CONFLICTS" was a heading, a border and a sentence
+        explaining that the platform does not model the concept. Nothing is lost
+        by not raising it.
       */}
-      <section className="cards" aria-label="Readiness">
-        <article className="card">
-          <h2 className="card__title">Available</h2>
-          <p className="card__value">
-            {readiness.available ? (
-              <Badge tone="positive">Yes</Badge>
-            ) : (
-              <Badge tone="warning">No</Badge>
-            )}
-          </p>
-          <p className="card__detail">offered by this platform</p>
-        </article>
-
-        <article className="card">
-          <h2 className="card__title">Enabled</h2>
-          <p className="card__value">
-            {isEnabled ? <Badge tone="positive">Yes</Badge> : <Badge>No</Badge>}
-          </p>
-          <p className="card__detail">for {session?.company.name}</p>
-        </article>
-
-        <article className="card">
-          <h2 className="card__title">Configured</h2>
-          <p className="card__value">
-            {readiness.configured ? <Badge tone="positive">Yes</Badge> : <Badge>No</Badge>}
-          </p>
-          <p className="card__detail">
-            {record ? (
-              <>
-                changed <Timestamp value={record.updated_at} relative />
-              </>
-            ) : (
-              'no settings stored'
-            )}
-          </p>
-        </article>
-
-        <article className="card">
-          <h2 className="card__title">Operational</h2>
-          <p className="card__value">
-            {readiness.operational ? (
-              <Badge tone="positive">Yes</Badge>
-            ) : readiness.implementation === 'PARTIAL' ? (
-              <Badge tone="warning">Partly</Badge>
-            ) : (
-              <Badge tone="warning">No</Badge>
-            )}
-          </p>
-          <p className="card__detail">does the platform actually do this</p>
-        </article>
-      </section>
-
-      {!readiness.operational ? (
-        <InfoNote
-          tone="warning"
-          title={
-            readiness.implementation === 'PARTIAL'
-              ? 'This capability is only partly built'
-              : 'Nothing acts on this capability yet'
-          }
-        >
-          <p>{readiness.gap}</p>
-          <p>
-            Enabling it records that your company intends to use it, and lets a
-            terminal be assigned to it. Until the platform carries out the
-            workflow, that is the whole of what it does.
-          </p>
-        </InfoNote>
-      ) : null}
 
       <section className="panel" aria-labelledby="application-identity-heading">
         <div className="panel__header">
           <h2 className="panel__title" id="application-identity-heading">
-            How terminals refer to it
+            Who can use it
           </h2>
         </div>
-        <dl className="detail-list">
-          <div className="detail-list__row">
-            <dt>Platform code</dt>
-            <dd>
-              <code className="mono">{code}</code>
-            </dd>
-          </div>
-          <div className="detail-list__row">
-            <dt>Minimum role to open its screens</dt>
-            <dd>{definition.minimumRole}</dd>
-          </div>
-        </dl>
-      </section>
+        {/*
+          `roleLabel`, the same function every other role badge in the console
+          uses. This printed the stored enum — "VIEWER" — while the operators
+          screen called the same value "Viewer".
 
-      {/*
-        Dependencies and conflicts are not modelled anywhere in the platform --
-        no capability declares that it needs another, or that it cannot run
-        alongside one. Saying so is more useful than an empty "Dependencies:"
-        heading that implies the answer is "none".
-      */}
-      <section className="panel" aria-labelledby="application-relationships-heading">
-        <div className="panel__header">
-          <h2 className="panel__title" id="application-relationships-heading">
-            Dependencies and conflicts
-          </h2>
-        </div>
+          NO RAW PLATFORM CODE. This panel used to print `ACCESS_CONTROL` under
+          the heading "Platform code": an internal identifier for the device
+          protocol, which an operator does nothing with.
+        */}
         <p className="field__hint">
-          The platform does not currently record relationships between
-          capabilities. Each is enabled independently, and none is known to
-          require or exclude another.
+          Anyone with the <strong>{roleLabel(definition.minimumRole)}</strong> role or
+          above can work with {definition.label} once it is turned on.
         </p>
       </section>
 
       {/* --- settings ------------------------------------------------------- */}
+      {/*
+        SECONDARY, NOT REMOVED.
+
+        No feature defines any settings keys, so for almost every customer this
+        is a large empty text box asking for JSON — and it was the biggest thing
+        on the page, under a sentence explaining our storage model to somebody
+        who came to turn a feature on.
+
+        THE CAPABILITY IS UNCHANGED. The API accepts a settings object, a
+        customer may already have one stored, and an integrator may need to put
+        one there. It is one press away and says what it holds, rather than
+        leading.
+
+        The disclosure OPENS BY ITSELF when something is stored: a customer who
+        has settings should not have to discover them behind a summary that gives
+        no sign anything is there.
+      */}
       <section className="panel" aria-labelledby="application-settings-heading">
         <div className="panel__header">
           <h2 className="panel__title" id="application-settings-heading">
-            Settings
+            Advanced settings
           </h2>
           <p className="field__hint">
-            An open JSON object. The platform defines no keys for any capability
-            yet, so there are no guided controls to offer and nothing currently
-            reads what is stored here.
+            {/*
+              THE HONEST REPLACEMENT FOR THE "Configured: Yes" CARD: what is
+              actually stored, rather than whether a row exists.
+            */}
+            {hasStoredSettings ? (
+              <>
+                {settingsKeyCount} setting{settingsKeyCount === 1 ? '' : 's'} stored for
+                this feature
+                {record ? (
+                  <>
+                    , last changed <Timestamp value={record.updated_at} relative />
+                  </>
+                ) : null}
+                .
+              </>
+            ) : (
+              <>Nothing is stored for this feature, which is the usual case.</>
+            )}
           </p>
         </div>
+
+        <details className="technical" open={hasStoredSettings}>
+          <summary>Stored configuration</summary>
 
         {mayConfigure ? (
           <div className="form">
@@ -342,28 +316,13 @@ export function ApplicationDetailPage() {
         ) : (
           <pre className="code-block">{JSON.stringify(settings ?? {}, null, 2)}</pre>
         )}
+        </details>
       </section>
 
       {confirmingDisable ? (
-        <ConfirmDialog
+        <TurnOffFeatureDialog
           open
-          title={`Disable ${definition.label}?`}
-          consequence={
-            <>
-              It stops being available company-wide, and any terminal assigned to it
-              will <strong>resolve to nothing</strong> until it is re-enabled or the
-              terminal is reassigned.
-            </>
-          }
-          detail={
-            <>
-              Terminal assignments are <strong>kept, not rewritten</strong> — a
-              terminal pointed at this capability stays pointed at it and starts
-              working again if you switch it back on. Its stored settings are kept
-              too.
-            </>
-          }
-          confirmLabel="Disable capability"
+          label={definition.label}
           onConfirm={() => setEnabled(false)}
           onClose={() => setConfirmingDisable(false)}
         />

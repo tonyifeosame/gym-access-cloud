@@ -389,9 +389,27 @@ type NewCompany struct {
 // to enforce a format the platform invented is less useful than deriving
 // "acme-logistics" from it.
 func CreateCompany(in NewCompany) (*models.PlatformCompany, error) {
+	company, _, err := createCompany(DB, in)
+	return company, err
+}
+
+// createCompany inserts a tenant against a connection OR a transaction, and
+// also returns its INTERNAL id.
+//
+// Two callers, and each needs something the other does not. The platform route
+// wants the response body and must never see an internal id -- see the note on
+// CompanyIDByPublicID for why that matters. Self-service signup creates a
+// company, a site and an owner in ONE transaction and needs the id to hang the
+// other two off, so it cannot go through the exported wrapper.
+//
+// Kept as one function rather than two so the rules that make a new tenant
+// correct -- the slug derivation, the UTC default, deny-by-default person
+// access -- cannot drift between the surface a vendor onboards through and the
+// one a customer signs up through.
+func createCompany(q queryRower, in NewCompany) (*models.PlatformCompany, int64, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return nil, ErrCompanyNameRequired
+		return nil, 0, ErrCompanyNameRequired
 	}
 
 	slug := models.NormalizeSlug(in.Slug)
@@ -399,7 +417,7 @@ func CreateCompany(in NewCompany) (*models.PlatformCompany, error) {
 		slug = models.NormalizeSlug(name)
 	}
 	if err := models.ValidateSlug(slug); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	timezone := strings.TrimSpace(in.Timezone)
@@ -409,8 +427,11 @@ func CreateCompany(in NewCompany) (*models.PlatformCompany, error) {
 		timezone = "UTC"
 	}
 
-	var company models.PlatformCompany
-	err := DB.QueryRow(`
+	var (
+		company  models.PlatformCompany
+		internal int64
+	)
+	err := q.QueryRow(`
 		-- default_person_access is NONE for a company created here, which is NOT
 		-- the column's default (018_default_person_access.sql).
 		--
@@ -423,18 +444,26 @@ func CreateCompany(in NewCompany) (*models.PlatformCompany, error) {
 		INSERT INTO companies (name, slug, contact_email, timezone, active,
 		                       default_person_access)
 		VALUES ($1, $2, NULLIF($3, ''), $4, TRUE, 'NONE')
-		RETURNING public_id, name, slug, COALESCE(contact_email, ''), timezone,
+		-- DO NOTHING rather than letting the unique index raise.
+		--
+		-- Identical behaviour for a caller outside a transaction: no row comes
+		-- back and the taken slug is reported below either way. Inside one it is
+		-- the difference between a retry and a dead transaction -- a constraint
+		-- violation aborts the surrounding transaction, so signup could not try
+		-- a second candidate slug after the first collided.
+		ON CONFLICT (slug) WHERE deleted_at IS NULL DO NOTHING
+		RETURNING id, public_id, name, slug, COALESCE(contact_email, ''), timezone,
 		          active, created_at`,
 		name, slug, strings.TrimSpace(in.ContactEmail), timezone).
-		Scan(&company.ID, &company.Name, &company.Slug, &company.ContactEmail,
+		Scan(&internal, &company.ID, &company.Name, &company.Slug, &company.ContactEmail,
 			&company.Timezone, &company.Active, &company.CreatedAt)
-	if IsUniqueViolation(err) {
-		return nil, ErrCompanySlugTaken
+	if errors.Is(err, sql.ErrNoRows) || IsUniqueViolation(err) {
+		return nil, 0, ErrCompanySlugTaken
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return &company, nil
+	return &company, internal, nil
 }
 
 // CompanyUpdate is the input to UpdateCompany. Every field is optional; only

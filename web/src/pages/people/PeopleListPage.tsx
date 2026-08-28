@@ -7,9 +7,10 @@ import { ActiveBadge, BiometricBadge } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
 import { Pagination, SearchInput } from '../../components/Pagination'
 import { PageHeader, RefreshingIndicator } from '../../components/states'
-import { Timestamp } from '../../components/Timestamp'
 import { usePeople } from '../../data/console'
 import { useSession } from '../../session/useSession'
+import { describeCategory } from './categories'
+import { PERSON_ID_LABEL } from './personVocabulary'
 import { PersonFormDialog } from './PersonFormDialog'
 
 /** Matches the API's own default, so the first page asks for what it would get. */
@@ -67,14 +68,21 @@ export function PeopleListPage() {
     },
     {
       id: 'external_id',
-      header: 'Identifier',
+      // ONE NAME FOR THIS FIELD, shared with the person form, the Events search
+      // and the access-evaluation dialog. See personVocabulary for why it is
+      // neither "Identifier" (the schema's word) nor "Member ID" (a gym's).
+      header: PERSON_ID_LABEL,
       render: (person) => <code className="mono">{person.external_id}</code>,
     },
     {
       id: 'type',
       header: 'Person type',
+      // SECONDARY: dropped from the card on a phone. Name, ID number, status
+      // and enrolment are what somebody scans a roster for; the classification
+      // is detail the person's own page carries.
       secondary: true,
-      render: (person) => person.category || <span className="muted">—</span>,
+      render: (person) =>
+        describeCategory(person.category) || <span className="muted">—</span>,
     },
     {
       id: 'status',
@@ -87,12 +95,12 @@ export function PeopleListPage() {
       // A BOOLEAN AND NOTHING MORE. No template, no locator, no sensor detail.
       render: (person) => <BiometricBadge enrolled={person.biometric_enrolled} />,
     },
-    {
-      id: 'updated',
-      header: 'Updated',
-      secondary: true,
-      render: (person) => <Timestamp value={person.updated_at} relative />,
-    },
+    /*
+      NO "UPDATED" COLUMN. It was a sixth of the table's width spent on a
+      timestamp nobody sorts by, filters on or acts on, and on a phone it was a
+      sixth line on every card. The value is still on the person's own page,
+      which is where somebody asking "when did this change" is going anyway.
+    */
   ]
 
   return (
@@ -112,7 +120,7 @@ export function PeopleListPage() {
       <div className="toolbar">
         <SearchInput
           label="Search people"
-          placeholder="Name or identifier"
+          placeholder={`Name or ${PERSON_ID_LABEL}`}
           value={search}
           onChange={changeSearch}
           busy={query.isFetching && !query.isPending}
@@ -135,7 +143,7 @@ export function PeopleListPage() {
         emptyTitle={searching ? 'Nobody matches that search' : 'No people yet'}
         emptyDescription={
           searching
-            ? 'Search matches a name or an identifier, anywhere in the value.'
+            ? `Search matches a name or an ${PERSON_ID_LABEL}, anywhere in the value.`
             : mayManage
               ? 'Add the people this platform should recognise. What that means depends on what your company uses AccessLink for — employees, students, contractors, visitors.'
               : 'Nobody has been added to your company yet.'

@@ -11,12 +11,16 @@ import type {
   Schedule,
   ScheduleWindow,
   OperatorAccount,
+  PendingTerminal,
   Person,
   Session,
   Site,
   Terminal,
   TerminalDetail,
+  WifiRecoveryState,
+  WifiRecoveryStatus,
 } from '../api/types'
+import { standingOf } from '../pages/access/accessVocabulary'
 import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
   makeAuditRecord,
@@ -70,10 +74,30 @@ interface ServerState {
   permissions: Permission[]
   schedules: Schedule[]
   events: FieldEvent[]
+  /** Terminals that have announced themselves and been adopted. */
+  pendingTerminals: PendingTerminal[]
+  /**
+   * Addresses that already belong to an account, for the signup conflict. Email
+   * is unique GLOBALLY in the schema rather than per company, so a second
+   * company cannot be registered against an address already in use.
+   */
+  registeredEmails: string[]
   /** The platform administrator's session — a DIFFERENT identity from `session`. */
   platformSession: PlatformSession | null
   platformLoginStatus: number
   companies: PlatformCompany[]
+  /**
+   * How many OWNER-or-ADMIN accounts a company has, for the recovery route.
+   *
+   * SEPARATE FROM `operator_count`, which counts every account including
+   * managers and viewers. The server's recovery predicate is about
+   * administrators specifically -- a viewer is not somebody who can issue a
+   * reset -- and a mock that reused the wrong count would let the console ship
+   * a rule that does not match the one it will meet.
+   *
+   * Keyed by company id; absent means one, which is the company signup creates.
+   */
+  administratorCount: Record<string, number>
   /**
    * What each redemption token is worth. Absent means unknown, which is what an
    * invented token gets — so a test does not have to register a failure to
@@ -111,9 +135,12 @@ function initialState(): ServerState {
     permissions: [],
     schedules: [],
     events: [],
+    pendingTerminals: [],
+    registeredEmails: [],
     platformSession: null,
     platformLoginStatus: 200,
     companies: [],
+    administratorCount: {},
     redeemable: {},
     failNext: {},
     requests: [],
@@ -128,6 +155,8 @@ export function resetServerState(session: Session | null = null): void {
   // Held outside `state` because no response carries it, but still cleared
   // between tests or a superseded-code count leaks from one test into the next.
   outstandingClaims.clear()
+  announceable.clear()
+  wifiRecovery.clear()
 }
 
 /** Seeds the tenant's data. Call after resetServerState. */
@@ -145,6 +174,27 @@ function takeFailure(key: string): number | null {
   if (status === undefined) return null
   delete state.failNext[key]
   return status
+}
+
+/**
+ * A bounded integer query parameter, clamped the way the API clamps it.
+ *
+ * MIRRORS `boundedQueryInt` IN handlers/console.go, including the parts that
+ * look like edge cases and are not: an absent OR unparseable value falls back
+ * to the default rather than failing the request, and an out-of-range one is
+ * CLAMPED rather than rejected. A mock that rejected what the server clamps
+ * would fail a client the real API serves happily.
+ *
+ * `max` of 0 means unbounded, as it does there -- that is how `offset` is
+ * declared.
+ */
+function boundedParam(raw: string | null, fallback: number, min: number, max: number): number {
+  if (raw === null || raw === '') return fallback
+  const value = Number.parseInt(raw, 10)
+  if (Number.isNaN(value)) return fallback
+  if (value < min) return min
+  if (max > 0 && value > max) return max
+  return value
 }
 
 function record(request: Request): void {
@@ -262,6 +312,17 @@ function guardTerminal(
   return null
 }
 
+/** A day after the newest entry already in the catalogue. See the note below. */
+function nextPublishDate(): string {
+  const newest = state.firmware
+    .map((entry) => entry.published_at ?? entry.created_at)
+    .sort()
+    .pop()
+  const base = newest ? new Date(newest) : new Date('2026-01-01T00:00:00Z')
+  base.setUTCDate(base.getUTCDate() + 1)
+  return base.toISOString()
+}
+
 export const handlers = [
   // --- auth ---------------------------------------------------------------
 
@@ -292,6 +353,65 @@ export const handlers = [
 
     state.session = state.session ?? makeSession()
     return json(state.session)
+  }),
+
+  /**
+   * Self-service signup. UNAUTHENTICATED, and it ENDS IN A SESSION.
+   *
+   * Modelled on what the server actually does rather than on what the form
+   * sends: the four fields are validated, the slug is DERIVED from the company
+   * name, an address already in use is a 409, and the success body is the same
+   * session shape login returns. A mock that answered with anything else would
+   * let a console ship that sent the new customer back to a login form after
+   * they had already been signed in.
+   *
+   * NOTHING HERE CARRIES A SITE KEY, deliberately. The server creates the
+   * company's first site in the same transaction and keeps only the hash of its
+   * provisioning credential — so there is no plaintext for this response to
+   * contain, and a mock that invented one would let a console ship that
+   * displayed it.
+   */
+  http.post('*/api/v1/auth/register', async ({ request }) => {
+    record(request)
+
+    const failure = takeFailure('register')
+    if (failure) return json({ error: 'Failed to create the account' }, failure)
+
+    const body = (await request.json()) as {
+      full_name?: string
+      company_name?: string
+      email?: string
+      password?: string
+    }
+
+    const fullName = (body.full_name ?? '').trim()
+    const companyName = (body.company_name ?? '').trim()
+    const email = (body.email ?? '').trim().toLowerCase()
+
+    if (!fullName) return json({ error: 'your name is required' }, 400)
+    if (!companyName) return json({ error: 'a company name is required' }, 400)
+    if (!email.includes('@')) return json({ error: 'email address is not valid' }, 400)
+    if ((body.password ?? '').length < 12) {
+      return json({ error: 'password must be at least 12 characters' }, 400)
+    }
+    if (state.registeredEmails.includes(email)) {
+      return json({ error: 'That email address is already in use' }, 409)
+    }
+
+    state.registeredEmails = [...state.registeredEmails, email]
+
+    const session = makeSession({
+      operator: { id: 'operator-new', email, full_name: fullName, role: 'OWNER' },
+      company: { id: 'company-new', name: companyName, slug: normalizeSlug(companyName) },
+      role: 'OWNER',
+      // Unscoped, as an OWNER always is, and with NO capability enabled — which
+      // is the state every new company genuinely starts in.
+      sites: [],
+      all_sites: true,
+      applications: [],
+    })
+    state.session = session
+    return json(session, 201)
   }),
 
   http.post('*/api/v1/auth/logout', ({ request }) => {
@@ -541,6 +661,58 @@ export const handlers = [
     return json(response, 201)
   }),
 
+  /*
+    Recovery of last resort, for a tenant whose administration is locked out.
+
+    THE PREDICATE IS REPRODUCED HERE RATHER THAN ASSUMED. The server refuses
+    unless the target is the company's ONLY owner-or-administrator, and that
+    refusal is the whole safety argument for the route existing at all -- so the
+    mock refuses too, and a console that shipped offering this for a healthy
+    multi-admin tenant would fail here rather than in production.
+  */
+  http.post('*/api/v1/platform/companies/:companyId/recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardPlatform(request)
+    if (refused) return refused
+
+    const companyId = String(params.companyId)
+    const company = state.companies.find((entry) => entry.id === companyId)
+    if (!company) return json({ error: 'Company not found' }, 404)
+
+    const administrators = state.administratorCount[companyId] ?? 1
+    if (administrators > 1) {
+      return json(
+        {
+          error:
+            'That company has more than one administrator, so one of them can ' +
+            'issue the reset from their own console. This route is only for a ' +
+            'company whose single administrator is locked out.',
+        },
+        409,
+      )
+    }
+    if (administrators < 1) {
+      return json(
+        { error: 'That company has no active owner or administrator to recover.' },
+        409,
+      )
+    }
+
+    return json(
+      {
+        operator: {
+          id: 'operator-owner-1',
+          email: company.contact_email || 'owner@example.com',
+          full_name: 'Company Owner',
+          role: 'OWNER',
+        },
+        reset: makeCredentialToken({ purpose: 'RESET' }),
+        delivery: DELIVERY_NOTICE,
+      },
+      201,
+    )
+  }),
+
   // --- company ------------------------------------------------------------
 
   http.get('*/api/v1/console/company', ({ request }) => {
@@ -557,8 +729,54 @@ export const handlers = [
     })
   }),
 
+  /*
+    What this company still has to set up.
+
+    THE COUNT IS DERIVED FROM THE SAME SEEDED STATE the person pages read, on the
+    same rule the server uses: an ACTIVE person with no rule IN FORCE. Computing
+    it here rather than letting a test set a number means a test cannot seed a
+    roster and a contradictory count -- the overview and the person page are
+    drawn from one source, which is the property the real aggregate exists to
+    guarantee.
+
+    IN FORCE IS `standingOf`, THE CONSOLE'S OWN GRADING, imported rather than
+    reimplemented. The server counts a rule that is active and inside its
+    validity window (database/console_onboarding.go); the person's Access panel
+    badges anything else NOT_YET, EXPIRED or INACTIVE. A mock that applied a
+    third reading of "has access" would let the suite pass while the two real
+    surfaces disagreed, which is the exact failure this figure exists to prevent.
+  */
+  http.get('*/api/v1/console/onboarding', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const failure = takeFailure('onboarding')
+    if (failure) return json({ error: 'Failed to retrieve setup state' }, failure)
+
+    const withAccess = new Set(
+      state.permissions
+        .filter((permission) => standingOf(permission) === 'IN_FORCE')
+        .map((permission) => permission.person_id),
+    )
+    const withoutAccess = state.people.filter(
+      (person) => person.active && !withAccess.has(person.external_id),
+    ).length
+
+    return json({ people_without_access: withoutAccess })
+  }),
+
   // --- sites --------------------------------------------------------------
 
+  /*
+    SEARCHED HERE, AS THE API SEARCHES IT.
+
+    A mock that ignored `q` would answer every request identically, so a test
+    that typed into the search box and asserted on the result would pass whether
+    or not the console sent the parameter at all — and would keep passing if the
+    server-side predicate were removed. The scope filter is applied FIRST and
+    unconditionally, mirroring the single statement the store uses: a term
+    narrows within a grant and can never widen it.
+  */
   http.get('*/api/v1/console/sites', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
@@ -567,7 +785,17 @@ export const handlers = [
     if (failure) return json({ error: 'Failed to retrieve sites' }, failure)
 
     const scope = reachableSiteIds()
-    const sites = scope ? state.sites.filter((site) => scope.includes(site.id)) : state.sites
+    const reachable = scope ? state.sites.filter((site) => scope.includes(site.id)) : state.sites
+
+    const term = (new URL(request.url).searchParams.get('q') ?? '').trim().toLowerCase()
+    const sites = term
+      ? reachable.filter(
+          (site) =>
+            site.name.toLowerCase().includes(term) ||
+            (site.address ?? '').toLowerCase().includes(term),
+        )
+      : reachable
+
     return json({ count: sites.length, sites })
   }),
 
@@ -641,13 +869,23 @@ export const handlers = [
 
     // A key shaped exactly as the server issues one: ats_ + 64 hex.
     const key = `ats_${'ab12cd34'.repeat(8)}`
+    /*
+      THE STORED SITE CARRIES NO PREFIX, because `models.ConsoleSite` has no such
+      field and `consoleSiteColumns` selects none. This mock used to attach one,
+      which made a permanently-dead column on the sites list and a permanently
+      "Not reported" card on the site page look populated in every test and every
+      dev session. Both surfaces have been removed; this stays honest so nothing
+      like them can be built against a fixture the API will not supply.
+
+      The prefix is still returned ON THE CREDENTIAL, which is where the real
+      response carries it and where the one-time panel reads it.
+    */
     const site = makeSite({
       id: `site-${state.sites.length + 1}`,
       name,
       address: body.address,
       timezone: (body.timezone ?? '').trim() || 'UTC',
       terminal_count: 0,
-      api_key_prefix: key.slice(0, 12),
     })
     state.sites = [...state.sites, site]
 
@@ -843,9 +1081,8 @@ export const handlers = [
     if (failure) return json({ error: 'Failed to rotate the site key' }, failure)
 
     const key = `ats_${'ff99ee88'.repeat(8)}`
-    state.sites = state.sites.map((site) =>
-      site.id === siteId ? { ...site, api_key_prefix: key.slice(0, 12) } : site,
-    )
+    // Nothing is written back onto the stored site: a rotation changes no field
+    // any read endpoint returns. See the note on site creation above.
 
     // Terminals with no device credential of their own still depend on the
     // site key; the server reports them and so does this.
@@ -1065,6 +1302,122 @@ export const handlers = [
     })
   }),
 
+  // --- Change Wi-Fi ---------------------------------------------------------
+  //
+  // MODELLED AS THE REAL COMMAND IS, which for this feature is the whole value
+  // of the mock: a POST does not change any Wi-Fi, it queues something a
+  // terminal may or may not collect. So the handler tracks a state per serial
+  // and the console has to read it back — a mock that answered "done" to the
+  // POST would let a dialog ship that claimed a door had changed network on the
+  // strength of its own request.
+  //
+  // The refusals carry `code`, because the console branches on the code and not
+  // on the message. An offline terminal is refused rather than queued, exactly
+  // as the API does: a command that arrived after the customer had recovered the
+  // unit by hand would wipe the network they had just joined it to.
+
+  http.post('*/api/v1/console/terminals/:serial/wifi-recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const failure = takeFailure('terminal-wifi-recovery')
+    if (failure) return json({ error: 'Failed to queue the Wi-Fi change' }, failure)
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+
+    if (!terminal.active || terminal.status === 'DISABLED') {
+      return json(
+        {
+          error: 'This terminal is disabled, so it will not collect commands. Re-enable it first.',
+          code: 'TERMINAL_DISABLED',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+    // BEFORE THE OFFLINE CHECK, exactly as the API orders them. A terminal that
+    // also cannot carry the command out must not be told "offline" -- that
+    // sends somebody to the door, gets the unit back online, and leaves them
+    // where they started.
+    //
+    // An ABSENT list refuses on the same terms as an empty one. It is the whole
+    // fleet in the field today, and treating silence as consent is what
+    // produced a console reporting that a terminal had confirmed a command it
+    // never understood.
+    if (!(terminal.capabilities ?? []).includes('wifi_recovery')) {
+      return json(
+        {
+          error:
+            'This terminal has not reported that it can change Wi-Fi remotely, so nothing was sent.' +
+            (terminal.capabilities
+              ? ' This terminal reported what it can do, and changing Wi-Fi remotely is not among it.'
+              : ' This terminal has never reported what it can do, so the platform cannot tell whether it would carry this out.'),
+          code: 'TERMINAL_CANNOT_CHANGE_WIFI',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+
+    if (terminal.status !== 'ONLINE' && terminal.status !== 'UPDATING' && terminal.status !== 'ERROR') {
+      return json(
+        {
+          error: 'This terminal is offline and cannot be sent a command.',
+          code: 'TERMINAL_OFFLINE',
+          serial_number: serial,
+          terminal_status: terminal.status,
+        },
+        409,
+      )
+    }
+
+    // IDEMPOTENT, like the API: a command already waiting is returned rather
+    // than a second one queued.
+    const waiting = wifiRecovery.get(serial)
+    if (waiting && (waiting.state === 'QUEUED' || waiting.state === 'DELIVERED')) {
+      const repeat: WifiRecoveryStatus = { ...waiting, already_queued: true }
+      wifiRecovery.set(serial, repeat)
+      return json(repeat, 202)
+    }
+
+    const queued: WifiRecoveryStatus = {
+      serial_number: serial,
+      state: 'QUEUED',
+      request_id: `wifi-job-${wifiRecovery.size + 1}`,
+      terminal_status: terminal.status,
+      online: terminal.status === 'ONLINE',
+      queued_at: '2026-08-18T09:00:00Z',
+      expires_at: '2026-08-18T09:15:00Z',
+      last_heartbeat_at: terminal.last_heartbeat_at,
+    }
+    wifiRecovery.set(serial, queued)
+    return json(queued, 202)
+  }),
+
+  http.get('*/api/v1/console/terminals/:serial/wifi-recovery', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+
+    const serial = String(params.serial)
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+
+    const command = wifiRecovery.get(serial)
+    if (command) return json(command)
+
+    return json({
+      serial_number: serial,
+      state: 'NONE',
+      terminal_status: terminal.status,
+      online: terminal.status === 'ONLINE',
+      last_heartbeat_at: terminal.last_heartbeat_at,
+    } satisfies WifiRecoveryStatus)
+  }),
+
   http.delete('*/api/v1/console/terminals/:serial', ({ request, params }) => {
     record(request)
     const refused = guardTerminal(request, String(params.serial), 'ADMIN')
@@ -1099,7 +1452,216 @@ export const handlers = [
     if (url.searchParams.get('outdated') === 'true') {
       terminals = terminals.filter((terminal) => terminal.firmware_outdated)
     }
-    return json({ count: terminals.length, terminals })
+
+    /*
+      PAGED AND SEARCHED HERE, AS THE API DOES IT (D2).
+
+      This handler used to return the whole fleet in one response whatever was
+      asked of it, which is what the endpoint did before D2. That made the mock
+      INCAPABLE OF FAILING the way the real API now can: a console that read one
+      page of fifty and presented it as the fleet passed every test here and
+      under-counted against a real deployment. The default limit is the point --
+      a client that sends no `limit` gets fifty rows and a `has_more` telling it
+      so, exactly as it would in production.
+
+      `q` matches serial, terminal name and site name, as the store does.
+    */
+    const search = (url.searchParams.get('q') ?? '').trim().toLowerCase()
+    if (search) {
+      terminals = terminals.filter(
+        (terminal) =>
+          terminal.serial_number.toLowerCase().includes(search) ||
+          terminal.device_name.toLowerCase().includes(search) ||
+          terminal.site_name.toLowerCase().includes(search),
+      )
+    }
+
+    const limit = boundedParam(url.searchParams.get('limit'), 50, 1, 200)
+    const offset = boundedParam(url.searchParams.get('offset'), 0, 0, 0)
+    const page = terminals.slice(offset, offset + limit)
+
+    return json({
+      count: page.length,
+      total: terminals.length,
+      limit,
+      offset,
+      has_more: offset + page.length < terminals.length,
+      terminals: page,
+    })
+  }),
+
+  // --- adding a terminal: announce and approve -----------------------------
+  //
+  // MODELLED ON THE SERVER'S OWN RULES, not on what the screens expect. The
+  // three things reproduced here are the three a screen can get wrong:
+  //
+  //   - the uniform 404 for an unknown, expired or already-adopted code, so a
+  //     test cannot come to depend on distinguishing them
+  //   - the 409 ownership refusals, which are what the danger panels render
+  //   - approval MINTING NOTHING: the pending row moves to APPROVED and no
+  //     terminal appears in the fleet, because the real terminal collects its
+  //     credential afterwards
+
+  http.post('*/api/v1/console/terminal-announcements/adopt', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('adopt-terminal')
+    if (failure) return json({ error: 'Failed to add the terminal' }, failure)
+
+    const body = (await request.json()) as { pairing_code?: string }
+    const code = (body.pairing_code ?? '').trim().toUpperCase()
+
+    const announced = announceable.get(code)
+    if (!announced) {
+      return json(
+        {
+          error:
+            'That code was not recognised. Codes expire after 15 minutes — check the terminal’s screen for the current one.',
+          code: 'PAIRING_CODE_REFUSED',
+        },
+        404,
+      )
+    }
+
+    // The two conflicts, refused BEFORE anything is written — a hijack attempt
+    // must not leave the announcement adopted.
+    if (announced.verdict === 'REFUSED_OTHER_COMPANY') {
+      return json(
+        {
+          error: 'that terminal is already registered to another AccessLink account',
+          code: 'TERMINAL_OWNED_ELSEWHERE',
+        },
+        409,
+      )
+    }
+    if (announced.verdict === 'REFUSED_DISABLED') {
+      return json(
+        {
+          error: 'that terminal is disabled; re-enable it before setting it up again',
+          code: 'TERMINAL_DISABLED',
+        },
+        409,
+      )
+    }
+
+    // Single use: the code is spent whether or not the caller goes on to
+    // approve, exactly as the server marks the row ADOPTED.
+    announceable.delete(code)
+    state.pendingTerminals = [...state.pendingTerminals, announced]
+    return json(announced)
+  }),
+
+  http.get('*/api/v1/console/terminal-announcements', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    // MANAGER, not ADMIN: seeing that a terminal is waiting is operational.
+    if (state.session.role === 'VIEWER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const failure = takeFailure('pending-terminals')
+    if (failure) {
+      return json({ error: 'Failed to retrieve terminals waiting to be set up' }, failure)
+    }
+
+    return json({ count: state.pendingTerminals.length, pending: state.pendingTerminals })
+  }),
+
+  http.post(
+    '*/api/v1/console/terminal-announcements/:id/approve',
+    async ({ request, params }) => {
+      record(request)
+      const refused = guard(request)
+      if (refused) return refused
+      if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+        return json({ error: 'Insufficient permissions' }, 403)
+      }
+
+      const failure = takeFailure('approve-terminal')
+      if (failure) return json({ error: 'Failed to approve the terminal' }, failure)
+
+      const id = String(params.id)
+      const pending = state.pendingTerminals.find((entry) => entry.id === id)
+      if (!pending || pending.state !== 'ADOPTED') {
+        return json(
+          {
+            error: 'That terminal is no longer waiting to be set up.',
+            code: 'ANNOUNCEMENT_NOT_PENDING',
+          },
+          404,
+        )
+      }
+
+      const body = (await request.json()) as { site_id?: string; device_name?: string }
+      const site = state.sites.find((entry) => entry.id === body.site_id)
+      if (!site) return json({ error: 'Site not found' }, 404)
+
+      // RE-CHECKED at approval, as the server does — the serial can acquire an
+      // owner between adoption and this call.
+      if (pending.verdict === 'REFUSED_OTHER_COMPANY') {
+        return json(
+          {
+            error: 'that terminal is already registered to another AccessLink account',
+            code: 'TERMINAL_OWNED_ELSEWHERE',
+          },
+          409,
+        )
+      }
+
+      const approved: PendingTerminal = {
+        ...pending,
+        state: 'APPROVED',
+        site_id: site.id,
+        site_name: site.name,
+        device_name: body.device_name || pending.serial_number,
+        approved_by: state.session.operator.email,
+        approved_at: new Date().toISOString(),
+      }
+      state.pendingTerminals = state.pendingTerminals.map((entry) =>
+        entry.id === id ? approved : entry,
+      )
+
+      // NO TERMINAL IS CREATED. The unit collects its credential afterwards,
+      // and a mock that added a fleet row here would let a screen claim the
+      // terminal was working the instant it was approved.
+      return json(approved)
+    },
+  ),
+
+  http.post(
+    '*/api/v1/console/terminal-announcements/:id/reject',
+    async ({ request, params }) => {
+      record(request)
+      const refused = guard(request)
+      if (refused) return refused
+      if (state.session?.role !== 'ADMIN' && state.session?.role !== 'OWNER') {
+        return json({ error: 'Insufficient permissions' }, 403)
+      }
+
+      const id = String(params.id)
+      const pending = state.pendingTerminals.find((entry) => entry.id === id)
+      if (!pending) return json({ error: 'Terminal not found' }, 404)
+
+      state.pendingTerminals = state.pendingTerminals.filter((entry) => entry.id !== id)
+      return json({ ...pending, state: 'EXPIRED' })
+    },
+  ),
+
+  http.get('*/api/v1/console/terminal-announcements/:id', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (state.session.role === 'VIEWER') {
+      return json({ error: 'Insufficient permissions' }, 403)
+    }
+
+    const pending = state.pendingTerminals.find((entry) => entry.id === String(params.id))
+    if (!pending) return json({ error: 'Terminal not found' }, 404)
+    return json(pending)
   }),
 
   // --- people -------------------------------------------------------------
@@ -1760,6 +2322,23 @@ export const handlers = [
     const limit = Number(url.searchParams.get('limit') ?? 50)
     const offset = Number(url.searchParams.get('offset') ?? 0)
 
+    /*
+      SITE NARROWING IS SERVER-SIDE AND HAS TO BE MOCKED AS SUCH.
+
+      A FieldEvent carries a site NAME and no id, so a client cannot narrow the
+      trail itself even if it wanted to — `site_id` on the request is the only
+      way to ask for one site's events. Resolving the id to a site here, and
+      matching on that site's name, is what the store does with a subquery.
+
+      Handled rather than ignored because a mock that silently drops a filter
+      lets a screen claim to be showing one site while showing all of them, and
+      the test would pass.
+    */
+    const siteId = url.searchParams.get('site_id') ?? ''
+    const siteName = siteId
+      ? (state.sites.find((site) => site.id === siteId)?.name ?? 'no such site')
+      : ''
+
     // FILTERED HERE, as the API does it, so a console that narrowed a fetched
     // page in the browser would fail against this mock exactly as it would
     // against the server.
@@ -1767,6 +2346,7 @@ export const handlers = [
       if (decision && event.decision !== decision) return false
       if (eventType && event.event_type !== eventType) return false
       if (serial && event.device_serial !== serial) return false
+      if (siteName && event.site_name !== siteName) return false
       if (from && event.occurred_at < from) return false
       if (to && event.occurred_at > to) return false
       if (search) {
@@ -1881,6 +2461,23 @@ export const handlers = [
       device_type: deviceType,
       release_channel: channel,
       is_current: false,
+      /*
+        STAMPED AS THE NEWEST THING IN THE CATALOGUE, which is what publishing a
+        build actually produces.
+
+        `makeFirmwareVersion` defaults `created_at` to 2026-01-01 and this
+        handler did not override it, so a build "published" during a test landed
+        dated months BEFORE the entries it was published after. That was
+        invisible while the console rendered one neutral badge for everything
+        that was not the current target; it stopped being invisible the moment
+        the page began distinguishing a newer build from an older one, and it
+        would have had the console call a just-published build "Older".
+
+        Derived from the existing rows rather than the clock so the result is
+        deterministic: a test that depends on the real date fails on a different
+        day.
+      */
+      created_at: nextPublishDate(),
     })
     state.firmware = [...state.firmware, created]
     return json(created, 201)
@@ -1977,8 +2574,59 @@ const modes = new Map<string, string>()
 /** Serials whose device credential has been revoked. */
 const revoked = new Set<string>()
 
+/**
+ * The Change Wi-Fi command outstanding against each serial.
+ *
+ * HELD OUTSIDE `state` for the same reason `announceable` is: it models
+ * something happening at the hardware over time, not a row the console owns. A
+ * test seeds a state to say "the terminal has now acknowledged it", which is the
+ * only way a console can ever learn that.
+ */
+const wifiRecovery = new Map<string, WifiRecoveryStatus>()
+
+/**
+ * Moves a terminal's outstanding command on, the way the hardware would.
+ *
+ * A test calls this to say what the TERMINAL did — collected the command,
+ * acknowledged it, never picked it up — rather than to fake a response. The
+ * console has to poll to find out, which is the behaviour under test.
+ */
+export function advanceWifiRecovery(
+  serial: string,
+  state_: WifiRecoveryState,
+  extra: Partial<WifiRecoveryStatus> = {},
+): void {
+  const current = wifiRecovery.get(serial)
+  if (!current) return
+  wifiRecovery.set(serial, { ...current, ...extra, state: state_ })
+}
+
 /** Outstanding claim codes per site and serial, for the superseding count. */
 const outstandingClaims = new Map<string, number>()
+
+/**
+ * Terminals that are currently displaying a pairing code.
+ *
+ * HELD OUTSIDE `state` because no response carries it: a code exists on the
+ * hardware's screen, and the API's only way to learn one is to be told it. A
+ * test seeds this to say "there is a terminal in the room showing K7M2-P4QX",
+ * which is the only thing the console can act on.
+ *
+ * Cleared between tests, or one test's waiting hardware provisions another's.
+ */
+const announceable = new Map<string, PendingTerminal>()
+
+/**
+ * Puts a terminal in the room, showing `code`.
+ *
+ * The `verdict` on the seeded row is what the server would compute for that
+ * serial — NEW for hardware nobody has, RE_PROVISION for the company's own,
+ * and the two refusals — so a test names the SITUATION rather than the
+ * response, and the handler applies the same rules the API does to it.
+ */
+export function seedAnnouncedTerminal(code: string, pending: PendingTerminal): void {
+  announceable.set(code.toUpperCase(), pending)
+}
 
 /**
  * What the platform holds for a site's outage behaviour.
@@ -2006,10 +2654,28 @@ function terminalDetail(terminal: Terminal): TerminalDetail {
   }
 }
 
+/**
+ * Points a terminal at a feature without going through the console.
+ *
+ * FOR THE STATE A TEST CANNOT REACH BY CLICKING: a terminal assigned to a
+ * feature its company has since turned OFF. The console refuses to offer a
+ * feature that is not enabled — correctly — so the only way to arrive at that
+ * combination in a test is to say the assignment already existed when the
+ * feature was switched off, which is exactly how it happens in the field.
+ *
+ * That state is not cosmetic: it is the one case where a terminal genuinely
+ * refuses everybody, and it has to stay distinguishable from multi-purpose,
+ * which refuses nobody.
+ */
+export function setTerminalMode(serial: string, mode: string): void {
+  modes.set(serial, mode)
+}
+
 export function resetTerminalModes(): void {
   modes.clear()
   revoked.clear()
   outstandingClaims.clear()
+  announceable.clear()
 }
 
 export const server = setupServer(...handlers)

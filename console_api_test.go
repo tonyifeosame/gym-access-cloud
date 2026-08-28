@@ -67,6 +67,11 @@ var consoleRoutes = []struct {
 	{"GET", "/api/v1/console/terminals/summary", models.RoleViewer, ""},
 	{"GET", "/api/v1/console/terminals/TERM-1", models.RoleViewer, ""},
 	{"GET", "/api/v1/console/people", models.RoleViewer, ""},
+	// Credential visibility (D1). VIEWER, and listed here so the surface it adds
+	// is covered by the same "a site key achieves nothing" assertion as the
+	// rest -- this route reads the credentials tables, so it is the last one
+	// that should be reachable with a provisioning secret.
+	{"GET", "/api/v1/console/people/P-1/credentials", models.RoleViewer, ""},
 	{"POST", "/api/v1/console/people", models.RoleManager,
 		`{"external_id":"P-NEW","full_name":"New Person"}`},
 	{"PUT", "/api/v1/console/people/P-1", models.RoleManager, `{"full_name":"Renamed"}`},

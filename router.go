@@ -120,6 +120,32 @@ func NewRouter() *gin.Engine {
 	// database/claim.go.
 	r.POST("/api/v1/devices/claim", middleware.LoginRateLimiter(), handlers.ClaimDevice)
 
+	// Device announcement, /api/v1/devices/announce.
+	//
+	// THE CUSTOMER-FACING HALF OF PROVISIONING, and the other end of the claim
+	// code. A claim code is minted FOR a serial, and the serial is derived from
+	// the factory MAC and printed only on the terminal's USB console -- so that
+	// flow needs a cable at both ends and is right for pre-authorised installs
+	// and wrong for a customer with a box and a phone. Here the terminal
+	// introduces itself, displays an eight-character pairing code on its own
+	// panel, and an authenticated administrator types that code into the console.
+	//
+	// THE POST IS UNAUTHENTICATED AND GRANTS NOTHING. What it creates has no
+	// company, is visible to no operator anywhere, and becomes a credential only
+	// through an ADMIN typing a code displayed on the physical unit.
+	//
+	// THE GET IS AUTHENTICATED, by the announce token the POST returned. It is
+	// the endpoint that hands over a device credential, so it is not left open:
+	// the token is what stops a credential being collected by something that
+	// merely learned a serial.
+	//
+	// ONE LIMITER INSTANCE SHARED BY THE PAIR, separate from login's and from
+	// claim's. A terminal polling every few seconds while a customer finds the
+	// console must not exhaust the allowance that customer needs to sign in.
+	announceLimit := middleware.AnnounceRateLimiter()
+	r.POST("/api/v1/devices/announce", announceLimit, handlers.AnnounceTerminal)
+	r.GET("/api/v1/devices/announce", announceLimit, handlers.AnnouncementStatus)
+
 	// Operator authentication, /api/v1/auth/*.
 	//
 	// A SEPARATE group from the v1 tree below, which authenticates with the site
@@ -137,6 +163,23 @@ func NewRouter() *gin.Engine {
 		credentialLimit := middleware.LoginRateLimiter()
 
 		auth.POST("/login", credentialLimit, handlers.OperatorLogin)
+
+		// Self-service signup, UNAUTHENTICATED BY NECESSITY.
+		//
+		// A customer nobody has onboarded has no credential, because obtaining
+		// one is what this is for. It creates a company, its first site and its
+		// OWNER in one transaction and answers with an ordinary session -- the
+		// same cookie, the same body, built by the same function login uses.
+		//
+		// ON THE SAME LIMITER as the credential routes above, deliberately.
+		// Sharing one allowance means an attacker cannot get a second budget by
+		// alternating between signing in and signing up, and mass tenant
+		// creation from one address is bounded by the same bucket.
+		//
+		// IT REACHES NOTHING IN THE PLATFORM TREE BELOW. It creates one tenant
+		// and one owner inside it; there is no function on that path that can
+		// see another company or mint a platform administrator.
+		auth.POST("/register", credentialLimit, handlers.OperatorRegister)
 
 		// Credential handover, UNAUTHENTICATED BY NECESSITY (PPL-02, SEC-10).
 		//
@@ -207,6 +250,41 @@ func NewRouter() *gin.Engine {
 			// would be a standing back door into every customer.
 			admin.POST("/companies/:company_id/operators",
 				middleware.RequirePlatformCSRF(), handlers.PlatformCreateFirstOperator)
+
+			// Recovery of last resort, and bounded by the same kind of query
+			// predicate as the route above.
+			//
+			// Self-service signup creates a company of ONE, and a company of one
+			// had no way back into its own account: forgot-password mints a
+			// token this platform cannot deliver, the console's own reset needs
+			// a SECOND administrator, and the onboarding route above is refused
+			// once a company has any operator at all.
+			//
+			// So this issues a reset link for a company's SOLE owner-or-admin,
+			// and refuses the moment there are two -- at which point the customer
+			// can recover themselves and this surface has no business reaching
+			// in. The link is returned once, to the authenticated administrator
+			// making the call, and the action is written into the TENANT'S trail
+			// so a customer can see their vendor did it.
+			admin.POST("/companies/:company_id/recovery",
+				middleware.RequirePlatformCSRF(), handlers.PlatformIssueOwnerRecovery)
+
+			// Releasing a terminal from the company that holds it.
+			//
+			// THE ONLY ROUTE ON THE PLATFORM THAT MOVES HARDWARE BETWEEN
+			// TENANTS, and it is only half of a move: it releases the serial,
+			// and the next owner adopts it through the ordinary flow with their
+			// own administrator's approval. A single call that reassigned a
+			// terminal from one company to another would be a credential capable
+			// of taking over any door on the platform, and the two halves
+			// genuinely need two different people to agree.
+			//
+			// Here rather than in the console tree because no tenant operator may
+			// reach it from either side: the company losing the unit cannot be
+			// made to give it up, and the company that wants it cannot help
+			// itself.
+			admin.POST("/terminals/:serial/release",
+				middleware.RequirePlatformCSRF(), handlers.PlatformReleaseTerminal)
 		}
 	}
 
@@ -255,12 +333,36 @@ func NewRouter() *gin.Engine {
 			read.GET("/people/:external_id/enrollment",
 				handlers.ConsoleGetPersonEnrollment)
 
+			// The setup facts the overview cannot derive for itself.
+			//
+			// Today that is one: how many active people have no access rule.
+			// Absence of permission is not permission, so a customer who adds a
+			// terminal and a roster and stops has a deployment that admits
+			// nobody -- and the console could not tell them, because rules are
+			// readable only one person at a time.
+			//
+			// VIEWER, matching the per-person permissions read it aggregates.
+			read.GET("/onboarding", handlers.ConsoleOnboardingState)
+
 			// Who may go where, and when (APP-02). Readable by any operator:
 			// "why was she refused" is a question a viewer at a front desk has
 			// to be able to answer, and the rules are not secret from the
 			// people administering the deployment.
 			read.GET("/people/:external_id/permissions",
 				handlers.ConsoleListPersonPermissions)
+
+			// Is this person enrolled, where, and at how many doors (D1).
+			//
+			// VIEWER and company-scoped, on exactly the reasoning above: the
+			// person who has to answer "why is she not recognised at the east
+			// gate" is often the one at the front desk, and the answer is
+			// usually that the enrolment binds to the sensor that took it.
+			//
+			// NO BIOMETRIC MATERIAL. The store's SELECT list is the boundary and
+			// the response types cannot carry material -- no template, no sealed
+			// bytes, no digest, no key id, no sensor slot, no locator, no vendor.
+			read.GET("/people/:external_id/credentials",
+				handlers.ConsoleListPersonCredentials)
 			read.GET("/schedules", handlers.ConsoleListSchedules)
 
 			// The event trail (SEC-08). Grant-scoped inside the handler, the
@@ -280,6 +382,45 @@ func NewRouter() *gin.Engine {
 				handlers.ConsoleGetSite)
 			read.GET("/sites/:site_id/settings", middleware.RequireSiteGrant("site_id"),
 				handlers.GetSiteSettings)
+		}
+
+		// Terminals waiting to be set up (022).
+		//
+		// A RESOURCE OF ITS OWN rather than /terminals/pending, because a static
+		// segment sharing a level with the existing /terminals/:serial parameter
+		// is a routing collision waiting to be introduced by whoever adds the
+		// next terminal route -- and because an announcement genuinely is not a
+		// terminal yet. It has no credential, no site until it is approved, and
+		// no device row until it collects.
+		//
+		// SPLIT BY ROLE, and the split is the point. Seeing that a unit is
+		// waiting is operational -- the person who unpacked the box is often not
+		// an administrator, and a pending terminal nobody can see is a support
+		// call. ACTING on it mints a credential and is ADMIN, matching claim-code
+		// issue and site-key rotation.
+		announcements := console.Group("/terminal-announcements")
+		{
+			announcements.GET("", middleware.RequireRole(models.RoleManager),
+				handlers.ConsoleListPendingTerminals)
+			announcements.GET("/:id", middleware.RequireRole(models.RoleManager),
+				handlers.ConsoleGetPendingTerminal)
+
+			act := announcements.Group("")
+			act.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleAdmin))
+			{
+				// ITS OWN LIMITER, keyed on the SESSION rather than the address.
+				// This is the one place a pairing code can be guessed, and the
+				// guesser would be somebody already holding an operator session --
+				// which an address-keyed bucket does not bound.
+				//
+				// Mounted here rather than on the group so that reading the list
+				// cannot consume an operator's attempt budget.
+				act.POST("/adopt", middleware.AdoptRateLimiter(),
+					handlers.ConsoleAdoptAnnouncement)
+
+				act.POST("/:id/approve", handlers.ConsoleApproveAnnouncement)
+				act.POST("/:id/reject", handlers.ConsoleRejectAnnouncement)
+			}
 		}
 
 		// Day-to-day writes.
@@ -413,6 +554,30 @@ func NewRouter() *gin.Engine {
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRetireTerminal)
 			admin.PUT("/terminals/:serial/site",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleMoveTerminal)
+
+			// Change Wi-Fi (024). The console's half of the firmware's
+			// WIFI_RECOVERY command: it hands one terminal back to the setup
+			// portal a new unit uses, so a customer whose Wi-Fi password
+			// changed can put it on the new network from a phone.
+			//
+			// ADMIN RATHER THAN MANAGER, which puts it here beside revoke and
+			// retire rather than beside resync. A resync is invisible to
+			// everybody; this stops a door working until somebody physically
+			// stands next to it. MANAGER may see the button's absence, not a
+			// 403 after pressing it.
+			//
+			// THE READ IS GATED THE SAME WAY as the write, unlike the terminal
+			// detail read above. It is not fleet information -- it says whether
+			// a command an administrator sent has been picked up -- and the
+			// only screen that asks for it is the dialog that sent it.
+			//
+			// Both go through RequireTerminalGrant, so another tenant's serial
+			// is a 404 and an ungranted site is a 403. CSRF applies to the POST
+			// and is skipped on the GET by RequireCSRF itself.
+			admin.POST("/terminals/:serial/wifi-recovery",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRequestWifiRecovery)
+			admin.GET("/terminals/:serial/wifi-recovery",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleWifiRecoveryStatus)
 
 			// The firmware catalogue. MOVED HERE from the site-key tree, where
 			// any terminal's provisioning key could add a build and move the
@@ -576,6 +741,22 @@ func NewRouter() *gin.Engine {
 		// permits in any case.
 		deviceAPI.GET("/credentials/pending", handlers.GetPendingCredentials)
 		deviceAPI.POST("/credentials/placement", handlers.ReportCredentialPlacement)
+
+		// Sealed biometric material (026). SINGLE-ENROLMENT REPLICATION: a
+		// person presents a finger once and every door they are admitted to
+		// learns them.
+		//
+		// THE FETCH IS THE ONLY ROUTE BY WHICH BIOMETRIC MATERIAL LEAVES THIS
+		// PLATFORM. That is why it is a route of its own rather than a field on
+		// /credentials/pending -- one place to audit, one place to rate limit,
+		// one place to test, and a work-list response that demonstrably carries
+		// no material.
+		//
+		// Both are DEVICE-authenticated and take the terminal from the
+		// credential, never from a parameter. A terminal cannot upload on
+		// another's behalf and cannot fetch what it has not been told to hold.
+		deviceAPI.POST("/credentials/material", handlers.UploadCredentialMaterial)
+		deviceAPI.GET("/credentials/:id/material", handlers.FetchCredentialMaterial)
 	}
 
 	return r

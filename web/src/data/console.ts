@@ -12,9 +12,11 @@ import * as endpoints from '../api/endpoints'
 import type {
   AccessDecision,
   AccessEvaluationRequest,
+  AdoptTerminalRequest,
   ApplicationCode,
   ApplicationRequest,
   ApplicationsResponse,
+  ApproveTerminalRequest,
   AuditPage,
   AuditQuery,
   ClaimCodeRequest,
@@ -35,9 +37,12 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
   OperatorsResponse,
+  PendingTerminal,
+  PendingTerminalsResponse,
   PeoplePage,
   PeopleQuery,
   Permission,
@@ -45,6 +50,7 @@ import type {
   PermissionsResponse,
   Person,
   PersonRequest,
+  RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
   RotateSiteKeyResponse,
@@ -55,6 +61,7 @@ import type {
   SiteGrantsRequest,
   SiteSettings,
   SiteSettingsRequest,
+  SitesQuery,
   SitesResponse,
   TerminalDetail,
   TerminalLifecycleResponse,
@@ -68,6 +75,7 @@ import type {
   TerminalsResponse,
   UpdateOperatorRequest,
   UpdateSiteRequest,
+  WifiRecoveryStatus,
 } from '../api/types'
 import { keys } from './keys'
 
@@ -107,11 +115,28 @@ export function useCompany(): UseQueryResult<CompanyDetail> {
 // Sites
 // ---------------------------------------------------------------------------
 
-export function useSites(): UseQueryResult<SitesResponse> {
+/**
+ * A company's sites, optionally narrowed by a search term.
+ *
+ * THE SEARCH IS OPT-IN AND SERVER-SIDE. Ten call sites want the complete estate
+ * to fill a dropdown or a site filter, and exactly one — the Sites page — wants
+ * a match. Defaulting the term to empty keeps those ten on one shared cache
+ * entry and one request, and sends `q` only when somebody has typed something.
+ *
+ * The narrowing happens in SQL rather than here: filtering the fetched array
+ * would search whatever the last response carried rather than the estate, which
+ * is the same trap the people list documents and the terminal list is exempt
+ * from only because it fetches everything by design.
+ */
+export function useSites({ search = '' }: SitesQuery = {}): UseQueryResult<SitesResponse> {
+  const term = search.trim()
   return useQuery({
-    queryKey: keys.sites.list(),
-    queryFn: () => endpoints.fetchSites(),
+    queryKey: keys.sites.list(term),
+    queryFn: () => endpoints.fetchSites({ search: term }),
     staleTime: 60_000,
+    // Keeps the previous match on screen while the next one is in flight, so
+    // typing does not flash an empty state between two populated ones.
+    placeholderData: (previous) => previous,
   })
 }
 
@@ -172,10 +197,19 @@ export function useCreateSite(): UseMutationResult<CreateSiteResponse, Error, Cr
  * The settings cache is therefore invalidated too — the version it holds is now
  * behind.
  *
- * THE RESPONSE DOES NOT ECHO THE POLICY BACK. `models.ConsoleSite` has no field
- * for either column, so the site written into the cache below carries the
- * metadata and nothing about the outage behaviour. A caller must not read the
- * result and conclude it knows what is in force; see the note on `Site`.
+ * THE RESPONSE DOES ECHO THE POLICY BACK, and this note used to say the
+ * opposite. `models.ConsoleSite` carries `offline_policy` and
+ * `offline_grace_minutes`, and `database.UpdateSite`'s RETURNING clause selects
+ * both — so the site written into the cache below is authoritative about the
+ * outage behaviour as well as the metadata, including on a write that changed
+ * the policy (the policy is applied first, then the metadata UPDATE reads the
+ * columns back).
+ *
+ * That is load-bearing for the offline-policy panel: it closes its editor after
+ * applying and returns to showing what is in force, with no refetch, because
+ * this cache write is what makes the value on screen the new one. A maintainer
+ * who believed the old note would add a refetch that is not needed, or distrust
+ * a display that is correct.
  *
  * Terminals are invalidated as well: deactivating a site stops every terminal
  * there authenticating, so a fleet view showing them as they were is stale in
@@ -487,6 +521,169 @@ export function useResyncTerminal(
 }
 
 // ---------------------------------------------------------------------------
+// Change Wi-Fi
+// ---------------------------------------------------------------------------
+
+/**
+ * How often the dialog asks whether the terminal has taken the command.
+ *
+ * Three seconds, which is the fastest interval that is honest about what is
+ * happening: a terminal polls for work on its own schedule, so nothing here
+ * makes it arrive sooner. What the interval buys is that the screen stops saying
+ * "Waiting for terminal…" promptly once it does — and somebody who has just
+ * pressed this button is standing in front of the hardware waiting to see it
+ * change.
+ */
+const WIFI_RECOVERY_POLL_MS = 3_000
+
+/**
+ * The progress of a terminal's Change Wi-Fi command.
+ *
+ * POLLED ONLY WHILE IT COULD STILL MOVE. React Query stops the interval when the
+ * dialog unmounts, and `refetchInterval` returns false once the command has
+ * reached a state nothing will change — accepted, expired, failed, cancelled, or
+ * never sent. A screen left open on a finished command must not keep a request
+ * every three seconds running for the life of the session.
+ */
+export function useWifiRecoveryStatus(
+  serial: string,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<WifiRecoveryStatus> {
+  return useQuery({
+    queryKey: keys.terminals.wifiRecovery(serial),
+    queryFn: () => endpoints.fetchWifiRecoveryStatus(serial),
+    enabled: options.enabled ?? true,
+    // Always refetched on mount: the previous command's outcome is not an
+    // answer to the command just sent.
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const state = query.state.data?.state
+      return state === 'QUEUED' || state === 'DELIVERED' ? WIFI_RECOVERY_POLL_MS : false
+    },
+  })
+}
+
+/**
+ * Asks a terminal to return to Wi-Fi setup mode. ADMIN.
+ *
+ * The answer is SEEDED INTO THE STATUS QUERY rather than merely invalidating it,
+ * so the dialog goes straight from the confirmation to "Waiting for terminal…"
+ * with no gap in which it would have nothing to show. The two shapes are the
+ * same shape precisely so this is possible.
+ *
+ * The terminal row is invalidated too: a command in flight is worth seeing on
+ * the terminal page, not only inside the dialog that sent it.
+ */
+export function useRequestWifiRecovery(
+  serial: string,
+): UseMutationResult<WifiRecoveryStatus, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.requestWifiRecovery(serial),
+    onSuccess: (result) => {
+      queryClient.setQueryData(keys.terminals.wifiRecovery(serial), result)
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Adding a terminal: announce and approve
+// ---------------------------------------------------------------------------
+
+/**
+ * Terminals waiting to be set up.
+ *
+ * POLLED WHILE THE LIST IS ON SCREEN, which almost nothing else here does. The
+ * rows change without the browser doing anything: a terminal collects its
+ * credential seconds after approval and leaves the list, and an adopted row
+ * times out fifteen minutes after it appeared. An operator watching a screen
+ * that says "Approved — collecting" needs it to stop saying that on its own.
+ *
+ * Ten seconds, and only while the query has an observer — React Query stops the
+ * interval when the screen unmounts, so this is not a background poll running
+ * for the life of the session.
+ */
+export function usePendingTerminals(
+  options: { enabled?: boolean } = {},
+): UseQueryResult<PendingTerminalsResponse> {
+  return useQuery({
+    queryKey: keys.pendingTerminals.list(),
+    queryFn: () => endpoints.fetchPendingTerminals(),
+    enabled: options.enabled ?? true,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+  })
+}
+
+/**
+ * Claims a terminal that is displaying a pairing code.
+ *
+ * NOTHING IN THE RESPONSE IS A SECRET, which is what makes this hook ordinary
+ * where `useIssueClaimCode` has to be careful: a claim code is a credential and
+ * must never reach the query cache, and an adopted announcement is a record of a
+ * decision that the console is free to hold, refetch and display.
+ *
+ * The pending list is invalidated because the terminal has just joined it, and
+ * the audit trail because the adoption is recorded there.
+ */
+export function useAdoptTerminal(): UseMutationResult<
+  PendingTerminal,
+  Error,
+  AdoptTerminalRequest
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AdoptTerminalRequest) => endpoints.adoptTerminal(body),
+    onSuccess: (pending) => {
+      queryClient.setQueryData(keys.pendingTerminals.detail(pending.id), pending)
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/**
+ * Approves a terminal into a site.
+ *
+ * INVALIDATES THE FLEET AS WELL AS THE PENDING LIST, and the reason is a timing
+ * one worth stating: approval does not create the terminal — the unit collects
+ * its credential a few seconds later, and only then does a row appear in
+ * `/terminals`. Refreshing the fleet here is what makes it show up without the
+ * operator reloading, together with the pending list's own polling.
+ */
+export function useApproveTerminal(
+  id: string,
+): UseMutationResult<PendingTerminal, Error, ApproveTerminalRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ApproveTerminalRequest) => endpoints.approveTerminal(id, body),
+    onSuccess: (pending) => {
+      queryClient.setQueryData(keys.pendingTerminals.detail(id), pending)
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+/** Refuses a terminal, or undoes an approval. */
+export function useRejectTerminal(
+  id: string,
+): UseMutationResult<PendingTerminal, Error, RejectTerminalRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: RejectTerminalRequest) => endpoints.rejectTerminal(id, body),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: keys.pendingTerminals.detail(id) })
+      void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
 // People
 // ---------------------------------------------------------------------------
 
@@ -503,6 +700,25 @@ export function usePeople(query: PeopleQuery = {}): UseQueryResult<PeoplePage> {
     queryKey: keys.people.list(query),
     queryFn: () => endpoints.fetchPeople(query),
     placeholderData: (previous) => previous,
+  })
+}
+
+/**
+ * What this company still has to do before anybody gets in.
+ *
+ * READ BY THE OVERVIEW ONLY, to raise the one setup step it could not otherwise
+ * see: a person with no access rule reaches nothing, and a customer who adds a
+ * terminal and a roster and stops has a deployment that admits nobody.
+ *
+ * A SEPARATE QUERY RATHER THAN A FIELD ON THE PEOPLE PAGE, so it is invalidated
+ * by what actually changes it — granting or revoking access — instead of by
+ * every edit to a person's name.
+ */
+export function useOnboardingState(): UseQueryResult<OnboardingState> {
+  return useQuery({
+    queryKey: keys.onboarding.state(),
+    queryFn: () => endpoints.fetchOnboardingState(),
+    staleTime: 30_000,
   })
 }
 
@@ -523,6 +739,10 @@ export function useCreatePerson(): UseMutationResult<Person, Error, PersonReques
       // Every page and search is now potentially wrong -- the new person may
       // belong on any of them, and every total is off by one.
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -643,6 +863,10 @@ export function useUpdatePerson(
     onSuccess: (person) => {
       queryClient.setQueryData(keys.people.detail(externalId), person)
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -665,6 +889,10 @@ export function useDeletePerson(): UseMutationResult<void, Error, string> {
     onSuccess: (_result, externalId) => {
       queryClient.removeQueries({ queryKey: keys.people.detail(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      // Adding, removing or deactivating somebody changes how many people
+      // have no access rule, which is what the overview's setup guidance
+      // reads. Cheap to invalidate and wrong to leave stale.
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -886,6 +1114,11 @@ export function useGrantPermission(
       // A schedule's permission_count has just changed.
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      // And so has how many people have no access at all, which is what the
+      // overview's setup guidance is built on. Without this, a customer who
+      // grants the last outstanding rule still sees "nobody can get in yet"
+      // until the figure goes stale on its own.
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }
@@ -900,6 +1133,8 @@ export function useRevokePermission(
       void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      // Revoking the last rule for somebody puts them back into the count.
+      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
   })
 }

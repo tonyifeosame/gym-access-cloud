@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import { can } from '../../auth/permissions'
-import { ActiveBadge, BiometricBadge } from '../../components/Badge'
+import { BiometricBadge } from '../../components/Badge'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { useNotifications } from '../../components/Notifications'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
@@ -12,6 +12,8 @@ import { useDeletePerson, useEnrollment, usePerson, useUpdatePerson } from '../.
 import { useSession } from '../../session/useSession'
 import { describeEnrollment } from './enrollment'
 import { EnrollFingerprintDialog } from './EnrollFingerprintDialog'
+import { describeCategory } from './categories'
+import { PERSON_ID_LABEL } from './personVocabulary'
 import { PersonAccessPanel } from './PersonAccessPanel'
 import { PersonFormDialog } from './PersonFormDialog'
 
@@ -69,8 +71,8 @@ export function PersonDetailPage() {
         <div className="page">
           <PageHeader title="Person not found" breadcrumb={<Link to="/people">People</Link>} />
           <InfoNote title="Nothing here">
-            No person with that identifier exists in your company. They may have been
-            removed.
+            No person with that {PERSON_ID_LABEL} exists in your company. They may have
+            been removed.
           </InfoNote>
         </div>
       )
@@ -133,18 +135,18 @@ export function PersonDetailPage() {
         </InfoNote>
       ) : null}
 
+      {/*
+        NO "STATUS" CARD. An inactive person already gets the banner above,
+        which says what inactive MEANS rather than just naming it, and an active
+        one needs no card to say nothing is wrong. The card restated the banner
+        a centimetre below it and, on a phone, spent a whole card on one word.
+        The badge still appears against this person in the People list.
+      */}
       <section className="cards" aria-label="Summary">
-        <article className="card">
-          <h2 className="card__title">Status</h2>
-          <p className="card__value">
-            <ActiveBadge active={person.active} />
-          </p>
-        </article>
-
         <article className="card">
           <h2 className="card__title">Person type</h2>
           <p className="card__value">
-            {person.category || <span className="muted">Not set</span>}
+            {describeCategory(person.category) || <span className="muted">Not set</span>}
           </p>
           <p className="card__detail">as your organisation classifies them</p>
         </article>
@@ -262,11 +264,22 @@ export function PersonDetailPage() {
           ) : null}
         </dl>
 
+        {/*
+          WHAT THIS NOTE NO LONGER SAYS. It used to end "...there is currently no
+          operator API to start, review or clear an enrolment", which is a
+          statement about our API surface on a screen a customer administers
+          their members from — and it had also gone stale, since the platform
+          now has a read endpoint for exactly that.
+
+          THE SECURITY SENTENCE STAYS, deliberately. That the console holds no
+          copy of the biometric data is a property of the product worth telling
+          a customer, and it is the reason this page can only show a yes or no.
+        */}
         <InfoNote title="Enrolment happens at a terminal">
           The person has to be standing at the terminal you choose — that is where
-          their fingerprint is captured and where it stays. AccessLink never holds
-          a copy of the biometric data, so a fingerprint enrolled at one terminal
-          works at that terminal.
+          their fingerprint is captured and where it stays. AccessLink holds no copy
+          of the biometric data, so a fingerprint enrolled at one terminal works at
+          that terminal.
         </InfoNote>
       </section>
 
@@ -338,7 +351,7 @@ export function PersonDetailPage() {
           }
           detail={
             <>
-              The record is kept for audit and their identifier{' '}
+              The record is kept for audit and their {PERSON_ID_LABEL}{' '}
               <code>{person.external_id}</code> becomes available again, but they
               disappear from the console and cannot be restored from here. If you
               only need to stop admitting them,{' '}

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
-import type { TerminalStatus } from '../api/types'
+import { MULTI_PURPOSE, type ApplicationCode, type TerminalStatus } from '../api/types'
+import { describeApplication } from '../applications/registry'
 
 /**
  * Status pills.
@@ -93,10 +94,17 @@ export function BiometricBadge({ enrolled }: { enrolled: boolean }) {
 /**
  * What a terminal is assigned to do, and whether that resolves to anything.
  *
- * The two can disagree: a terminal keeps its assignment when the company
- * disables the capability, and `effective` goes empty. That case is called out
- * rather than hidden, because a terminal that looks configured and does nothing
- * is precisely the situation an operator needs to be told about.
+ * The two can disagree: a terminal keeps its assignment when the company turns
+ * the feature off, and `effective` goes empty. That case is called out rather
+ * than hidden, because a terminal that looks configured and does nothing is
+ * precisely the situation an operator needs to be told about.
+ *
+ * THE NAME COMES FROM THE REGISTRY, NOT FROM `humaniseCode`. The two agree on
+ * ACCESS_CONTROL and disagree where it matters: humanising gives "Check In" and
+ * "Multi Purpose" where the registry and the terminal page say "Check-in" and
+ * "Multi-purpose". A general code-humaniser is the right tool for a status enum
+ * this console does not name; feature names ARE named, in one place, and reading
+ * them from anywhere else is how a second set of them starts.
  */
 export function ApplicationModeBadge({
   mode,
@@ -106,10 +114,13 @@ export function ApplicationModeBadge({
   effective: string[]
 }) {
   const resolves = effective.length > 0
+  const label =
+    mode === MULTI_PURPOSE ? 'Multi-purpose' : describeApplication(mode as ApplicationCode).label
+
   return (
     <span className="badge-group">
-      <Badge tone={resolves ? 'info' : 'warning'}>{humaniseCode(mode)}</Badge>
-      {!resolves ? <span className="badge__note">not enabled for this company</span> : null}
+      <Badge tone={resolves ? 'info' : 'warning'}>{label}</Badge>
+      {!resolves ? <span className="badge__note">not turned on for this company</span> : null}
     </span>
   )
 }

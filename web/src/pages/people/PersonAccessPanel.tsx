@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import type { Permission, PermissionEffect, PermissionScope } from '../../api/types'
+import { describeApplication } from '../../applications/registry'
 import { can } from '../../auth/permissions'
 import { Badge } from '../../components/Badge'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
@@ -123,10 +124,15 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
 
                     <p className="rule__detail">
                       <span className="audit__role">{SCOPE_LABELS[permission.scope_type]}</span>
+                      {/*
+                        THE FEATURE'S NAME, NOT ITS CODE. This printed the raw
+                        platform identifier -- an operator reading a person's
+                        access rules saw "only for ACCESS_CONTROL".
+                      */}
                       {permission.application ? (
-                        <> · only for {permission.application}</>
+                        <> · only for {describeApplication(permission.application).label}</>
                       ) : (
-                        <> · any capability that terminal serves</>
+                        <> · any feature that terminal serves</>
                       )}
                     </p>
 
@@ -414,15 +420,27 @@ function GrantAccessDialog({
         />
 
         <SelectField
-          label="Only for one capability"
-          placeholder="Any capability the terminal serves"
+          label="Only for one feature"
+          placeholder="Any feature the terminal serves"
           value={form.values.application}
           onChange={(value) => form.setValue('application', value)}
           disabled={form.submitting}
           hint="Blank means this rule applies to whatever the terminal is doing, which is what most rules want."
+          /*
+            THE FEATURE'S NAME, NOT ITS CODE. This select offered the raw
+            platform code as its own label, so an operator narrowing a rule
+            picked between "ACCESS_CONTROL" and "VISITOR_MANAGEMENT" -- the two
+            values printed exactly as the device protocol stores them, on the
+            screen where somebody decides who gets through a door.
+
+            `describeApplication` is the registry, which is where every other
+            surface in the console gets these names, and it never returns
+            undefined -- a code this build predates is humanised rather than
+            dropped, so the option still exists and can still be chosen.
+          */
           options={(session?.applications ?? []).map((application) => ({
             value: application.code,
-            label: application.code,
+            label: describeApplication(application.code).label,
           }))}
         />
 
