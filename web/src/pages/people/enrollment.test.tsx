@@ -478,8 +478,12 @@ describe('when it does not work', () => {
     renderPerson()
 
     // The person is untouched: still there, still active, still not enrolled.
+    //
+    // "Still active" is asserted as the ABSENCE of the inactive banner. This
+    // page carries no Status card by design -- an active person is shown by
+    // nothing being wrong, and the badge lives in the People list.
     expect(await screen.findByText('Not enrolled')).toBeInTheDocument()
-    expect(screen.getByText('Active')).toBeInTheDocument()
+    expect(screen.queryByText('This person is inactive')).toBeNull()
     expect(screen.getByText(/the sensor did not respond/)).toBeInTheDocument()
   })
 

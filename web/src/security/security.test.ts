@@ -44,7 +44,12 @@ function read(path: string): string {
 function offenders(pattern: RegExp, files: string[] = productionFiles()): string[] {
   const found: string[] = []
   for (const path of files) {
-    for (const [index, line] of read(path).split('\n').entries()) {
+    // SPLIT ON /\r?\n/, NOT '\n'. On a CRLF checkout every line would keep its
+    // trailing carriage return, and JavaScript's `.` does not match one -- so
+    // the comment stripper below could never reach the end of a line, stripped
+    // nothing, and reported every comment that merely DISCUSSES localStorage
+    // as an offender. The check passed on CI and cried wolf on Windows.
+    for (const [index, line] of read(path).split(/\r?\n/).entries()) {
       // Comments discuss these things constantly — that is the point of the
       // comments — so only real code counts.
       const code = line.replace(/\/\/.*$/, '').replace(/^\s*\*.*$/, '')
