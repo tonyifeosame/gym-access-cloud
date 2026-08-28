@@ -1,4 +1,5 @@
 import type {
+  Enrollment,
   AuditRecord,
   FieldEvent,
   Permission,
@@ -115,6 +116,36 @@ export function makePerson(overrides: Partial<Person> = {}): Person {
     biometric_enrolled: false,
     created_at: '2026-01-02T09:00:00Z',
     updated_at: '2026-01-02T09:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * A fingerprint enrolment.
+ *
+ * Defaults to PENDING at an ONLINE terminal, because that is the state a screen
+ * spends the most time rendering and the one every other state is a transition
+ * away from.
+ *
+ * NOTHING BIOMETRIC IS HERE, and there is deliberately nothing to add: no
+ * template, no locator, no slot, no vendor. The fixture is where that boundary
+ * would erode first.
+ */
+export function makeEnrollment(overrides: Partial<Enrollment> = {}): Enrollment {
+  return {
+    id: 'enrolment-public-1',
+    status: 'PENDING',
+    external_id: 'P-0001',
+    full_name: 'Ada Okonkwo',
+    terminal_serial: 'AT-0001',
+    terminal_name: 'North Gate',
+    site_name: 'Lagos Depot',
+    site_public_id: 'site-a',
+    terminal_status: 'ONLINE',
+    requested_by_email: 'ops@example.com',
+    created_at: '2026-08-14T17:00:00Z',
+    expires_at: '2026-08-14T17:05:00Z',
+    biometric_enrolled: false,
     ...overrides,
   }
 }

@@ -17,6 +17,9 @@ import type {
   CreateSiteResponse,
   CreateOperatorRequest,
   CreateOperatorResponse,
+  Enrollment,
+  EnrollmentRequest,
+  EnrollmentResponse,
   EventPage,
   EventQuery,
   FirmwareResponse,
@@ -366,6 +369,67 @@ export function updatePerson(externalId: string, body: PersonRequest): Promise<P
  */
 export function deletePerson(externalId: string): Promise<void> {
   return api.delete<void>(`/api/v1/console/people/${encodeURIComponent(externalId)}`)
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint enrolment
+// ---------------------------------------------------------------------------
+
+/**
+ * Asks ONE terminal to capture this person's fingerprint. MANAGER.
+ *
+ * THE TERMINAL IS IN THE PATH AND THE PERSON IS IN THE BODY, which is the wrong
+ * way round for a person-centric screen and the right way round for
+ * authorization: the server authorizes the serial with the same site-grant
+ * middleware every other terminal route uses. A serial in the body would need
+ * that rule written a second time, and a second copy is how a tenancy boundary
+ * develops a hole.
+ *
+ * The job is addressed to that terminal alone. No other terminal is offered it,
+ * and none may acknowledge it.
+ *
+ * A terminal that is merely OFFLINE is a legitimate choice: the job waits for it
+ * to come back. One that is DISABLED or has never been provisioned is refused
+ * with 409, because it cannot fetch the job at all.
+ */
+export function startEnrollment(
+  serial: string,
+  body: EnrollmentRequest,
+): Promise<Enrollment> {
+  return api.post<Enrollment>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/enrollments`,
+    body,
+  )
+}
+
+/**
+ * Where this person's enrolment has got to. VIEWER.
+ *
+ * THE POLLED ENDPOINT — see useEnrollment for the cadence and why it stops.
+ * It answers with the enrolment AND the person's credential state together, so
+ * a screen cannot show "Enrolled successfully" beside "Not enrolled".
+ */
+export function fetchEnrollment(externalId: string): Promise<EnrollmentResponse> {
+  return api.get<EnrollmentResponse>(
+    `/api/v1/console/people/${encodeURIComponent(externalId)}/enrollment`,
+  )
+}
+
+/**
+ * Stops a live enrolment. MANAGER.
+ *
+ * Cancels the job so the selected terminal can no longer complete it. A terminal
+ * that had ALREADY fetched it may still be showing the prompt until its window
+ * closes — and if somebody presents a finger in that gap, the server refuses the
+ * report rather than binding it. Cancelled means cancelled.
+ *
+ * 409 when there is nothing live to stop, which most often means it finished
+ * while the operator was reaching for the button.
+ */
+export function cancelEnrollment(externalId: string): Promise<Enrollment> {
+  return api.delete<Enrollment>(
+    `/api/v1/console/people/${encodeURIComponent(externalId)}/enrollment`,
+  )
 }
 
 // ---------------------------------------------------------------------------

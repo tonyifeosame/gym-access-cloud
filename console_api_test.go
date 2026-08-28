@@ -73,6 +73,16 @@ var consoleRoutes = []struct {
 	{"DELETE", "/api/v1/console/people/P-1", models.RoleManager, ""},
 	{"PUT", "/api/v1/console/terminals/TERM-1/application-mode", models.RoleManager,
 		`{"application_mode":"MULTI_PURPOSE"}`},
+
+	// Fingerprint enrolment. Listed here so this sweep stays what its comment
+	// says it is -- EVERY console route, not the ones somebody remembered to
+	// add. The workflow's own behaviour is in console_enrollment_test.go; what
+	// this file asserts is that neither route can be reached without a session
+	// and that a site API key achieves nothing against them.
+	{"POST", "/api/v1/console/terminals/TERM-1/enrollments", models.RoleManager,
+		`{"external_id":"P-1"}`},
+	{"GET", "/api/v1/console/people/P-1/enrollment", models.RoleViewer, ""},
+	{"DELETE", "/api/v1/console/people/P-1/enrollment", models.RoleManager, ""},
 	{"GET", "/api/v1/console/operators", models.RoleAdmin, ""},
 	{"POST", "/api/v1/console/operators", models.RoleAdmin,
 		`{"email":"new@example.com","full_name":"New","password":"a-long-enough-password","role":"VIEWER"}`},

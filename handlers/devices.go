@@ -204,6 +204,29 @@ func GetDeviceJobs(c *gin.Context) {
 		jobs = []models.SyncJob{}
 	}
 
+	// An enrolment job leaving here means the selected terminal now HAS it and
+	// is about to show the prompt.
+	//
+	// "Waiting for terminal" and "the terminal is showing the prompt" are the
+	// two states an operator watching a customer walk to a door most needs to
+	// tell apart, and nothing else in the system could distinguish them: a job
+	// stays PENDING while it is being applied, deliberately, so its status says
+	// nothing about whether a device has seen it.
+	//
+	// BEST EFFORT. Failing a device's job poll because a progress label could
+	// not be written would break sync to fix a screen.
+	var enrolmentJobs []int64
+	for _, job := range jobs {
+		if job.JobType == models.SyncJobEnrollFingerprint {
+			enrolmentJobs = append(enrolmentJobs, job.ID)
+		}
+	}
+	if len(enrolmentJobs) > 0 {
+		if err := database.MarkEnrollmentDelivered(c.GetInt64("device_id"), enrolmentJobs); err != nil {
+			logError(c, "mark enrolment delivered", err)
+		}
+	}
+
 	c.JSON(http.StatusOK, models.SyncJobBatch{
 		ProtocolVersion: models.SyncProtocolVersion,
 		DeviceID:        c.GetString("device_serial"),
@@ -321,6 +344,25 @@ func CompleteDeviceJob(c *gin.Context) {
 		found, err = database.AckJobCompleted(deviceID, jobID)
 	case "FAILED":
 		found, err = database.AckJobFailed(deviceID, jobID, result.Error)
+
+		// An enrolment that failed is one an operator is watching, and the
+		// terminal's own words are the useful part of it -- "sensor error" and
+		// "the window closed with nobody at the door" send somebody to two
+		// different places.
+		//
+		// UNCONDITIONAL rather than gated on the job type, because the update is
+		// keyed on (sync_job_id, device_id) and matches nothing for any other
+		// job. Reading the job back first to check its type would be a second
+		// query to avoid a no-op.
+		//
+		// Best effort: the acknowledgement itself has already been recorded, and
+		// failing this response would have the terminal retry an acknowledgement
+		// the platform accepted.
+		if err == nil {
+			if failErr := database.FailEnrollmentForJob(deviceID, jobID, result.Error); failErr != nil {
+				logError(c, "record enrolment failure", failErr)
+			}
+		}
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be COMPLETED or FAILED"})
 		return

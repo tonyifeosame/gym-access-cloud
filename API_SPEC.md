@@ -1297,6 +1297,9 @@ one. CSRF is required on every unsafe method.
 | `POST` | `/api/v1/console/people` | session + CSRF | MANAGER |
 | `PUT` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
 | `DELETE` | `/api/v1/console/people/{external_id}` | session + CSRF | MANAGER |
+| `GET` | `/api/v1/console/people/{external_id}/enrollment` | session | VIEWER |
+| `DELETE` | `/api/v1/console/people/{external_id}/enrollment` | session + CSRF | MANAGER |
+| `POST` | `/api/v1/console/terminals/{serial}/enrollments` | session + CSRF | MANAGER |
 | `GET` | `/api/v1/console/operators` | session | ADMIN |
 | `POST` | `/api/v1/console/operators` | session + CSRF | ADMIN |
 | `GET` | `/api/v1/console/operators/{operator_id}` | session | ADMIN |
@@ -2517,7 +2520,140 @@ The code is returned **once** and no read endpoint gives it back.
 refused when minted rather than discovered at a door. `superseded_codes` lets the
 console warn that an installer's earlier printout has just stopped working.
 
-### 17.5 What is still outstanding for the firmware side
+### 17.5 `ENROLL_FINGERPRINT` — operator-driven enrolment
+
+**A new `job_type` on the jobs endpoint the terminal already polls.** It does
+not bump `SyncProtocolVersion`: a new job type is the additive extension path,
+and firmware older than this reports it as unknown, acknowledges it, and carries
+on.
+
+#### The problem it closes
+
+Creating a person produced a member row with **no credential** — correctly,
+because biometric material is captured at a sensor and never travels. Binding a
+finger then required a technician with a USB cable typing
+`enroll <member> <name>` into the serial console of the right terminal, and at a
+site with four doors there is nothing on a unit that says which of them it is.
+The failure was silent: the person exists, is active, and opens nothing.
+
+#### The job
+
+```json
+{
+  "id": 4711,
+  "job_type": "ENROLL_FINGERPRINT",
+  "entity_type": "PERSON",
+  "entity_external_id": "MEM001",
+  "payload": {
+    "member_id": "MEM001",
+    "full_name": "Ada Lovelace",
+    "serial_number": "AT-000123",
+    "expires_in_seconds": 300
+  }
+}
+```
+
+| Key | Rule |
+|---|---|
+| `member_id` | **Required.** Refused, not truncated — a shortened id is a different person. |
+| `serial_number` | **Required, and it is the addressing.** The terminal the operator chose. The firmware refuses a job whose serial is not its own *before* it will enter enrolment mode. |
+| `full_name` | Optional. Shown on the terminal's panel so the customer and the operator can both see the door is expecting the right person. |
+| `expires_in_seconds` | Optional, clamped to `30`–`3600`. Absent means the firmware's own default of 300. |
+
+**No template field exists in either direction and none is read.** This job asks
+a terminal to *capture* biometric material; it never delivers any.
+
+#### Only the selected terminal may execute it
+
+Enforced in four places, none of which was written for this feature:
+
+| | |
+|---|---|
+| `GetPendingJobsForDevice` | `WHERE device_id = $1` — no other terminal is offered it |
+| `AckJobCompleted` | `AND device_id = $2` — no other terminal may complete it |
+| `AckJobFailed` | `AND device_id = $2` — no other terminal may fail it |
+| `sync_jobs_change_device_check` | the row cannot exist without naming a device |
+
+A fifth is on the terminal, and it does not trust the first four: the firmware
+compares `serial_number` against its own before acting.
+
+#### `max_attempts` is 1, and only for this type
+
+Every other job is idempotent and worth retrying — a redelivered `CREATE` is an
+upsert. An enrolment is an **appointment**. A terminal that reports `FAILED` has
+already asked somebody to present a finger and been unable to capture it, and
+re-offering the job on a backoff would re-arm that reader minutes later with
+nobody there. Retrying is an operator decision, because only they know whether
+the customer is still in the building.
+
+#### The console routes
+
+| Method | Path | Role |
+|---|---|---|
+| `POST` | `/api/v1/console/terminals/:serial/enrollments` | MANAGER |
+| `GET` | `/api/v1/console/people/:external_id/enrollment` | VIEWER |
+| `DELETE` | `/api/v1/console/people/:external_id/enrollment` | MANAGER |
+
+**The terminal is in the path and the person is in the body.** That is the wrong
+way round for a person-centric UI and the right way round for authorization:
+`RequireTerminalGrant` resolves the serial inside the caller's company, applies
+their site grant, and hands the resolved `device_id` to the handler. A serial in
+the body would need that rule written a second time.
+
+`POST` answers **409** for a terminal that is disabled, retired, or has never
+been provisioned with a credential of its own — it cannot fetch the job at all.
+A terminal that is merely **OFFLINE is accepted**: the job waits for it.
+
+#### Enrolment states
+
+`PENDING` → `IN_PROGRESS` → `COMPLETED` | `FAILED` | `EXPIRED` | `CANCELLED`.
+
+`IN_PROGRESS` is set when the selected terminal **fetches** the job, which is the
+only signal that distinguishes "waiting for the terminal" from "the terminal is
+showing the prompt". A job stays `PENDING` while it is being applied,
+deliberately, so its own status says nothing about whether a device has seen it.
+
+Expiry is applied on read as well as by the sweep, and cancels the job with it —
+otherwise an enrolment whose terminal lost power would sit at "waiting" for ever
+while holding the person's one-live-enrolment slot.
+
+#### A cancelled enrolment never binds a credential
+
+`POST /api/v1/devices/enrollment/result` is refused — `200` with
+`"bound": false` — when the person's most recent enrolment **at that terminal**
+was `CANCELLED`. Cancelling also cancels the job, and `AckJobCompleted` has
+always refused a cancelled job, so a terminal that already held the work cannot
+complete it either.
+
+**Every other case still binds**, and each omission is deliberate:
+
+| Situation | Binds? | Why |
+|---|---|---|
+| No enrolment at all | yes | The bench path: a technician enrolling at a terminal's own console with no platform involvement. It is the documented fallback during an outage. |
+| A live enrolment | yes | The ordinary case. |
+| `EXPIRED` or `FAILED` | yes | The terminal captured a finger. It is on that sensor whatever the platform's clock decided a moment earlier, and refusing would leave the record disagreeing with the hardware. |
+| `CANCELLED` | **no** | The one case where a human said stop. |
+
+#### One live enrolment per person
+
+A partial unique index on `enrollment_requests(person_id) WHERE status IN
+('PENDING','IN_PROGRESS')`. Two live enrolments would be two terminals waiting to
+bind the same finger, and whichever captured first would leave the other armed
+for somebody who is no longer coming.
+
+Starting a new enrolment **supersedes** the outstanding one in the same
+transaction rather than being refused, which is what makes "retry", and "retry at
+a different terminal", one operator action instead of two.
+
+#### Trails
+
+Starting and cancelling are **audit** events (`ENROLMENT_STARTED`,
+`ENROLMENT_CANCELLED`) — an operator decided something. What the terminal then
+did is a **field** event (`CREDENTIAL_ENROLLED`), carrying `decision: RECORDED`
+rather than `GRANTED` or `DENIED`, because nothing was admitted or refused and no
+door moved. Two authors, two trails, and neither is a summary of the other.
+
+### 17.6 What is still outstanding for the firmware side
 
 Recorded because the requirements document lists them as done on the device and
 they are not consumed today:
@@ -2599,7 +2735,7 @@ its return exists and passes.
     carries a `firmware_update` object when a newer current build exists for the
     device's company, type and channel, and the server withholds one that breaks
     any of the four hard rules. The firmware's heartbeat parser does not read the
-    field yet, so no fleet updates itself today — see section 17.5.
+    field yet, so no fleet updates itself today — see section 17.6.
 14. **A `REMOVING` placement has no delivery mechanism.** A credential withdrawn
     from a terminal stops appearing in that terminal's pending list, but nothing
     instructs it to erase the template it already holds. That is the third route
