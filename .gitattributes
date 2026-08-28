@@ -5,3 +5,16 @@
 # and it would break on a fresh clone rather than in the working copy it was
 # written in.
 *.sh text eol=lf
+
+# The same hazard, and it bites harder here. deploy/migrate.sh records a
+# sha256 of each migration FILE in schema_migrations, and compares it on every
+# later run -- so the checksum depends on the bytes on disk, line endings
+# included. A migration applied from an LF checkout and re-read from a CRLF one
+# hashes differently, and the runner correctly refuses to continue: it cannot
+# tell "someone edited an applied migration" from "someone checked it out on
+# Windows". Production applied 002 as afc82e95..., this checkout hashed it as
+# 0211d93b..., and not one byte of SQL differed between them.
+#
+# Pinning LF makes the recorded checksum a property of the migration rather
+# than of the machine that happened to apply it.
+*.sql text eol=lf
