@@ -244,18 +244,59 @@ func DeleteMember(companyID int64, memberID string) error {
 
 // Enrollment Queries
 
-// CreateEnrollmentRequest creates a new enrollment request for a member
+// CreateEnrollmentRequest creates a new enrollment request for a member.
+//
+// ---------------------------------------------------------------------------
+// THIS IS THE LEGACY PATH AND IT CREATES AN UNADDRESSED REQUEST
+// ---------------------------------------------------------------------------
+//
+// `POST /enrollment/start` authenticates with the SITE key and names no
+// terminal, so the row it writes has no device_id -- and nothing delivers it.
+// It records that somebody wants an enrolment; it does not cause one. That was
+// true before 022 and it is still true.
+//
+// The working path is the console's: an operator picks a terminal, an
+// ENROLL_FINGERPRINT job is queued to that terminal alone, and the enrolment
+// row carries the device_id it is addressed to. See database/enrollment.go.
+//
+// This endpoint is kept because it ships in the site-key contract and its
+// response shape is part of it. It now SUPERSEDES any live enrolment for the
+// person rather than failing, because 022 added a partial unique index -- one
+// live enrolment per person -- and a second insert would otherwise surface to
+// the caller as a 500 rather than as the replacement it is.
 func CreateEnrollmentRequest(companyID int64, memberID string) (*models.EnrollmentRequest, error) {
-	query := `INSERT INTO enrollment_requests (person_id, status)
-	          SELECT p.id, 'PENDING' FROM people p
-	          WHERE p.external_id = $1 AND p.company_id = $2 AND p.deleted_at IS NULL
-	          RETURNING id, public_id, status, created_at, completed_at`
+	tx, err := DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var personID int64
+	err = tx.QueryRow(
+		`SELECT id FROM people
+		  WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
+		  FOR UPDATE`, memberID, companyID).Scan(&personID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := supersedeLiveEnrollmentTx(tx, personID,
+		"superseded by a later enrolment request"); err != nil {
+		return nil, err
+	}
 
 	var req models.EnrollmentRequest
-	err := DB.QueryRow(query, memberID, companyID).Scan(
+	err = tx.QueryRow(
+		`INSERT INTO enrollment_requests (person_id, status)
+		 VALUES ($1, 'PENDING')
+		 RETURNING id, public_id, status, created_at, completed_at`, personID).Scan(
 		&req.ID, &req.PublicID, &req.Status, &req.CreatedAt, &req.CompletedAt,
 	)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	req.MemberID = memberID
@@ -305,7 +346,10 @@ func UpdateEnrollmentRequestStatus(id int64, status string) error {
 
 // CompleteEnrollment completes enrollment by updating the person's fingerprint
 // template and closing out their pending request
-func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) error {
+// `deviceID` is the terminal that reported it, or 0 when the caller is the
+// site-key path and there is no terminal identity in the request. It scopes
+// which enrolment this report may close -- see the note below.
+func CompleteEnrollment(companyID, deviceID int64, memberID, fingerprintTemplate string) error {
 	tx, err := DB.Begin()
 	if err != nil {
 		return err
@@ -341,13 +385,37 @@ func CompleteEnrollment(companyID int64, memberID, fingerprintTemplate string) e
 		return err
 	}
 
-	// Update enrollment request status
+	// The enrolment an operator is watching, retired by the report that
+	// fulfils it.
+	//
+	// SCOPED TO THE REPORTING DEVICE when there is one, and that is the whole
+	// of what `deviceID` is for here. A terminal reporting an enrolment must not
+	// close one addressed to a DIFFERENT door -- that enrolment is still
+	// outstanding, its window is still open, and somebody is still expected to
+	// walk to it. The site-key path passes 0 and closes any live row for the
+	// person, which is the behaviour it has always had.
+	//
+	// AN UNADDRESSED ROW IS CLOSED BY ANY TERMINAL, and the `device_id IS NULL`
+	// arm is what keeps the legacy path working. `POST /enrollment/start` names
+	// no terminal -- it authenticates with the site key and has none to name --
+	// so the row it writes belongs to no door in particular. Requiring a match
+	// would leave every one of those enrolments PENDING for ever, which is a
+	// shipped contract broken to tighten a rule that does not apply to it.
+	//
+	// EXPIRED AND FAILED ARE RETIRED TOO. A terminal that captured a finger a
+	// moment after the platform's clock closed the window has still captured it:
+	// the template is on that sensor, and leaving the enrolment EXPIRED while
+	// the credential says Enrolled would be the record disagreeing with the
+	// hardware. That is the divergence this subsystem exists to prevent.
 	now := time.Now()
-	_, err = tx.Exec(`UPDATE enrollment_requests SET status = 'COMPLETED', completed_at = $1
-	                  WHERE status = 'PENDING' AND person_id = (
-	                      SELECT id FROM people
-	                      WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
-	                  )`, now, memberID, companyID)
+	_, err = tx.Exec(`UPDATE enrollment_requests er
+	                     SET status = 'COMPLETED', completed_at = $1, error_message = NULL
+	                   WHERE er.status IN ('PENDING', 'IN_PROGRESS', 'EXPIRED', 'FAILED')
+	                     AND ($4 = 0 OR er.device_id IS NULL OR er.device_id = $4)
+	                     AND er.person_id = (
+	                         SELECT id FROM people
+	                         WHERE external_id = $2 AND company_id = $3 AND deleted_at IS NULL
+	                     )`, now, memberID, companyID, deviceID)
 	if err != nil {
 		return err
 	}

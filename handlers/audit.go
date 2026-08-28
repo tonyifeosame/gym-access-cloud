@@ -55,6 +55,17 @@ const (
 	auditCredentialIssued  = "CREDENTIAL_ISSUED"
 	auditCredentialRevoked = "CREDENTIAL_REVOKED"
 
+	// Operator-driven fingerprint enrolment.
+	//
+	// AUDIT RATHER THAN FIELD EVENTS, and the split is the one this codebase
+	// already draws. An operator choosing a person, a door and a window is an
+	// administrative decision and belongs in the trail that names who made it.
+	// What the TERMINAL then did -- captured a finger, or could not -- is a
+	// field event, written where the report arrives. Two authors, two trails,
+	// and neither is a summary of the other.
+	auditEnrollmentStarted   = "ENROLMENT_STARTED"
+	auditEnrollmentCancelled = "ENROLMENT_CANCELLED"
+
 	auditOperatorCreated     = "OPERATOR_CREATED"
 	auditOperatorUpdated     = "OPERATOR_UPDATED"
 	auditOperatorRoleSet     = "OPERATOR_ROLE_CHANGED"

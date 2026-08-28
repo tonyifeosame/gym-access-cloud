@@ -245,6 +245,16 @@ func NewRouter() *gin.Engine {
 			read.GET("/people", handlers.ConsoleListPeople)
 			read.GET("/people/:external_id", handlers.ConsoleGetPerson)
 
+			// "Is she enrolled yet, and at which door." VIEWER, because that is
+			// a front-desk question rather than an administrative one.
+			//
+			// THE POLLED ROUTE. A console watching an enrolment reads this
+			// every couple of seconds while a customer stands at a terminal, so
+			// it answers with the enrolment AND the person's credential state
+			// in one response -- see the note on the handler.
+			read.GET("/people/:external_id/enrollment",
+				handlers.ConsoleGetPersonEnrollment)
+
 			// Who may go where, and when (APP-02). Readable by any operator:
 			// "why was she refused" is a question a viewer at a front desk has
 			// to be able to answer, and the rules are not secret from the
@@ -290,6 +300,31 @@ func NewRouter() *gin.Engine {
 			// destructive terminal operations are ADMIN, below.
 			write.POST("/terminals/:serial/resync",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleResyncTerminal)
+
+			// Fingerprint enrolment, addressed to ONE terminal.
+			//
+			// THE TERMINAL IS IN THE PATH, and the person is in the body. That
+			// is the wrong way round for a person-centric UI and the right way
+			// round for authorization: RequireTerminalGrant resolves the serial
+			// inside the caller's company, applies their site grant, and hands
+			// the resolved device_id to the handler. A serial in the body would
+			// have to be resolved and authorized by hand, which is the tenancy
+			// rule written a second time -- and a second copy is how a boundary
+			// develops a hole.
+			//
+			// MANAGER, matching resync above rather than the ADMIN lifecycle
+			// operations: enrolling a member is day-to-day front-desk work, and
+			// putting it behind the gate that mints provisioning credentials
+			// would mean every new joiner needs an administrator.
+			write.POST("/terminals/:serial/enrollments",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleStartEnrollment)
+
+			// Cancelling is person-addressed: it stops whatever is live for
+			// them, whichever door it was sent to. An operator cancelling does
+			// not necessarily remember which terminal they picked, and making
+			// them name it would be asking the question the system can answer.
+			write.DELETE("/people/:external_id/enrollment",
+				handlers.ConsoleCancelEnrollment)
 
 			// The authorization engine's write surface (APP-02).
 			//
