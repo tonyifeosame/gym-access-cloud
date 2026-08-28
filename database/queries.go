@@ -253,7 +253,7 @@ func DeleteMember(companyID int64, memberID string) error {
 // `POST /enrollment/start` authenticates with the SITE key and names no
 // terminal, so the row it writes has no device_id -- and nothing delivers it.
 // It records that somebody wants an enrolment; it does not cause one. That was
-// true before 022 and it is still true.
+// true before 027 and it is still true.
 //
 // The working path is the console's: an operator picks a terminal, an
 // ENROLL_FINGERPRINT job is queued to that terminal alone, and the enrolment
@@ -261,7 +261,7 @@ func DeleteMember(companyID int64, memberID string) error {
 //
 // This endpoint is kept because it ships in the site-key contract and its
 // response shape is part of it. It now SUPERSEDES any live enrolment for the
-// person rather than failing, because 022 added a partial unique index -- one
+// person rather than failing, because 027 added a partial unique index -- one
 // live enrolment per person -- and a second insert would otherwise surface to
 // the caller as a 500 rather than as the replacement it is.
 func CreateEnrollmentRequest(companyID int64, memberID string) (*models.EnrollmentRequest, error) {

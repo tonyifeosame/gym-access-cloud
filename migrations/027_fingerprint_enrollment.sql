@@ -1,5 +1,5 @@
 -- ---------------------------------------------------------------------------
--- 022: operator-driven fingerprint enrolment
+-- 027: operator-driven fingerprint enrolment
 -- ---------------------------------------------------------------------------
 --
 -- WHAT WAS MISSING, said plainly.
@@ -45,15 +45,30 @@ BEGIN;
 -- Additive, and it does NOT bump SyncProtocolVersion: the sync protocol names a
 -- new job type as the extension path, and firmware older than this reports it
 -- as unknown and acknowledges it rather than stalling.
+--
+-- THE LIST BELOW IS THE UNION OF EVERY JOB TYPE, not this feature's half
+-- of it.
+--
+-- PostgreSQL has no "add one value to a CHECK": every migration that touches
+-- this constraint restates the whole list, and whichever ran last decides what
+-- the table accepts. 024 added WIFI_RECOVERY exactly this way. Restating only
+-- the types this feature knows about would silently revoke Wi-Fi recovery --
+-- and, on a database where a WIFI_RECOVERY row already exists, would fail this
+-- migration outright when ADD CONSTRAINT revalidates the table.
+--
+-- So this is 024's list plus ENROLL_FINGERPRINT. A later migration adding a
+-- job type owes the same debt to this one.
 ALTER TABLE sync_jobs DROP CONSTRAINT IF EXISTS sync_jobs_type_check;
 ALTER TABLE sync_jobs ADD CONSTRAINT sync_jobs_type_check CHECK (job_type IN (
     -- entity change operations (Sprint 4)
     'CREATE', 'UPDATE', 'DELETE', 'SETTINGS',
-    -- operator-driven enrolment (this migration)
-    'ENROLL_FINGERPRINT',
     -- operational jobs (Sprint 2)
     'FULL_SYNC', 'INCREMENTAL_SYNC', 'PERMISSION_PUSH',
-    'TEMPLATE_PUSH', 'FIRMWARE_UPDATE', 'LOG_PULL'
+    'TEMPLATE_PUSH', 'FIRMWARE_UPDATE', 'LOG_PULL',
+    -- operator commands (024)
+    'WIFI_RECOVERY',
+    -- operator-driven enrolment (this migration)
+    'ENROLL_FINGERPRINT'
 ));
 
 -- AN ENROLMENT IS ALWAYS ADDRESSED TO EXACTLY ONE DEVICE, and this constraint is
@@ -63,9 +78,15 @@ ALTER TABLE sync_jobs ADD CONSTRAINT sync_jobs_type_check CHECK (job_type IN (
 -- terminal at the site entering enrolment mode for one person, racing to capture
 -- whichever finger reached a platen first. The operator picked a door; the
 -- schema refuses to store a job that forgot which.
+--
+-- WIFI_RECOVERY IS CARRIED FORWARD FROM 024, for the same reason and by the
+-- same rule as the type list above: 024 joined it to this constraint because a
+-- recovery command with a null device_id would put every door at a site into
+-- setup mode at once. Dropping it here would restore precisely that.
 ALTER TABLE sync_jobs DROP CONSTRAINT IF EXISTS sync_jobs_change_device_check;
 ALTER TABLE sync_jobs ADD CONSTRAINT sync_jobs_change_device_check CHECK (
-    job_type NOT IN ('CREATE', 'UPDATE', 'DELETE', 'SETTINGS', 'ENROLL_FINGERPRINT')
+    job_type NOT IN ('CREATE', 'UPDATE', 'DELETE', 'SETTINGS', 'WIFI_RECOVERY',
+                     'ENROLL_FINGERPRINT')
     OR device_id IS NOT NULL
 );
 
@@ -123,7 +144,7 @@ ALTER TABLE enrollment_requests ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 -- through a deployment is worse than one that records what it could not read.
 UPDATE enrollment_requests
    SET status = 'FAILED',
-       error_message = COALESCE(error_message, 'status ' || status || ' predates 022')
+       error_message = COALESCE(error_message, 'status ' || status || ' predates 027')
  WHERE status NOT IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED',
                       'EXPIRED', 'CANCELLED');
 
@@ -150,7 +171,7 @@ ALTER TABLE enrollment_requests ADD CONSTRAINT enrollment_requests_status_check 
 UPDATE enrollment_requests er
    SET status = 'CANCELLED',
        completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
-       error_message = COALESCE(error_message, 'superseded when 022 introduced one live enrolment per person')
+       error_message = COALESCE(error_message, 'superseded when 027 introduced one live enrolment per person')
  WHERE er.status IN ('PENDING', 'IN_PROGRESS')
    AND EXISTS (
        SELECT 1 FROM enrollment_requests newer

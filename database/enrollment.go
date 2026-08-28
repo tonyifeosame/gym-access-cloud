@@ -9,7 +9,7 @@ import (
 	"access-terminal-cloud-api/models"
 )
 
-// Operator-driven fingerprint enrolment (migrations/022_fingerprint_enrollment.sql).
+// Operator-driven fingerprint enrolment (migrations/027_fingerprint_enrollment.sql).
 //
 // An enrolment is TWO ROWS WRITTEN TOGETHER: a `sync_jobs` row that carries the
 // instruction to one terminal, and an `enrollment_requests` row that is the
