@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 
 import type {
+  Enrollment,
   AuditRecord,
   ConfiguredApplication,
   FieldEvent,
@@ -58,6 +59,8 @@ interface ServerState {
   sites: Site[]
   terminals: Terminal[]
   people: Person[]
+  /** Enrolments, keyed by the person's external id. */
+  enrollments: Record<string, Enrollment>
   operators: OperatorAccount[]
   applications: ConfiguredApplication[]
   available: string[]
@@ -90,6 +93,7 @@ function initialState(): ServerState {
     sites: [],
     terminals: [],
     people: [],
+    enrollments: {},
     operators: [],
     applications: [],
     available: [
@@ -1158,6 +1162,99 @@ export const handlers = [
     const person = state.people.find((entry) => entry.external_id === String(params.externalId))
     if (!person) return json({ error: 'Person not found' }, 404)
     return json(person)
+  }),
+
+  // --- fingerprint enrolment ------------------------------------------------
+  //
+  // MODELLED ON THE API, NOT ON THE CLIENT. Three behaviours are reproduced
+  // because screens depend on them and a mock that agreed with the client
+  // instead would pass while the real thing failed:
+  //
+  //   * the enrolment read returns the PERSON'S credential state alongside the
+  //     enrolment, so a test cannot pass by reconciling two endpoints;
+  //   * starting one is addressed to a TERMINAL by serial, and the mock refuses
+  //     a serial it does not hold -- so a test cannot start an enrolment at a
+  //     terminal that is not in the fleet;
+  //   * a terminal that is DISABLED or inactive is refused with 409, exactly as
+  //     the server refuses it.
+
+  http.get('*/api/v1/console/people/:externalId/enrollment', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+
+    const externalId = String(params.externalId)
+    const person = state.people.find((entry) => entry.external_id === externalId)
+    if (!person) return json({ error: 'Person not found' }, 404)
+
+    return json({
+      external_id: externalId,
+      biometric_enrolled: person.biometric_enrolled,
+      enrollment: state.enrollments[externalId] ?? null,
+    })
+  }),
+
+  http.post('*/api/v1/console/terminals/:serial/enrollments', async ({ request, params }) => {
+    record(request)
+    const serial = String(params.serial)
+    const refused = guardTerminal(request, serial, 'MANAGER')
+    if (refused) return refused
+
+    const failure = takeFailure('start-enrolment')
+    if (failure) return json({ error: 'Failed to start the enrolment' }, failure)
+
+    const terminal = state.terminals.find((entry) => entry.serial_number === serial) as Terminal
+    if (!terminal.active || terminal.status === 'DISABLED') {
+      return json(
+        {
+          error:
+            'That terminal cannot run an enrolment. It is disabled, retired, or has ' +
+            'never been provisioned with a credential of its own.',
+        },
+        409,
+      )
+    }
+
+    const body = (await request.json()) as { external_id: string }
+    const person = state.people.find((entry) => entry.external_id === body.external_id)
+    if (!person) return json({ error: 'Person not found' }, 404)
+
+    const enrollment: Enrollment = {
+      id: `enrolment-${body.external_id}-${Object.keys(state.enrollments).length + 1}`,
+      status: 'PENDING',
+      external_id: body.external_id,
+      full_name: person.full_name,
+      terminal_serial: terminal.serial_number,
+      terminal_name: terminal.device_name,
+      site_name: terminal.site_name,
+      site_public_id: terminal.site_public_id,
+      terminal_status: terminal.status,
+      requested_by_email: state.session?.operator.email,
+      created_at: '2026-08-14T17:00:00Z',
+      expires_at: '2026-08-14T17:05:00Z',
+      biometric_enrolled: person.biometric_enrolled,
+    }
+    state.enrollments = { ...state.enrollments, [body.external_id]: enrollment }
+    return json(enrollment, 201)
+  }),
+
+  http.delete('*/api/v1/console/people/:externalId/enrollment', ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+
+    const externalId = String(params.externalId)
+    const existing = state.enrollments[externalId]
+    if (!existing || (existing.status !== 'PENDING' && existing.status !== 'IN_PROGRESS')) {
+      return json({ error: 'There is no enrolment in progress for this person' }, 409)
+    }
+
+    const cancelled: Enrollment = {
+      ...existing,
+      status: 'CANCELLED',
+      completed_at: '2026-08-14T17:02:00Z',
+    }
+    state.enrollments = { ...state.enrollments, [externalId]: cancelled }
+    return json(cancelled)
   }),
 
   http.put('*/api/v1/console/people/:externalId', async ({ request, params }) => {

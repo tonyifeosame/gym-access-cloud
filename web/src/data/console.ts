@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import {
   useMutation,
   useQuery,
@@ -25,6 +26,9 @@ import type {
   CreateOperatorResponse,
   CreateSiteRequest,
   CreateSiteResponse,
+  Enrollment,
+  EnrollmentRequest,
+  EnrollmentResponse,
   EventPage,
   EventQuery,
   FirmwareResponse,
@@ -518,6 +522,113 @@ export function useCreatePerson(): UseMutationResult<Person, Error, PersonReques
       queryClient.setQueryData(keys.people.detail(person.external_id), person)
       // Every page and search is now potentially wrong -- the new person may
       // belong on any of them, and every total is off by one.
+      void queryClient.invalidateQueries({ queryKey: keys.people.all })
+    },
+  })
+}
+
+/**
+ * One person's fingerprint enrolment, polled while it is live.
+ *
+ * WHY THIS POLLS. An enrolment is a customer walking to a door and putting a
+ * finger on a sensor. The state changes because of something happening in a
+ * building, not because of anything this browser did, so there is nothing to
+ * invalidate on — and an operator watching a screen that only updates when they
+ * press a button is an operator pressing a button.
+ *
+ * WHY IT STOPS. `refetchInterval` returns false once the enrolment reaches a
+ * terminal state, so a detail page left open on a completed enrolment is not a
+ * request every two seconds for the rest of the afternoon. This is the only
+ * polled query in the console and it is deliberately the narrowest one.
+ *
+ * Two seconds because a terminal polls the platform on its own schedule, so the
+ * platform learns about a capture within one of ITS cycles — refreshing faster
+ * would not make the answer arrive sooner, and slower would leave somebody
+ * standing at a door wondering whether it worked.
+ */
+export function useEnrollment(
+  externalId: string | undefined,
+  options: { enabled?: boolean } = {},
+): UseQueryResult<EnrollmentResponse> {
+  const queryClient = useQueryClient()
+
+  const query = useQuery({
+    queryKey: keys.people.enrollment(externalId ?? ''),
+    queryFn: () => endpoints.fetchEnrollment(externalId as string),
+    enabled: Boolean(externalId) && options.enabled !== false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.enrollment?.status
+      if (status === 'PENDING' || status === 'IN_PROGRESS') return 2000
+      return false
+    },
+  })
+
+  // THE CREDENTIAL CHANGED BECAUSE OF SOMETHING THAT HAPPENED IN A BUILDING.
+  //
+  // This poll is the only thing watching for it. A person's record is
+  // invalidated when an operator STARTS an enrolment -- at which point they are
+  // still not enrolled -- and nothing else fires when the terminal reports a
+  // capture minutes later. Without this, the dialog said "Fingerprint enrolled"
+  // while the badge beside it, and every row in the people list, still read "Not
+  // enrolled" until somebody navigated away and back.
+  //
+  // GATED ON A REAL DISAGREEMENT rather than on the status, so it costs nothing
+  // on the overwhelmingly common tick where nothing has changed, and cannot
+  // become a refetch loop: invalidating the person does not change the answer
+  // this compares against.
+  const enrolledNow = query.data?.biometric_enrolled
+  useEffect(() => {
+    if (enrolledNow === undefined || !externalId) return
+
+    const cached = queryClient.getQueryData<Person>(keys.people.detail(externalId))
+    if (cached === undefined || cached.biometric_enrolled === enrolledNow) return
+
+    void queryClient.invalidateQueries({ queryKey: keys.people.detail(externalId) })
+    // The lists, not `people.all` -- that prefix covers this very query, and
+    // invalidating it here would have the poll refetch itself every tick.
+    void queryClient.invalidateQueries({ queryKey: keys.people.lists() })
+  }, [enrolledNow, externalId, queryClient])
+
+  return query
+}
+
+/**
+ * Asks one terminal to capture a fingerprint.
+ *
+ * Invalidates the PERSON as well as the enrolment: a completed enrolment flips
+ * `biometric_enrolled`, and the list and detail views both render it.
+ */
+export function useStartEnrollment(
+  externalId: string,
+): UseMutationResult<Enrollment, Error, { serial: string; body: EnrollmentRequest }> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ serial, body }: { serial: string; body: EnrollmentRequest }) =>
+      endpoints.startEnrollment(serial, body),
+    onSuccess: (enrollment) => {
+      queryClient.setQueryData<EnrollmentResponse>(keys.people.enrollment(externalId), {
+        external_id: externalId,
+        biometric_enrolled: enrollment.biometric_enrolled,
+        enrollment,
+      })
+      void queryClient.invalidateQueries({ queryKey: keys.people.all })
+    },
+  })
+}
+
+/** Stops a live enrolment. */
+export function useCancelEnrollment(
+  externalId: string,
+): UseMutationResult<Enrollment, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.cancelEnrollment(externalId),
+    onSuccess: (enrollment) => {
+      queryClient.setQueryData<EnrollmentResponse>(keys.people.enrollment(externalId), {
+        external_id: externalId,
+        biometric_enrolled: enrollment.biometric_enrolled,
+        enrollment,
+      })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
     },
   })

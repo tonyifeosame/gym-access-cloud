@@ -465,14 +465,24 @@ describe('biometric non-disclosure', () => {
     }
   })
 
-  it('says enrolment is not available from the console rather than faking it', async () => {
+  it('offers the enrolment action and still says WHERE it happens', async () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and the change is the feature: the
+    // console had no operator route to start an enrolment, so the page said so
+    // rather than offering a button that would 404. It now has one.
+    //
+    // The sentence about where enrolment happens is kept deliberately. Starting
+    // an enrolment and performing one are different things -- the capture is at
+    // a terminal with the person present, and no biometric data reaches this
+    // screen in either direction. A console that offered the button without
+    // saying that would suggest the credential could be captured from a desk.
     signIn()
     renderPeople('/people/P-0000')
 
     expect(await screen.findByText('Enrolment happens at a terminal')).toBeInTheDocument()
-    expect(screen.getByText(/no operator API to start, review or clear an enrolment/)).toBeInTheDocument()
-    // And offers no button that would 404.
-    expect(screen.queryByRole('button', { name: /enrol/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/standing at the terminal you choose/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /enrol fingerprint/i }),
+    ).toBeInTheDocument()
   })
 
   it('carries nothing credential-shaped in any list response it holds', async () => {

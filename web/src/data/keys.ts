@@ -76,6 +76,26 @@ export const keys = {
         },
       ] as const,
     detail: (externalId: string) => [ROOT, 'people', 'detail', externalId] as const,
+
+    /**
+     * Every page and search, without the enrolments.
+     *
+     * `people.all` would reach those too, and an enrolment poll that invalidated
+     * its own key would refetch itself on every tick. This is the prefix to use
+     * when a person's data changed and the enrolment is what noticed.
+     */
+    lists: () => [ROOT, 'people', 'list'] as const,
+
+    /**
+     * One person's fingerprint enrolment.
+     *
+     * UNDER `people` SO IT IS INVALIDATED WITH THEM. Removing a person, or
+     * anything else that invalidates `people.all`, has to drop this too — an
+     * enrolment cached against somebody who no longer exists is a screen
+     * offering to enrol a deleted record.
+     */
+    enrollment: (externalId: string) =>
+      [ROOT, 'people', 'enrollment', externalId] as const,
   },
 
   operators: {

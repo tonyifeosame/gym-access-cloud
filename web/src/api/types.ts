@@ -609,6 +609,104 @@ export interface Person {
   updated_at: string
 }
 
+// ---------------------------------------------------------------------------
+// Fingerprint enrolment
+// ---------------------------------------------------------------------------
+
+/**
+ * Where an enrolment has got to.
+ *
+ * SIX STATES, AND EACH SENDS AN OPERATOR SOMEWHERE DIFFERENT — which is why
+ * they are not collapsed into "in progress / done / failed":
+ *
+ *   PENDING      queued; the terminal has not polled yet. If it is offline,
+ *                this is where it will sit until it comes back.
+ *   IN_PROGRESS  the terminal has the job and is showing the prompt. The
+ *                person should be at that door NOW.
+ *   COMPLETED    a finger was captured and bound.
+ *   FAILED       the terminal tried and could not. Its own words come with it.
+ *   EXPIRED      the window closed with nobody at the door. Not a fault, and it
+ *                reads differently from FAILED for exactly that reason.
+ *   CANCELLED    an operator stopped it.
+ *
+ * Widened with `string & {}` like TerminalStatus: the server may grow a state
+ * this build predates, and a console that crashed on one would be worse than
+ * one that shows it plainly.
+ */
+export type KnownEnrollmentStatus =
+  | 'PENDING'
+  | 'IN_PROGRESS'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+
+export type EnrollmentStatus = KnownEnrollmentStatus | (string & {})
+
+/**
+ * One enrolment.
+ *
+ * It names the TERMINAL in full — serial, name and site — rather than by id.
+ * "Waiting for terminal" is not useful to read; "waiting for Front Door
+ * (AT-000123) at Victoria Island" is, and it is what an operator needs in order
+ * to decide whether to keep waiting or send the person somewhere else.
+ *
+ * NOTHING BIOMETRIC IS HERE. No template, no locator, no slot, no sensor
+ * vendor. The credential stays an abstraction the backend owns, exactly as it
+ * is everywhere else in this console.
+ */
+export interface Enrollment {
+  id: string
+  status: EnrollmentStatus
+  external_id: string
+  full_name?: string
+
+  terminal_serial: string
+  terminal_name?: string
+  site_name?: string
+  site_public_id?: string
+  /** The terminal's reported state when this was read. */
+  terminal_status?: TerminalStatus
+
+  /** The TERMINAL's own words about what went wrong, not a platform summary. */
+  error_message?: string
+  requested_by_email?: string
+
+  created_at: string
+  expires_at?: string
+  started_at?: string
+  completed_at?: string
+
+  /**
+   * The person's credential state as it stands now.
+   *
+   * ON THE ENROLMENT rather than only on the person, because this is the object
+   * a screen polls while it waits and the credential flipping is what it is
+   * waiting for. Reconciling two endpoints would let a screen render "Enrolled
+   * successfully" beside "Not enrolled" for one refresh interval.
+   */
+  biometric_enrolled: boolean
+}
+
+/**
+ * The enrolment state of one person.
+ *
+ * `enrollment` is null when they have never had one — a different fact from
+ * "not enrolled", and rendered differently: one offers the action, the other
+ * reports an outcome.
+ */
+export interface EnrollmentResponse {
+  external_id: string
+  biometric_enrolled: boolean
+  enrollment: Enrollment | null
+}
+
+/** Starting an enrolment. The terminal is named by the URL, not by this body. */
+export interface EnrollmentRequest {
+  external_id: string
+  expires_in_seconds?: number
+}
+
 /**
  * A page of people.
  *
