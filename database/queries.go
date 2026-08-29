@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"access-terminal-cloud-api/models"
@@ -234,6 +235,29 @@ func DeleteMember(companyID int64, memberID string) error {
 	}
 	if err != nil {
 		return err
+	}
+
+	// The INTENT, stated where an operator can see it, exactly as terminal
+	// relocation already does (database/terminals.go). Without this a placement
+	// jumps PLACED -> REMOVED the instant a terminal happens to report back, and
+	// in between -- which is however long that door takes to poll, or for ever
+	// if it is offline -- the console shows the credential as still placed on a
+	// person who has been deleted.
+	//
+	// REMOVING is the platform's statement; REMOVED is the terminal's. The
+	// terminal's report converges these rows, and RecordPlacement resolves a
+	// soft-deleted person for exactly that report and no other.
+	//
+	// Scoped through the credential's own person: a placement belongs to a
+	// credential, and a credential belongs to one person.
+	if _, err := tx.Exec(`
+		UPDATE credential_placements
+		   SET state = 'REMOVING', last_error = NULL
+		 WHERE state IN ('PENDING', 'PLACED')
+		   AND credential_id IN (SELECT id FROM credentials
+		                          WHERE person_id = $1 AND deleted_at IS NULL)`,
+		member.ID); err != nil {
+		return fmt.Errorf("marking placements for removal after delete: %w", err)
 	}
 
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {

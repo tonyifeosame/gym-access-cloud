@@ -311,10 +311,38 @@ func RecordPlacement(deviceID int64, report PlacementReport) (*PendingPlacement,
 		return nil, err
 	}
 
-	var personID int64
-	err = tx.QueryRow(`
+	// A REMOVED report is the ONE that must survive the person being deleted,
+	// and it is the only one.
+	//
+	// Deleting somebody soft-deletes the person and queues a DELETE job to every
+	// terminal holding them. The terminal erases the template and reports
+	// REMOVED -- which arrived here AFTER deleted_at was set, failed this
+	// lookup, and came back 404. The firmware retires a 404 as permanent
+	// (net_service.cpp), correctly, so nothing retried and nothing jammed; the
+	// placement simply stayed PLACED for ever. The platform went on believing a
+	// credential sat on a sensor that had already erased it, and because the
+	// platform never offers work for a credential it believes is placed, that
+	// stale row is what would block re-enrolling the person if they were
+	// restored.
+	//
+	// PLACED and FAILED keep the old rule. Those say "this credential is now on
+	// this door" and "it could not be", and a deleted person must not acquire
+	// either -- accepting one would resurrect a placement for somebody an
+	// operator removed.
+	//
+	// Tenancy is unchanged: company_id still comes from the authenticated
+	// device's own row, never from the body.
+	personQuery := `
 		SELECT id FROM people
-		 WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL`,
+		 WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL`
+	if report.State == models.PlacementRemoved {
+		personQuery = `
+			SELECT id FROM people
+			 WHERE company_id = $1 AND external_id = $2`
+	}
+
+	var personID int64
+	err = tx.QueryRow(personQuery,
 		companyID, strings.TrimSpace(report.ExternalID)).Scan(&personID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrPersonNotFound
