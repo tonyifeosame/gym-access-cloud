@@ -767,7 +767,12 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 		          AND p.deleted_at IS NULL
 		          AND `+rosterMembershipPredicate+`
 		  ) roster ON TRUE
-		 WHERE d.id = $1 AND d.deleted_at IS NULL`,
+		 WHERE d.id = $1 AND d.deleted_at IS NULL
+		   -- A QUARANTINED TERMINAL GETS NO SNAPSHOT. A FULL_SYNC is the most
+		   -- destructive job there is: the terminal treats it as authoritative
+		   -- and erases the template of anybody the roster omits. See migration
+		   -- 029 and deviceIsSyncable in roster.go.
+		   AND d.sync_paused_at IS NULL`,
 		deviceID, models.SyncProtocolVersion)
 	if err != nil {
 		return 0, fmt.Errorf("enqueueing roster snapshot: %w", err)
