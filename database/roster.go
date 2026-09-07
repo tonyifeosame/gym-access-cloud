@@ -103,11 +103,30 @@ const rosterMembershipPredicate = `
 // A DISABLED or revoked terminal is deliberately excluded. Queueing work for a
 // terminal that cannot authenticate would build a backlog that looks like a sync
 // failure, and a revoked unit must not be handed a roster if it ever comes back.
+//
+// A QUARANTINED TERMINAL IS EXCLUDED TOO, and for a different reason. A DELETE
+// job is applied at the terminal by removing the member row AND erasing that
+// person's template from the sensor, so roster reconciliation is a destructive
+// operation as far as a terminal's stored credentials are concerned. When a
+// terminal is under investigation -- its templates are evidence, or its member
+// table is being reconciled by hand -- the platform must be able to leave it
+// alone WITHOUT taking the door out of service.
+//
+// The incident that produced this: bringing the API up so a bench terminal
+// could drain its queued access events also woke the 15-minute reconciler,
+// which queued DELETE jobs for the two people whose templates were the only
+// evidence of a live defect. Delivering them would have erased it. Nothing was
+// wrong with the reconciler; there was no way to say "not this one".
+//
+// sync_paused_at is NOT `disabled_at` and NOT `active = FALSE`: a quarantined
+// terminal still admits people, still heartbeats and still uploads its access
+// log. Only roster membership changes stop. See migration 029.
 const deviceIsSyncable = `
 	d.active = TRUE
 	AND d.deleted_at IS NULL
 	AND d.status <> 'DISABLED'
-	AND d.api_key_hash IS NOT NULL`
+	AND d.api_key_hash IS NOT NULL
+	AND d.sync_paused_at IS NULL`
 
 // ReconcileDeviceRoster brings one terminal's queued roster back in line with
 // what its permissions currently say, and returns what it changed.
