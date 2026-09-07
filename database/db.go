@@ -144,6 +144,30 @@ func (c Config) connString() (string, error) {
 
 // Target describes what is being connected to, WITHOUT the password. Used in
 // the startup log line and by the test suite to name the server it reached.
+// HostIsLoopback reports whether this configuration points at a database on
+// this machine.
+//
+// EXPORTED FOR THE INTEGRATION SUITE'S GUARD, and for nothing else. The suite
+// DROPs and CREATEs a database on whatever it is pointed at, and a repository
+// `.env` carrying a managed provider's DATABASE_URL -- which is the normal way
+// to hold one -- silently aims that at production, because DATABASE_URL
+// supersedes the DB_* variables entirely (see GetConfigFromEnv). Answering the
+// question here rather than in the test keeps the definition of "local" in one
+// place: the same isLoopback that decides whether plaintext is tolerable.
+func (c Config) HostIsLoopback() bool {
+	if c.URL == "" {
+		// The discrete fields default Host to "localhost".
+		return isLoopback(c.Host)
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil {
+		// UNPARSEABLE IS NOT LOCAL. A guard that cannot read its input must
+		// refuse, or the one case it cannot classify is the one it permits.
+		return false
+	}
+	return isLoopback(u.Hostname())
+}
+
 func (c Config) Target() string {
 	if c.URL == "" {
 		return fmt.Sprintf("postgres://%s@%s:%s/%s (sslmode=%s)",

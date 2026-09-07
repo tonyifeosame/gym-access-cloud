@@ -51,6 +51,19 @@ const (
 	// be an audit trail asserting something it cannot observe.
 	auditTerminalWifiRecovery = "TERMINAL_WIFI_RECOVERY_REQUESTED"
 
+	// The remote command plane (028). TWO ACTIONS, not one "command" action
+	// with a verb in the payload: an audit trail is read by filtering on
+	// `action`, and "show me everything anybody asked a door to do" and "show
+	// me what somebody thought better of" are two different questions.
+	//
+	// THE OUTCOME IS NOT HERE, and that is deliberate. These record that an
+	// operator ASKED. What the terminal did with it lives on the sync_jobs row
+	// -- delivered, acknowledged, result, error -- because an audit record that
+	// was mutated to carry an outcome would stop being an audit record. The
+	// command's public id is the join between the two.
+	auditTerminalCommandIssued    = "TERMINAL_COMMAND_ISSUED"
+	auditTerminalCommandWithdrawn = "TERMINAL_COMMAND_WITHDRAWN"
+
 	// Claim codes. Two actions, because they are performed by two different
 	// identities: an operator issues, and a terminal with no credential at all
 	// redeems. The redemption record carries the address it came from, which is

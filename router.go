@@ -317,6 +317,27 @@ func NewRouter() *gin.Engine {
 			// it a scoped operator could not SEE another site's terminal in
 			// the list but could still read it by naming its serial, which is
 			// printed on the hardware.
+			// The remote command plane's reads (028).
+			//
+			// VIEWER, unlike the write below. Which controls a terminal
+			// supports describes the hardware, not the roster, and a viewer who
+			// can already see a terminal should be able to see why a control is
+			// greyed out rather than being shown a button that 403s. The
+			// command history is the same information the events trail already
+			// shows at this level -- what happened at this door.
+			//
+			// Both go through RequireTerminalGrant, so another tenant's serial
+			// is a 404 and an ungranted site is a 403.
+			read.GET("/terminals/:serial/capabilities",
+				middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleTerminalCapabilities)
+			read.GET("/terminals/:serial/commands",
+				middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleListCommands)
+			read.GET("/terminals/:serial/commands/:id",
+				middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleGetCommand)
+
 			read.GET("/terminals/:serial", middleware.RequireTerminalGrant("serial"),
 				handlers.ConsoleGetTerminal)
 
@@ -441,6 +462,36 @@ func NewRouter() *gin.Engine {
 			// destructive terminal operations are ADMIN, below.
 			write.POST("/terminals/:serial/resync",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleResyncTerminal)
+
+			// The remote command plane's writes (028).
+			//
+			// MOUNTED AT MANAGER, WHICH IS THE FLOOR AND NOT THE GATE. A route
+			// can carry exactly one role check, and this plane is meant to grow
+			// commands with very different tiers -- the plan puts a remote
+			// unlock at ADMIN behind a step-up and a factory reset at OWNER, on
+			// this same route. So the router enforces the LOWEST role any
+			// registered command needs, and ConsoleIssueCommand enforces the
+			// per-command MinRole from models.CommandSpecs.
+			//
+			// Mounting at MANAGER without that second check would mean the day
+			// somebody registers UNLOCK, every manager in every tenant could
+			// open every door they can see. The registry check is what makes
+			// adding a command a decision about that command rather than a
+			// decision about this line.
+			//
+			// The two commands here today are a diagnostic read and a hardware
+			// self-test, which is front-desk work on 024's reasoning about
+			// resync: neither changes anything an operator has to reason about
+			// afterwards.
+			//
+			// WITHDRAW IS MANAGER TOO, and deliberately not higher. Cancelling
+			// a command that has not been collected is strictly safer than
+			// having issued it, and every command that makes the terminal do
+			// LESS should be reachable by whoever could make it do more.
+			write.POST("/terminals/:serial/commands",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleIssueCommand)
+			write.DELETE("/terminals/:serial/commands/:id",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleWithdrawCommand)
 
 			// Fingerprint enrolment, addressed to ONE terminal.
 			//

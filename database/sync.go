@@ -387,6 +387,19 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	                 -- guarantee does not depend on a background task having run.
 	                 AND (job_type <> 'WIFI_RECOVERY'
 	                      OR created_at > CURRENT_TIMESTAMP - ($4 || ' seconds')::interval)
+	                 -- THE GENERAL FORM OF THE RULE ABOVE (028). Every command
+	                 -- type declares its own window, stored on the row, so a
+	                 -- new one lapses without anybody editing this query. The
+	                 -- WIFI_RECOVERY predicate is kept beside it rather than
+	                 -- replaced: that command's window is computed from
+	                 -- created_at in Go and its rows may carry no expires_at at
+	                 -- all, so removing it would silently make a lapsed Change
+	                 -- Wi-Fi deliverable again.
+	                 --
+	                 -- NULL PASSES. A STATE job has no expiry by definition, and
+	                 -- the two inherited commands may have none -- see the
+	                 -- expires_at note in 028.
+	                 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
 	               ORDER BY id ASC
 	               LIMIT $2
 	               FOR UPDATE SKIP LOCKED
@@ -394,12 +407,23 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	          UPDATE sync_jobs sj
 	             SET next_attempt_at = CURRENT_TIMESTAMP + $3::interval,
 	                 last_attempt_at = CURRENT_TIMESTAMP,
-	                 started_at = COALESCE(sj.started_at, CURRENT_TIMESTAMP)
+	                 started_at = COALESCE(sj.started_at, CURRENT_TIMESTAMP),
+	                 -- FIRST COLLECTION ONLY. last_attempt_at moves on every
+	                 -- fetch because it is the delivery lease; the console's
+	                 -- question is "has the terminal got it yet", which is a
+	                 -- first-time fact. COALESCE is what keeps a redelivered
+	                 -- command from looking freshly delivered every minute.
+	                 delivered_at = CASE
+	                     WHEN sj.command_class = 'COMMAND'
+	                     THEN COALESCE(sj.delivered_at, CURRENT_TIMESTAMP)
+	                     ELSE sj.delivered_at END
 	            FROM due
 	           WHERE sj.id = due.id
 	       RETURNING sj.id, sj.public_id, sj.protocol_version, sj.job_type,
 	                 COALESCE(sj.entity_type, ''), COALESCE(sj.entity_external_id, ''),
-	                 sj.payload, sj.attempts, sj.created_at`
+	                 sj.payload, sj.attempts, sj.created_at,
+	                 sj.command_class, sj.command_version, sj.expires_at,
+	                 sj.requires_capability`
 
 	lease := fmt.Sprintf("%d seconds", int(deliveryLease.Seconds()))
 	rows, err := DB.Query(query, deviceID, limit, lease, models.WifiRecoveryValiditySeconds)
@@ -412,14 +436,38 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	for rows.Next() {
 		var job models.SyncJob
 		var payload []byte
+		var commandClass, requiresCapability sql.NullString
+		var commandVersion sql.NullInt64
+		var expiresAt *time.Time
 		err := rows.Scan(
 			&job.ID, &job.PublicID, &job.ProtocolVersion, &job.JobType,
 			&job.EntityType, &job.EntityExternalID, &payload, &job.Attempts, &job.CreatedAt,
+			&commandClass, &commandVersion, &expiresAt, &requiresCapability,
 		)
 		if err != nil {
 			return nil, err
 		}
 		job.Payload = payload
+
+		// THE ENVELOPE IS BUILT ONLY FOR COMMANDS, so a STATE job serialises
+		// byte-for-byte as it did before 028 -- which is what makes this change
+		// invisible to every firmware in the field.
+		//
+		// The payload is ALSO left where it is, rather than being moved inside
+		// the envelope. A command's parameters are reachable from both places
+		// and older parsing is undisturbed; moving them would be a breaking
+		// change dressed as a tidy-up.
+		if commandClass.String == models.CommandClassCommand {
+			job.Command = &models.SyncJobCommand{
+				Version:            int(commandVersion.Int64),
+				ExpiresAt:          expiresAt,
+				RequiresCapability: requiresCapability.String,
+			}
+			if len(payload) > 0 {
+				job.Command.Params = payload
+			}
+		}
+
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
@@ -485,6 +533,52 @@ func AckJobCompleted(deviceID, jobID int64) (bool, error) {
 //
 // Both cases report success: the device has nothing useful to do with an error,
 // and its report has been received and correctly ignored.
+// AckJobBusy records a command the terminal REFUSED TO START because another
+// command was already in its slot, and makes it immediately deliverable again.
+//
+// SEPARATE FROM AckJobFailed BECAUSE IT IS NOT AN ATTEMPT. The terminal did not
+// run this command and did not fail to run it -- it never began. Charging it an
+// attempt means a terminal that is briefly busy spends the command's retry
+// budget on refusals and parks a perfectly good command in FAILED without it
+// ever having been tried once. That is a real path, not a hypothetical: the
+// one-outstanding index is keyed (device_id, job_type), so a command of each
+// type can be delivered in the same batch and one of them always loses.
+//
+// next_attempt_at is set to NOW rather than to a backoff, because the condition
+// clears in a single pass of the terminal's loop -- the command in the slot is
+// run and the slot is released. A backoff here would make the loser wait out a
+// delay for a terminal that was ready again immediately, and for a command with
+// a short validity window that delay is the difference between running and
+// lapsing.
+//
+// The status guard matches AckJobFailed's: a job already retired is left alone,
+// because a late refusal for one is a stale retransmission.
+func AckJobBusy(deviceID, jobID int64, reason string) (bool, error) {
+	res, err := DB.Exec(`UPDATE sync_jobs
+	                        SET status = 'PENDING',
+	                            error_message = $1,
+	                            last_attempt_at = CURRENT_TIMESTAMP,
+	                            next_attempt_at = CURRENT_TIMESTAMP
+	                      WHERE id = $2 AND device_id = $3
+	                        AND status IN ('PENDING', 'FAILED')`,
+		reason, jobID, deviceID)
+	if err != nil {
+		return false, err
+	}
+	if affected, _ := res.RowsAffected(); affected > 0 {
+		return true, nil
+	}
+
+	// Nothing updated: either the job is not this device's, or it has already
+	// been retired. Distinguished so the caller can answer 404 against 200, on
+	// the same terms as AckJobCompleted.
+	var exists bool
+	err = DB.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM sync_jobs WHERE id = $1 AND device_id = $2)`,
+		jobID, deviceID).Scan(&exists)
+	return exists, err
+}
+
 func AckJobFailed(deviceID, jobID int64, reason string) (bool, error) {
 	var status string
 	var attempts, maxAttempts int
