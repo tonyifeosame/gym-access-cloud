@@ -288,3 +288,50 @@ func TestPlacedAndFailedReportsAreStillRefusedForADeletedPerson(t *testing.T) {
 			"report must not change the credential's state", status)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 4: the REMOVED report in the EXACT shape the firmware sends
+// ---------------------------------------------------------------------------
+
+// TestRemovedReportAcceptsTheFirmwareWireShape.
+//
+// The other tests in this file send a REMOVED report carrying credential_id and
+// slot. THE FIRMWARE SENDS NEITHER. net_service.cpp builds the removal body as
+// exactly:
+//
+//	{"member_id":"<ext>","state":"REMOVED","credential_type":"FINGERPRINT"}
+//
+// -- no slot ("a removal names a person, not a location") and no credential_id.
+// So the earlier coverage never exercised the payload the fleet actually puts on
+// the wire, and a REMOVED that stalls at REMOVING in production (device reports,
+// row never converges) is exactly the gap that shape would expose. This asserts
+// the platform accepts it and converges the placement, resolving the credential
+// from person + type alone.
+func TestRemovedReportAcceptsTheFirmwareWireShape(t *testing.T) {
+	f := newDeletionFixture(t)
+	f.deletePerson(t)
+
+	// Byte-for-byte the fields net_service.cpp emits -- and nothing else.
+	res := f.env.do("POST", "/api/v1/devices/credentials/placement", map[string]any{
+		"member_id":       f.externalID,
+		"state":           models.PlacementRemoved,
+		"credential_type": models.CredentialFingerprint,
+	}, deviceAuth(f.deviceKey))
+	if res.Code != http.StatusOK {
+		t.Fatalf("firmware-shape REMOVED report = %d, want 200 -- this is the exact "+
+			"body the terminal sends (member_id + state + credential_type, NO slot, "+
+			"NO credential_id): %s", res.Code, res.Raw)
+	}
+
+	if state := f.placementState(t); state != models.PlacementRemoved {
+		t.Errorf("placement = %s after the firmware-shape REMOVED report, want REMOVED",
+			state)
+	}
+
+	var removedAt any
+	mustScan(t, `SELECT removed_at FROM credential_placements
+	              WHERE device_id = `+itoa(f.deviceID), &removedAt)
+	if removedAt == nil {
+		t.Error("removed_at is NULL after a firmware-shape REMOVED report")
+	}
+}

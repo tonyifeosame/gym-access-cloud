@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -405,6 +406,25 @@ func CompleteEnrollment(companyID, deviceID int64, memberID, fingerprintTemplate
 		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
 		&member.MembershipType, &member.Active, &member.FingerprintTemplate, &member.UpdatedAt,
 	)
+	if errors.Is(err, sql.ErrNoRows) {
+		// WHICH KIND OF "NO" IS THIS? The UPDATE above filters deleted_at IS
+		// NULL, so it returns no rows both for an id that never existed and for
+		// a person an operator removed. Those demand opposite behaviour from
+		// the terminal: one is worth retrying, the other never will be.
+		//
+		// Asked as a second, cheap query rather than by relaxing the UPDATE:
+		// a deleted person must NOT have their template written back, which is
+		// what dropping the filter would allow.
+		var deleted bool
+		probe := tx.QueryRow(`
+			SELECT deleted_at IS NOT NULL FROM people
+			 WHERE external_id = $1 AND company_id = $2`,
+			memberID, companyID).Scan(&deleted)
+		if probe == nil && deleted {
+			return models.ErrPersonDeleted
+		}
+		return err
+	}
 	if err != nil {
 		return err
 	}

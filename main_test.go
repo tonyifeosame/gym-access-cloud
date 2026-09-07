@@ -131,6 +131,37 @@ func runSuite(m *testing.M) (int, error) {
 	cfg := database.GetConfigFromEnv()
 	testDB := envOr("TEST_DB_NAME", defaultTestDB)
 
+	// FAIL CLOSED ON A DATABASE THAT IS NOT ON THIS MACHINE.
+	//
+	// THE INCIDENT THIS EXISTS FOR: a `.env` in the repo root held a managed
+	// provider's DATABASE_URL. The suite reads that .env itself, and
+	// GetConfigFromEnv lets DATABASE_URL supersede the DB_* variables entirely
+	// -- so a run that carefully set DB_HOST/DB_PORT at a local server had those
+	// silently ignored and issued `DROP DATABASE` / `CREATE DATABASE` against
+	// production. Nothing failed. Nothing warned. The WithDatabase guard above
+	// kept the fixtures off the application database, which is why this was a
+	// near miss rather than an outage -- but "we only dropped a DIFFERENT
+	// database on the production server" is not a safety property worth
+	// relying on.
+	//
+	// So the check is on the HOST, before the first connection is opened, and it
+	// refuses by default. TEST_ALLOW_REMOTE_DB=1 is the deliberate escape hatch
+	// for a CI runner whose throwaway database genuinely is remote; setting it
+	// is an explicit statement, which is the thing that was missing.
+	if !cfg.HostIsLoopback() && os.Getenv("TEST_ALLOW_REMOTE_DB") != "1" {
+		return 0, fmt.Errorf(
+			"refusing to run the integration suite against %s: it is not a "+
+				"loopback host, and this suite DROPs and CREATEs database %q "+
+				"on whatever it is pointed at.\n"+
+				"  DATABASE_URL supersedes DB_HOST/DB_PORT entirely, and a "+
+				".env in the repo root is loaded automatically -- so this is "+
+				"most likely a production URL you did not mean to use.\n"+
+				"  Point DATABASE_URL at a local server, or set "+
+				"TEST_ALLOW_REMOTE_DB=1 if the remote database really is "+
+				"disposable",
+			describeTarget(cfg), testDB)
+	}
+
 	// Connect to the maintenance database to create the test one.
 	//
 	// WithDatabase, not an assignment to DBName: DBName is ignored when the

@@ -652,6 +652,52 @@ type SyncJob struct {
 	Payload          json.RawMessage `json:"payload,omitempty"`
 	Attempts         int             `json:"attempts"`
 	CreatedAt        time.Time       `json:"created_at"`
+
+	// Command is present only on COMMAND-class jobs (028), so a STATE job is
+	// byte-for-byte what it was before this field existed.
+	//
+	// ADDITIVE, AND SAFE FOR EVERY FIRMWARE EVER BUILT. A build that predates
+	// the envelope reads `job_type`, does not recognise it, reports kUnknown and
+	// acknowledges -- it never reaches this key, because it stops at the type.
+	// A build that understands the envelope reads it. Nothing in between exists:
+	// the capability gate means an image without the command's token is never
+	// sent one of these rows in the first place.
+	Command *SyncJobCommand `json:"command,omitempty"`
+}
+
+// SyncJobCommand is the command envelope carried inside a COMMAND-class job.
+//
+// It is deliberately small and carries no operator identity: who asked is an
+// audit fact, and a terminal has no use for it. What it carries is what the
+// device needs in order to REFUSE correctly -- the version it must understand,
+// the deadline it must check for itself, and the capability it should have.
+type SyncJobCommand struct {
+	// Version is CommandEnvelopeVersion, not the sync protocol version. A
+	// terminal that does not recognise it must fail the job rather than guess:
+	// acting on parameters it read under the wrong schema is worse than not
+	// acting.
+	Version int `json:"version"`
+
+	// ExpiresAt is when this command stops being deliverable. Absent means it
+	// does not lapse, which is true only of the two commands inherited from 024
+	// and 027.
+	//
+	// SENT EVEN THOUGH THE SERVER ALREADY FILTERS ON IT. The server's filter
+	// cannot account for a job fetched one second before it lapsed and applied
+	// a minute later -- the fetch is a lease, not a state change, and the gap
+	// between collection and apply is unbounded on a busy loop task. The device
+	// checks again with this value, which is the only check that sees that gap.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+
+	// RequiresCapability is the token the platform believes this terminal
+	// reported. Sent so a device can say UNSUPPORTED against a named capability
+	// rather than failing anonymously -- which turns "the door ignored it" into
+	// "the door and the platform disagree about what this image can do".
+	RequiresCapability string `json:"requires_capability,omitempty"`
+
+	// Params is the command's validated parameter object. Absent for a command
+	// that takes none.
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // SyncJobBatch is the envelope returned to a device. The protocol version is at
@@ -672,6 +718,22 @@ type SyncJobBatch struct {
 type SyncJobResult struct {
 	Status string `json:"status,omitempty"` // COMPLETED (default) or FAILED
 	Error  string `json:"error,omitempty"`
+
+	// ResultCode is a stable machine value naming the outcome (028). Optional,
+	// and every firmware built before the command plane omits it -- which is
+	// why it is a separate field rather than a required one. See the
+	// CommandResult* constants.
+	ResultCode string `json:"result_code,omitempty"`
+
+	// Result is the structured detail behind the code: a self-test report, a
+	// diagnostic snapshot, what a device test actually did.
+	//
+	// WRITTEN BY THE DEVICE AND THEREFORE BOUNDED. MaxCommandResultBytes caps
+	// it on both sides -- the firmware refuses to build a larger one and the
+	// handler refuses to store one. An unbounded device-writable column is a
+	// growth vector with a credential behind it, and the credential is at a
+	// door in a room the platform does not control.
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // SiteSettings is a site's device configuration and its monotonic version

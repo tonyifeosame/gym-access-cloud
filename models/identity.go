@@ -70,6 +70,23 @@ var (
 	// is itself a cross-tenant disclosure.
 	ErrPersonNotFound = errors.New("person not found")
 	ErrCategoryInUse  = errors.New("category is still assigned to people")
+
+	// ErrPersonDeleted is returned when the id DOES resolve inside the caller's
+	// company but the person has been soft-deleted.
+	//
+	// SEPARATE FROM ErrPersonNotFound BECAUSE THE CALLER MUST BEHAVE
+	// DIFFERENTLY. "Not found" invites a retry -- the id might be a typo, the
+	// record might arrive later. "Deleted" never will: the answer is settled
+	// and will not change however many times it is asked.
+	//
+	// The incident: a terminal reported an enrolment for a person the platform
+	// had soft-deleted. The lookup filtered deleted_at IS NULL, found nothing,
+	// and answered 404 -- the same 404 a typo produces. The terminal retried
+	// that report until its retry budget ran out and then DISCARDED it, and the
+	// platform went on believing a credential was placed on a sensor that had
+	// erased it. Both halves of that are avoidable, and both are avoided by
+	// telling the caller which of the two things happened.
+	ErrPersonDeleted = errors.New("person has been deleted")
 )
 
 // NormalizeCategoryCode puts a code into the form the schema stores.

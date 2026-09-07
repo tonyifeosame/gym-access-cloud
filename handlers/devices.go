@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,6 +29,12 @@ const protocolVersionHeader = "X-Protocol-Version"
 const (
 	defaultJobBatch = 50
 	maxJobBatch     = 200
+
+	// maxResultCodeLength matches the sync_jobs.result_code column (028). A
+	// device-written value is bounded in Go as well as by the column type, so
+	// an over-long one is a 400 the terminal can log rather than a constraint
+	// violation it cannot tell from an outage.
+	maxResultCodeLength = 48
 )
 
 // negotiateProtocol checks the device's declared protocol version against what
@@ -338,11 +345,63 @@ func CompleteDeviceJob(c *gin.Context) {
 		result.Status = "COMPLETED"
 	}
 
+	// A DEVICE-WRITTEN VALUE IS BOUNDED BEFORE IT REACHES THE DATABASE (028).
+	//
+	// Refused rather than truncated: half a JSON document is not a smaller
+	// result, it is a malformed one, and storing it would mean the console
+	// renders something no terminal ever said. The firmware applies the same
+	// ceiling on its side and refuses to build a body over it, so a device that
+	// reaches this branch is either not this firmware or is faulty -- both of
+	// which are worth a 400 rather than a silent trim.
+	if len(result.Result) > models.MaxCommandResultBytes {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("result must be at most %d bytes",
+				models.MaxCommandResultBytes),
+		})
+		return
+	}
+	if len(result.ResultCode) > maxResultCodeLength {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("result_code must be at most %d characters",
+				maxResultCodeLength),
+		})
+		return
+	}
+
+	// STORED BEFORE THE ACKNOWLEDGEMENT, so a console reading between the two
+	// writes never sees an ACCEPTED command with nothing behind it. Best effort
+	// on purpose: the acknowledgement is what must not fail, and a terminal has
+	// nothing useful to do with "your result was not stored" except retry an
+	// acknowledgement the platform has already accepted.
+	//
+	// A no-op for every job that is not a command, and for every firmware built
+	// before the fields existed -- both send neither, and RecordCommandResult
+	// returns immediately.
+	if result.ResultCode != "" || len(result.Result) > 0 {
+		if resErr := database.RecordCommandResult(
+			deviceID, jobID, result.ResultCode, result.Result); resErr != nil {
+			logError(c, "record command result", resErr)
+		}
+	}
+
 	var found bool
 	switch result.Status {
 	case "COMPLETED":
 		found, err = database.AckJobCompleted(deviceID, jobID)
 	case "FAILED":
+		// A BUSY TERMINAL IS NOT A FAILED COMMAND. It never started, so it is
+		// re-offered without spending one of its attempts -- see AckJobBusy.
+		// Keyed on the result code rather than on the message, because the
+		// message is prose and the code is the contract.
+		//
+		// The enrolment note below is deliberately NOT reached on this path: a
+		// busy refusal can only come from the command slot, which enrolments do
+		// not pass through, so it would be a no-op with a misleading name.
+		if result.ResultCode == models.CommandResultBusy {
+			found, err = database.AckJobBusy(deviceID, jobID, result.Error)
+			break
+		}
+
 		found, err = database.AckJobFailed(deviceID, jobID, result.Error)
 
 		// An enrolment that failed is one an operator is watching, and the

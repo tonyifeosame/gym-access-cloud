@@ -157,6 +157,39 @@ func SubmitEnrollmentResult(c *gin.Context) {
 	// No such member means there is nothing to enrol against -- a 404, not a
 	// server fault, so the terminal does not retry a template it can never store.
 	err := database.CompleteEnrollment(companyID, deviceID, req.MemberID, req.FingerprintTemplate)
+
+	// A PERSON AN OPERATOR DELETED IS A SETTLED ANSWER, NOT A MISSING ONE.
+	//
+	// 410 Gone, not 404. Both are terminal for a well-behaved client, but 404
+	// reads as "try again later, it might turn up" and this never will -- and
+	// the terminal's retry policy treats the two differently in practice: the
+	// enrolment report for a deleted person was retried until its budget ran
+	// out and then DISCARDED, leaving the platform believing a credential sat
+	// on a sensor that had erased it.
+	//
+	// The placement is converged to REMOVED here rather than left stale,
+	// because that stale row is what would block re-enrolling the person if
+	// they were ever restored.
+	if errors.Is(err, models.ErrPersonDeleted) {
+		if deviceID != 0 {
+			if _, removeErr := database.RecordPlacement(deviceID, database.PlacementReport{
+				ExternalID: req.MemberID,
+				State:      models.PlacementRemoved,
+			}); removeErr != nil {
+				// Logged, never returned. The answer to the terminal does not
+				// depend on our bookkeeping succeeding, and a failure here must
+				// not turn a settled 410 back into something retryable.
+				logError(c, "converging placement for a deleted person", removeErr)
+			}
+		}
+		c.JSON(http.StatusGone, gin.H{
+			"error":     "This person has been deleted; the enrolment cannot be recorded",
+			"member_id": req.MemberID,
+			"terminal":  true,
+		})
+		return
+	}
+
 	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})
 		return
