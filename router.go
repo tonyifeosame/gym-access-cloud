@@ -101,6 +101,15 @@ func NewRouter() *gin.Engine {
 	r.GET("/health/maintenance", handlers.HealthMaintenance)
 	r.GET("/metrics", handlers.Metrics)
 
+	// Firmware images, /firmware/<file>.bin.
+	//
+	// MOUNTED ON THE ENGINE, outside every group, and that placement is the
+	// whole of its security posture: no session, no CSRF, no rate limiter and
+	// no role check apply to it. See serveFirmware in firmware_assets.go for
+	// why an update image is safe to serve unauthenticated, and why the
+	// integrity guarantee lives in the catalogue row rather than here.
+	r.GET("/firmware/:file", serveFirmware)
+
 	// Device claim, /api/v1/devices/claim.
 	//
 	// UNAUTHENTICATED, AND MOUNTED HERE RATHER THAN IN EITHER DEVICE GROUP
