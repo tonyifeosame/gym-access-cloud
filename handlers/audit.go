@@ -142,6 +142,24 @@ const (
 
 	auditFirmwarePublished = "FIRMWARE_PUBLISHED"
 	auditFirmwareTargetSet = "FIRMWARE_TARGET_SET"
+
+	// Integration credentials (030). FOUR actions, not one, for the reason the
+	// command plane already gives: an audit trail is read by filtering on
+	// `action`, and "who gave a third party access to our roster", "who changed
+	// its secret" and "who turned everything off" are three different questions
+	// somebody asks separately.
+	//
+	// THE SECRET IS NEVER IN THE RECORD. What is recorded is the prefix, the
+	// scopes and the expiry -- enough to answer what the integration could do,
+	// and nothing that would let a reader of the trail become it.
+	//
+	// REVOKED_ALL is its own action rather than N revocations, because it is one
+	// decision. A bulk revocation that appeared as twenty separate records would
+	// bury the fact that somebody hit the incident-response control.
+	auditAPICredentialIssued     = "API_CREDENTIAL_ISSUED"
+	auditAPICredentialRotated    = "API_CREDENTIAL_ROTATED"
+	auditAPICredentialRevoked    = "API_CREDENTIAL_REVOKED"
+	auditAPICredentialRevokedAll = "API_CREDENTIAL_REVOKED_ALL"
 )
 
 // Audit target types.
@@ -155,6 +173,11 @@ const (
 	auditTargetPermission  = "PERMISSION"
 	auditTargetSchedule    = "SCHEDULE"
 	auditTargetFirmware    = "FIRMWARE"
+
+	// An integration credential. A distinct target type from CREDENTIAL, which
+	// means a PERSON's card or fingerprint -- two very different things to find
+	// in a trail, and a shared type would make one unfilterable from the other.
+	auditTargetAPICredential = "API_CREDENTIAL"
 )
 
 // recordAudit writes one operator action.

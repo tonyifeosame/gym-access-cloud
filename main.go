@@ -15,6 +15,7 @@ import (
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/maintenance"
 	"access-terminal-cloud-api/middleware"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -136,12 +137,38 @@ func main() {
 	}
 	gin.SetMode(ginMode)
 
+	// Which integration credentials this deployment mints and accepts (030).
+	//
+	// FATAL ON AN UNRECOGNISED VALUE, and only on an unrecognised one -- unset
+	// is `live`, which is the safe default. A typo in the one variable that
+	// decides whether test credentials authenticate must not be what quietly
+	// enables them, and there is no sensible fallback: guessing `live` would
+	// silently ignore a staging operator's intent, and guessing `test` would
+	// have production accept staging keys.
+	apiEnvironment, err := models.NormaliseEnvironment(os.Getenv("API_ENVIRONMENT"))
+	if err != nil {
+		log.Fatalf("API_ENVIRONMENT: %v", err)
+	}
+	handlers.SetAPIEnvironment(apiEnvironment)
+	log.Printf("Integration credentials: %s environment (atp_%s_…)",
+		apiEnvironment, apiEnvironment)
+
 	// Connect to database
 	dbConfig := database.GetConfigFromEnv()
 	if err := database.Connect(dbConfig); err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// The shared rate-limit store (031), closing SEC-09 for the credential
+	// endpoints.
+	//
+	// AFTER Connect, because it holds the pool. Login, claim, platform login and
+	// adopt move onto it; announce stays in process, for the reasons recorded in
+	// middleware/rate_limit.go. A deployment that could not reach the database
+	// would not get this far, so there is no path where the limiters silently
+	// fall back to per-instance allowances.
+	middleware.UseSharedRateStore(database.NewPostgresRateStore(database.DB))
 
 	// Create the first operator, if this system has none and the environment
 	// says who it should be.
