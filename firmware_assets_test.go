@@ -82,10 +82,10 @@ func TestFirmwareMissingIsBare404(t *testing.T) {
 
 func TestFirmwareRefusesTraversalAndNonImages(t *testing.T) {
 	for _, name := range []string{
-		"..%2Fgo.mod",     // encoded traversal
-		"..",              // bare traversal
-		"go.mod",          // real file, wrong extension
-		"nested%2Fx.bin",  // encoded subdirectory
+		"..%2Fgo.mod",                   // encoded traversal
+		"..",                            // bare traversal
+		"go.mod",                        // real file, wrong extension
+		"nested%2Fx.bin",                // encoded subdirectory
 		"access-terminal-1.3.3.bin.txt", // extension smuggling
 		"",                              // empty
 	} {
