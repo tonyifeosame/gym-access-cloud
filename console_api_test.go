@@ -91,6 +91,24 @@ var consoleRoutes = []struct {
 	{"GET", "/api/v1/console/operators", models.RoleAdmin, ""},
 	{"POST", "/api/v1/console/operators", models.RoleAdmin,
 		`{"email":"new@example.com","full_name":"New","password":"a-long-enough-password","role":"VIEWER"}`},
+
+	// Integration credentials (030). Listed here for the same reason the
+	// enrolment routes are: this sweep is EVERY console route, not the ones
+	// somebody remembered to add. These matter more than most -- they mint the
+	// credential a third party holds, so "a site key achieves nothing against
+	// them" is exactly the assertion that must not be missing.
+	{"GET", "/api/v1/console/api-credentials", models.RoleAdmin, ""},
+	{"POST", "/api/v1/console/api-credentials", models.RoleAdmin,
+		`{"name":"Sweep","scopes":["members:read"]}`},
+	{"GET", "/api/v1/console/api-credentials/00000000-0000-0000-0000-000000000000",
+		models.RoleAdmin, ""},
+	{"GET", "/api/v1/console/api-credentials/00000000-0000-0000-0000-000000000000/usage",
+		models.RoleAdmin, ""},
+	{"POST", "/api/v1/console/api-credentials/00000000-0000-0000-0000-000000000000/rotate",
+		models.RoleAdmin, ""},
+	{"DELETE", "/api/v1/console/api-credentials/00000000-0000-0000-0000-000000000000",
+		models.RoleAdmin, ""},
+	{"POST", "/api/v1/console/api-credentials/revoke-all", models.RoleAdmin, ""},
 	{"PUT", "/api/v1/console/applications/ATTENDANCE", models.RoleOwner, `{"enabled":true}`},
 }
 

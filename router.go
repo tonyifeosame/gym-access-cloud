@@ -127,7 +127,12 @@ func NewRouter() *gin.Engine {
 	// the route: single use, serial-bound, short-lived, hashed at rest, with
 	// every failure returning one indistinguishable answer. See
 	// database/claim.go.
-	r.POST("/api/v1/devices/claim", middleware.LoginRateLimiter(), handlers.ClaimDevice)
+	//
+	// ITS OWN CLASS ON THE SHARED STORE. The isolation the paragraph above
+	// describes used to come from a separate in-process limiter instance; it now
+	// comes from a separate bucket class, which preserves it across instances
+	// rather than only within one.
+	r.POST("/api/v1/devices/claim", middleware.ClaimRateLimiter(), handlers.ClaimDevice)
 
 	// Device announcement, /api/v1/devices/announce.
 	//
@@ -232,10 +237,10 @@ func NewRouter() *gin.Engine {
 	// covered by tests.
 	platform := r.Group("/api/v1/platform")
 	{
-		// Its OWN limiter instance rather than the operator one. A platform
+		// Its OWN limiter class rather than the operator one. A platform
 		// administrator locked out because an attacker was hammering a tenant's
 		// login is an outage of the surface that fixes outages.
-		platformLimit := middleware.LoginRateLimiter()
+		platformLimit := middleware.PlatformLoginRateLimiter()
 
 		platform.POST("/login", platformLimit, handlers.PlatformLogin)
 
@@ -671,6 +676,36 @@ func NewRouter() *gin.Engine {
 			// for an account that has never signed in.
 			admin.POST("/operators/:operator_id/invite", handlers.ConsoleInviteOperator)
 			admin.POST("/operators/:operator_id/reset", handlers.ConsoleResetOperatorPassword)
+
+			// Integration credentials (030), the fourth credential class.
+			//
+			// ADMIN, ON THE SAME GROUP AS SITE-KEY ROTATION AND TERMINAL
+			// REVOCATION, because it is the same kind of act: minting or
+			// withdrawing a machine credential. Nothing here is MANAGER --
+			// letting a company's roster be read from outside it is a decision
+			// about the company's data leaving it, not about running the day.
+			//
+			// A CREDENTIAL CANNOT MINT ANOTHER CREDENTIAL. These routes are
+			// reachable only with an operator session, so an integration whose
+			// key leaks cannot quietly issue itself a replacement; the remedy is
+			// a person in the console, exactly as it is for a site key.
+			//
+			// NOTHING CONSUMES ONE YET. There is no public API tree in this
+			// build -- see the specification's P1 boundary. The lifecycle is
+			// here first, and exercised, so that nothing depends on it before it
+			// has been shown to work.
+			//
+			// revoke-all IS DECLARED BEFORE THE :id ROUTES on purpose. gin's
+			// router prefers a static segment over a parameter at the same
+			// position, but writing them in this order keeps that from being
+			// something a reader has to know.
+			admin.POST("/api-credentials/revoke-all", handlers.ConsoleRevokeAllAPICredentials)
+			admin.GET("/api-credentials", handlers.ConsoleListAPICredentials)
+			admin.POST("/api-credentials", handlers.ConsoleCreateAPICredential)
+			admin.GET("/api-credentials/:id", handlers.ConsoleGetAPICredential)
+			admin.GET("/api-credentials/:id/usage", handlers.ConsoleAPICredentialUsage)
+			admin.POST("/api-credentials/:id/rotate", handlers.ConsoleRotateAPICredential)
+			admin.DELETE("/api-credentials/:id", handlers.ConsoleRevokeAPICredential)
 		}
 
 		// Which capabilities the company has at all. OWNER only: this decides

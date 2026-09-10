@@ -311,11 +311,16 @@ jobs:
       # Credentials this project has actually shipped before, checked by shape
       # rather than by entropy. 001_init_schema.sql once carried working site
       # keys, and the comment there is the reason this step exists.
+      #
+      # atp_ (integration credentials, migration 030) is on this list from the
+      # day the class existed rather than after the first one is committed. The
+      # tests generate theirs at runtime, so a literal in a tracked file is
+      # always a real key somebody pasted.
       - name: Repository-specific credential shapes
         run: |
           set +e
           hits=$(git grep -nE \
-            'ats_[0-9a-f]{64}|atd_[0-9a-f]{64}|BOOTSTRAP_OPERATOR_PASSWORD=.+' \
+            'ats_[0-9a-f]{64}|atd_[0-9a-f]{64}|atp_(live|test)_[0-9a-f]{64}|BOOTSTRAP_OPERATOR_PASSWORD=.+' \
             -- ':!*.md' ':!.github/*' )
           set -e
           if [ -n "$hits" ]; then

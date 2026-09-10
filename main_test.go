@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -209,6 +210,16 @@ func runSuite(m *testing.M) (int, error) {
 		return 0, fmt.Errorf("applying migrations: %w", err)
 	}
 
+	// THE SUITE EXERCISES THE SHARED RATE-LIMIT STORE, not the in-process
+	// fallback, because that is what a deployment runs. Without this line the
+	// existing limiter tests would keep passing against a code path production
+	// no longer takes -- which is the failure mode the whole move was meant to
+	// remove, reproduced in the tests.
+	//
+	// newTestEnv truncates api_rate_buckets, so a test that exhausts an
+	// allowance cannot leave state behind for the next one. See the note there.
+	middleware.UseSharedRateStore(database.NewPostgresRateStore(database.DB))
+
 	code := m.Run()
 
 	database.Close()
@@ -278,10 +289,21 @@ func newTestEnv(t *testing.T) *testEnv {
 	// seeded by migration 015, and truncating it between tests would empty the
 	// capability list every company_applications row and every terminal's
 	// application_mode resolves against.
+	// api_rate_buckets IS NAMED EXPLICITLY, and it is the one that matters most
+	// here. It references nothing, so CASCADE does not reach it -- and unlike
+	// every other table in this list its rows are written by MIDDLEWARE rather
+	// than by a handler, so a test that exhausts a login or claim allowance
+	// would leave a drained bucket behind for whichever test ran next against
+	// the same client address. Every test in this suite arrives from the same
+	// address, so that is not a remote possibility: it is what would happen.
+	//
+	// This became necessary when the credential limiters moved onto the shared
+	// PostgreSQL store. While they were in-process, each test's own router
+	// carried its own map and the isolation was free.
 	_, err := database.DB.Exec(`
 		TRUNCATE sync_jobs, access_logs, enrollment_requests, people,
 		         devices, doors, firmware_versions, sites, companies,
-		         platform_admins
+		         platform_admins, api_rate_buckets
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("resetting tables: %v", err)

@@ -132,9 +132,49 @@ must not be missed belongs in `sync_jobs`.
 | `MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS` | `10` | Grace period for tasks to stop |
 | `SYNC_COMPACTION_THRESHOLD` | `500` | Backlog at which a device's queue is snapshotted |
 | `METRICS_TOKEN` | unset | If set, required to scrape `/metrics` |
+| `API_ENVIRONMENT` | `live` | Which integration credentials this deployment mints and accepts (`live` or `test`) |
+| `API_CREDENTIAL_FLUSH_INTERVAL_SECONDS` | `60` | How often buffered credential telemetry is written |
+| `API_HOUSEKEEPING_INTERVAL_SECONDS` | `600` | How often rate buckets, idempotency records and usage rows are swept |
+| `RATE_BUCKET_IDLE_SECONDS` | `600` | How long an idle per-address rate bucket is kept |
+| `API_USAGE_RETENTION_DAYS` | `90` | How long the per-day usage rollup is kept |
 
 The effective configuration is logged at startup, so an operator can see what the
 process will actually do without reading the environment back.
+
+### Integration credentials and shared rate limiting
+
+`API_ENVIRONMENT` decides which integration credentials (`atp_live_…` /
+`atp_test_…`) this deployment will mint and accept. It defaults to `live`, which
+is the safe direction — a deployment that configures nothing never accepts a
+staging key. **An unrecognised value fails startup**: there is no sensible
+fallback, so a typo is a refusal to boot rather than a silent change of
+behaviour.
+
+The **login, claim, platform-login and adopt** limiters keep their buckets in
+PostgreSQL (`api_rate_buckets`), so the allowance holds across instances. That
+closes SEC-09 for the credential endpoints. Nothing needs configuring for the
+store itself; the existing `*_RATE_LIMIT_PER_MINUTE` variables still set the
+rates.
+
+**The announce limiter deliberately stays in process.** Resolving a terminal's
+identity inside a limiter is the work the limiter exists to avoid, and a
+twenty-five terminal site polling every five seconds is roughly three hundred
+limiter writes a minute before the handler does anything. The cost of the
+exception is that with two instances the *announce* allowance doubles — on an
+endpoint that grants nothing, whose pairing code is protected by the adopt
+limiter, which is shared. If the announce path is ever moved, it should go onto
+a store that is not the request database.
+
+Two maintenance tasks come with this:
+
+- `api_credential_flush` drains the in-memory buffer holding `last_used_at` and
+  per-class usage counts. The request path writes nothing, so a process stopped
+  between flushes loses what it was holding — which is why the interval is
+  short.
+- `api_housekeeping` prunes idle **address** buckets, expired idempotency
+  records and old usage rows. Credential and company buckets are never swept:
+  there is one per credential and one per company, so they are bounded by the
+  tenant rather than by traffic.
 
 ## Shutdown
 

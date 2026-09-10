@@ -67,6 +67,38 @@ const (
 	// installation dispute and short enough that the table does not grow
 	// without bound.
 	defaultProvisioningRetentionDays = 30
+
+	// Integration credential telemetry (030/031).
+	//
+	// EVERY MINUTE, because this is what drains the in-memory buffer that
+	// records last-used and per-class usage. Nothing is lost if it is late --
+	// the buffer accumulates -- but a process that is stopped between flushes
+	// loses whatever it was holding, so the window is kept short. Flushing is
+	// cheap: one statement per credential that saw traffic in the interval.
+	defaultCredentialFlushInterval = 1 * time.Minute
+
+	// Housekeeping for the shared rate-limit store and the idempotency records.
+	//
+	// TEN MINUTES. Neither table is load-bearing between runs: an expired
+	// idempotency record is reclaimed in place by the next request that uses its
+	// key, and an idle address bucket that is not swept simply occupies a row.
+	// This is bounding growth, not maintaining correctness.
+	defaultAPIHousekeepingInterval = 10 * time.Minute
+
+	// How long an idle ADDRESS bucket is kept in the shared store.
+	//
+	// The same ten minutes the in-process limiter uses for its map, and for the
+	// same reason: an attacker rotating source addresses would otherwise grow
+	// the table without bound. Credential and company buckets are NOT swept --
+	// there is one per credential and one per company, so they are bounded by
+	// the tenant's own size rather than by traffic.
+	defaultRateBucketIdleFor = 10 * time.Minute
+
+	// How long the per-day usage rollup is kept.
+	//
+	// Ninety days, matching sync-job retention. The console shows thirty; the
+	// extra sixty are for the support question that arrives after the fact.
+	defaultAPIUsageRetentionDays = 90
 )
 
 // Config holds the maintenance settings resolved from the environment
@@ -84,6 +116,11 @@ type Config struct {
 
 	ProvisioningSweepInterval time.Duration
 	ProvisioningRetentionDays int
+
+	CredentialFlushInterval time.Duration
+	APIHousekeepingInterval time.Duration
+	RateBucketIdleFor       time.Duration
+	APIUsageRetentionDays   int
 
 	ShutdownTimeout time.Duration
 }
@@ -108,6 +145,15 @@ func LoadConfig() Config {
 			defaultProvisioningSweepInterval),
 		ProvisioningRetentionDays: envInt("PROVISIONING_RETENTION_DAYS",
 			defaultProvisioningRetentionDays),
+
+		CredentialFlushInterval: envDuration("API_CREDENTIAL_FLUSH_INTERVAL_SECONDS",
+			defaultCredentialFlushInterval),
+		APIHousekeepingInterval: envDuration("API_HOUSEKEEPING_INTERVAL_SECONDS",
+			defaultAPIHousekeepingInterval),
+		RateBucketIdleFor: envDuration("RATE_BUCKET_IDLE_SECONDS",
+			defaultRateBucketIdleFor),
+		APIUsageRetentionDays: envInt("API_USAGE_RETENTION_DAYS",
+			defaultAPIUsageRetentionDays),
 
 		ShutdownTimeout: envDuration("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", defaultShutdownTimeout),
 	}
@@ -283,6 +329,61 @@ func (c Config) Tasks() []Task {
 			},
 		})
 	}
+
+	// Integration credential telemetry (030). Drains the in-memory buffer that
+	// records last-used and per-class usage.
+	//
+	// THIS IS WHY THE REQUEST PATH DOES NOT WRITE. A read-only API that wrote a
+	// row to record that it was read would have doubled its write load to store
+	// a value nobody reads in real time. The buffer is drained here instead, so
+	// the cost is one statement per credential that saw traffic in the interval
+	// rather than one per request.
+	tasks = append(tasks, Task{
+		Name:     "api_credential_flush",
+		Interval: c.CredentialFlushInterval,
+		Run: func(ctx context.Context) (string, error) {
+			n, err := database.FlushAPICredentialUse(ctx)
+			if err != nil {
+				return "", err
+			}
+			if n == 0 {
+				return "", nil
+			}
+			return fmt.Sprintf("recorded use of %d integration credential(s)", n), nil
+		},
+	})
+
+	// Housekeeping for the shared rate-limit store and the idempotency records.
+	//
+	// NEITHER IS LOAD-BEARING. An expired idempotency record is reclaimed in
+	// place by the next request that presents its key, and an unswept address
+	// bucket refuses nothing it should not -- this bounds growth rather than
+	// maintaining correctness, which is why it runs every ten minutes rather
+	// than every minute.
+	tasks = append(tasks, Task{
+		Name:     "api_housekeeping",
+		Interval: c.APIHousekeepingInterval,
+		Run: func(ctx context.Context) (string, error) {
+			buckets, err := database.PruneIdleRateBuckets(ctx, c.RateBucketIdleFor)
+			if err != nil {
+				return "", err
+			}
+			records, err := database.PurgeExpiredIdempotencyRecords(ctx)
+			if err != nil {
+				return "", err
+			}
+			usage, err := database.PruneAPIUsage(ctx, c.APIUsageRetentionDays)
+			if err != nil {
+				return "", err
+			}
+			if buckets == 0 && records == 0 && usage == 0 {
+				return "", nil
+			}
+			return fmt.Sprintf(
+				"pruned %d idle rate bucket(s), %d idempotency record(s), %d usage row(s)",
+				buckets, records, usage), nil
+		},
+	})
 
 	return tasks
 }
