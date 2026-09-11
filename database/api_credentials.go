@@ -985,9 +985,16 @@ func FlushAPICredentialUse(ctx context.Context) (int, error) {
 
 		for day, classes := range use.byDay {
 			for class, count := range classes {
+				// INSERT ... SELECT ... WHERE EXISTS, not VALUES: a credential
+				// row that vanished between the note and the flush (a hard
+				// delete, or a test harness resetting the table) must not fail
+				// the whole batch on the foreign key and take every other
+				// credential's counts down with it. Its counts are dropped;
+				// nothing is owed to a row that is gone.
 				if _, err := DB.ExecContext(ctx, `
 					INSERT INTO api_usage_daily (credential_id, day, class, requests, refusals)
-					VALUES ($1, $2::date, $3, $4, $5)
+					SELECT $1, $2::date, $3, $4, $5
+					 WHERE EXISTS (SELECT 1 FROM api_credentials WHERE id = $1)
 					ON CONFLICT (credential_id, day, class) DO UPDATE
 					   SET requests = api_usage_daily.requests + EXCLUDED.requests,
 					       refusals = api_usage_daily.refusals + EXCLUDED.refusals`,

@@ -3638,7 +3638,10 @@ member created without one.
 
 ### Pagination
 
-List endpoints page by **signed, opaque cursor**, not by offset.
+List endpoints page by **opaque cursor**, not by offset. A cursor is
+encrypted and authenticated (XChaCha20-Poly1305 under a key derived from the
+deployment's `CURSOR_SIGNING_KEY`); its contents cannot be read or altered by
+a client, and rotating the key invalidates every outstanding cursor at once.
 
 | Parameter | Type | Default | Bounds |
 |---|---|---|---|
@@ -3671,11 +3674,84 @@ page a client is on.
 
 A cursor is **bound to the credential's company and to the query it was
 issued for**. Presenting it with another credential's company, with different
-filters, with a tampered payload or with a signature this server did not
-produce is `400 cursor_invalid`. A cursor that points past the data retained
+filters, with a tampered or truncated token, or with a token this deployment
+did not produce is `400 cursor_invalid` — one answer for all of them. A cursor that points past the data retained
 for the resource is `410 cursor_expired`; members are retained indefinitely, so
 their cursors do not expire in this version. **The cursor's contents are not
 part of the contract**: do not decode, construct or compare them.
+
+### Rate limits
+
+Every public request is subject to token-bucket allowances kept on the shared
+store, so they hold however many instances are serving. **These are defaults,
+subject to change with notice** — the headers below are what a client should
+pace against, not the numbers here.
+
+| Bucket | Applies to | Burst | Sustained |
+|---|---|---|---|
+| credential | each integration credential | 60 | 300 per minute |
+| company | all of a company's credentials together | 200 | 900 per minute |
+| authentication failures | unauthenticated attempts, per client address | 30 | 60 per minute |
+
+**What consumes what.** An authenticated request spends one token from the
+credential bucket and one from the company bucket, in that order, **whatever
+the response** — a `403`, `404` or `400` did the same work as a `200`. A
+request that fails authentication spends a token from the
+authentication-failure bucket **only**; it never touches a credential's or a
+company's allowance, so a stream of bad keys cannot exhaust an integrator's
+quota. A `503` spends nothing.
+
+**Every response to an authenticated request** on this tree — a `200`, and
+equally a `400`, `403`, `404` or `429` — carries the credential bucket's
+state. A response that never reached that bucket carries none of these
+headers: a `401`, the `429` that stands in for one, and a `503` (refused
+before authentication, or because the store could not be consulted).
+
+| Header | Meaning |
+|---|---|
+| `RateLimit-Limit` | the burst ceiling |
+| `RateLimit-Remaining` | whole tokens left after this request |
+| `RateLimit-Reset` | seconds until the bucket is full again |
+| `RateLimit-Policy` | the sustained allowance, `300;w=60` |
+
+A refusal is `429 rate_limit_exceeded` with `Retry-After` (whole seconds,
+never less than 1) and, when the credential bucket refused, `RateLimit-Remaining:
+0`; a company-level refusal leaves the credential's headers as they were, since
+that bucket is the one the caller can act on. A refusal of an unauthenticated
+attempt is a `429` **in place of** the `401` — the caller learns only that it
+must slow down, nothing about the key it presented. A `429` is not an
+authentication challenge and carries no `WWW-Authenticate`.
+
+**If the limiter's store cannot answer, the request is refused** with
+`503 service_unavailable` and `Retry-After`; nothing is served unlimited
+because the limiter was down.
+
+The credential's sixty-first request inside its burst, and its headers:
+
+```
+HTTP/1.1 429 Too Many Requests
+Ratelimit-Limit: 60
+Ratelimit-Policy: 300;w=60
+Ratelimit-Remaining: 0
+Ratelimit-Reset: 12
+Retry-After: 1
+```
+
+(Header names are case-insensitive; the server emits them in Go's canonical
+form, as captured.)
+
+```json
+{
+  "error": {
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded",
+    "message": "Rate limit exceeded.",
+    "request_id": "5fc50d5d15152eb7",
+    "doc_url": "https://docs.accesslink.store/errors/rate_limit_exceeded"
+  }
+}
+```
+→ `429`
 
 ### Members
 
@@ -3721,8 +3797,9 @@ version — a query parameter other than `limit` and `cursor` is
 `400 unknown_parameter`.
 
 First page of two, then the page after it. `id` values are the members'
-public UUIDs; the cursor is opaque and is shown only to make its shape
-unambiguous.
+public UUIDs. The cursor is an encrypted, authenticated token: it is shown
+only to make its shape unambiguous, and nothing in it can be read or altered
+by a client.
 
 ```bash
 curl "http://localhost:8080/api/public/v1/members?limit=2" \
@@ -3752,13 +3829,13 @@ curl "http://localhost:8080/api/public/v1/members?limit=2" \
     }
   ],
   "has_more": true,
-  "next_cursor": "eyJjIjoyLCJrIjoiMjAyNi0wOS0xMVQxMDozNTowMC4zNDc3MjNaIiwiaSI6MiwiZiI6Im1lbWJlcnM6djEiLCJ0IjoiMjAyNi0wOS0xMVQxMDozNTo0OC43MzMyMTMzWiJ9.tEu_rdN-3pSIKi7a9JlD62f0A59Zr2q9zV4hLxQAvtc"
+  "next_cursor": "AkwiRQG6XwT_h0mx7hNHjFINCEMZ8SszybWW7dDh0ZFrJLn0-v7op9IzDmBk3OXLpfxjtfMg8mUAJ_SawP211X5E-odV1sKaKWmn4z23nOEAmv1YpfVvPWYFRCSTaZLu7FBVd8PJPFVJxYcU8lFJbYDcu6fY"
 }
 ```
 → `200`
 
 ```bash
-curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=eyJj…" \
+curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=Akwi…" \
   -H 'Authorization: Bearer atp_live_…'
 ```
 
@@ -4071,19 +4148,14 @@ its return exists and passes.
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
-   **The public API v1 tree ([section 18](#18-public-api-v1)) is not rate
-   limited in this version.** `rate_limit_exceeded` is registered and no
-   allowance is defined; until one is, the public routes must not be exposed
-   to customers. This is a pre-production blocker, not a contract change.
-   **The members cursor is signed, not encrypted, and its payload carries the
-   internal company id and the last row's internal id** — readable by anyone
-   who base64-decodes `next_cursor`, which conflicts with section 18's rule
-   that the internal `BIGSERIAL` is never exposed. It grants nothing (every
-   query is tenant-filtered and the signature prevents forgery), but it is a
-   second pre-production blocker: the payload must be made opaque — the
-   minimum change is to encrypt it (AEAD under a key derived from
-   `CURSOR_SIGNING_KEY`) inside `Encode`/`Decode`, leaving queries and
-   handlers untouched — before a customer credential is issued.
+   The public API v1 tree ([section 18](#18-public-api-v1)) **is** limited, on
+   the shared store. **On a deployment that trusts no proxy** (the Render
+   service sets `TRUSTED_PROXIES=none`) every per-address allowance — the
+   credential-endpoint limiters above and the public authentication-failure
+   bucket — sees one address for every caller and is therefore one
+   service-wide bucket. A valid integration credential is never delayed by
+   that; operators sharing one login allowance is a platform issue tracked
+   separately as [issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8).
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).

@@ -735,8 +735,15 @@ func NewRouter() *gin.Engine {
 	// class; a route for any other resource is added to the specification
 	// before it is mounted here, never after. TestPublicAPIMountsExactlyTheSpecifiedRoutes
 	// pins the set.
+	//
+	// AUTHENTICATION AND RATE LIMITING ARE ONE MIDDLEWARE HERE
+	// (middleware/public_rate_limit.go): the auth-failure allowance is charged
+	// only when authentication fails and the read allowances only when it
+	// succeeds, and one middleware that sees both outcomes cannot be mis-ordered.
+	// It sets exactly what APICredentialAuthMiddleware sets, so Tenant(c) and
+	// RequireScope are unchanged.
 	publicAPI := r.Group("/api/public/v1")
-	publicAPI.Use(middleware.APICredentialAuthMiddleware(handlers.APIEnvironment()))
+	publicAPI.Use(middleware.PublicAPILimiter(handlers.APIEnvironment()))
 	{
 		members := publicAPI.Group("/members", middleware.RequireScope(models.ScopeMembersRead))
 		{

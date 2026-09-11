@@ -136,6 +136,9 @@ must not be missed belongs in `sync_jobs`.
 | `API_CREDENTIAL_FLUSH_INTERVAL_SECONDS` | `60` | How often buffered credential telemetry is written |
 | `API_HOUSEKEEPING_INTERVAL_SECONDS` | `600` | How often rate buckets, idempotency records and usage rows are swept |
 | `RATE_BUCKET_IDLE_SECONDS` | `600` | How long an idle per-address rate bucket is kept |
+| `PUBLIC_READ_RATE_BURST` / `PUBLIC_READ_RATE_LIMIT_PER_MINUTE` | `60` / `300` | Public API read allowance per integration credential (burst / sustained) |
+| `PUBLIC_COMPANY_RATE_BURST` / `PUBLIC_COMPANY_RATE_LIMIT_PER_MINUTE` | `200` / `900` | Public API read allowance per company, across all its credentials |
+| `PUBLIC_AUTH_FAILURE_RATE_BURST` / `PUBLIC_AUTH_FAILURE_RATE_LIMIT_PER_MINUTE` | `30` / `60` | Refused unauthenticated public API attempts per client address (service-wide on Render, see below) |
 | `API_USAGE_RETENTION_DAYS` | `90` | How long the per-day usage rollup is kept |
 | `CURSOR_SIGNING_KEY` | *(ephemeral)* | Signs public API pagination cursors; ≥ 32 bytes. Unset: a per-process key, logged at startup, and cursors do not survive a restart or span instances — development and test only. **Production deployments must set a persistent `CURSOR_SIGNING_KEY` of at least 32 bytes.** |
 
@@ -177,28 +180,44 @@ Two maintenance tasks come with this:
   there is one per credential and one per company, so they are bounded by the
   tenant rather than by traffic.
 
-**PRE-PRODUCTION BLOCKER — the public API v1 tree is not rate limited.** The
-four read routes under `/api/public/v1` (API_SPEC.md section 18) authenticate
-an integration credential and open a tenant-scoped transaction per request, and
-nothing bounds how often. The shared store already supports a per-credential
-class and `rate_limit_exceeded` is registered; what is missing is a decided
-allowance, which this document deliberately does not invent. Do not issue a
-customer an integration credential against a production deployment until it
-is in place.
+**The public API v1 tree is rate limited on the shared store** (API_SPEC.md
+section 18, "Rate limits"; `middleware/public_rate_limit.go`). Three buckets:
+`read` per credential (burst 60, 300/min), `read` per company (burst 200,
+900/min) and `auth_failure` per client address (burst 30, 60/min). The
+credential bucket is checked first, then the company's; both are spent on every
+authenticated request whatever the handler answers. Authentication failures
+are charged to `auth_failure` only, and only after the failure, so a spray of
+bad keys never drains a customer's allowance and never delays a valid key.
+A 429 carries the section-18 envelope and `Retry-After`. The `RateLimit-*`
+headers describe the credential bucket and are carried by every response to
+an **authenticated** request (200, 400, 403, 404 and 429 alike); a 401, the
+429 that stands in for one, and a 503 never reached that bucket and carry
+none. A store that cannot answer is a 503
+(`service_unavailable`) — the limiter fails closed. An exhausted bucket is
+remembered in process for its `Retry-After`, so hammering it costs no database
+statement until it could hold a token again. Every authenticated public request
+also feeds the credential usage rollup (`api_credential_flush`), which is what
+the console's credential usage endpoint reports.
 
-**PRE-PRODUCTION BLOCKER — the members cursor exposes internal ids.**
-`models/cursor.go` signs the cursor (HMAC) but does not encrypt it: the
-base64 payload carries `c` (the internal company id) and `i` (the internal
-id of the last row served), which API_SPEC.md section 18 says are never
-exposed. Nothing can be done with them — every query is filtered on the
-credential's company and a tampered cursor fails its signature — but the
-contract is violated as written. Minimum fix, scoped to `Encode`/`Decode`
-only: AEAD-encrypt the payload under a key derived from `CURSOR_SIGNING_KEY`
-(AES-GCM or XChaCha20-Poly1305), so the wire form is opaque and the keyset
-position stays `(created_at, id)`; no query, handler or test outside
-`models/cursor_test.go` changes. The alternative — dropping `c` and keying the
-tiebreak on `public_id` — touches the ordering SQL and is not the minimum.
-Do this with the rate-limit work, before customer exposure.
+**KNOWN GAP — client addresses on Render.** `TRUSTED_PROXIES=none` makes
+`ClientIP()` Render's own proxy for every request, so every ADDRESS-keyed
+limiter is one service-wide bucket there: the public `auth_failure` bucket by
+design (a cap on refused attempts, not per-source fairness — a valid key is
+never delayed by it), but also, and less intentionally, the P1 **login, claim
+and platform-login** allowances (10/min each) are shared by every operator of
+every tenant. That is a pre-existing platform issue tracked separately as
+[issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8); the
+fix is to trust Render's proxy ranges so `ClientIP()` is real, and it is
+deliberately NOT changed by the public API work.
+
+**Cursors are encrypted (v2).** Public API pagination cursors are
+XChaCha20-Poly1305 tokens under a key HKDF-derived from `CURSOR_SIGNING_KEY`,
+with the tenant and the query's filter fingerprint bound as associated data.
+A client can neither read nor alter one; a cursor from another tenant, another
+query, another key or an older format is refused as `cursor_invalid`. Rotating
+`CURSOR_SIGNING_KEY` therefore invalidates every outstanding cursor —
+integrators simply restart their listing — and there is deliberately no
+previous-key grace window.
 
 ## Shutdown
 
