@@ -140,6 +140,26 @@ func GetMembersChangedSince(companyID int64, since string) ([]models.Member, err
 // CreateMember creates a new member within a company and queues a CREATE sync
 // job for every device that must learn about them.
 func CreateMember(companyID int64, member *models.Member) error {
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := CreateMemberTx(tx, companyID, member); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// CreateMemberTx is CreateMember inside a transaction the caller owns.
+//
+// The service layer runs it inside a tenant-scoped transaction
+// (database.WithTenant) so the statement timeout applies; the legacy wrapper
+// above opens a plain one. The body is the same either way -- validation, the
+// insert, the default access grant and the sync fan-out -- so the two paths
+// cannot drift.
+func CreateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 	// FW-09, enforced at the store rather than only at the two handlers above
 	// it. Both call this, and so would a third; a person whose id no terminal
 	// can hold must not be creatable through any of them, because the failure
@@ -149,17 +169,11 @@ func CreateMember(companyID int64, member *models.Member) error {
 		return err
 	}
 
-	tx, err := DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
 	query := `INSERT INTO people (company_id, external_id, full_name, membership_type, active, fingerprint_template)
 	          VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
 	          RETURNING id, public_id, created_at, updated_at`
 
-	err = tx.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
+	err := tx.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
 		member.Active, member.FingerprintTemplate).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 	if err != nil {
@@ -177,10 +191,7 @@ func CreateMember(companyID int64, member *models.Member) error {
 		return err
 	}
 
-	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobCreate, member, false); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return enqueuePersonChangeTx(tx, companyID, models.SyncJobCreate, member, false)
 }
 
 // UpdateMember updates an existing member and queues an UPDATE sync job
@@ -191,22 +202,28 @@ func UpdateMember(companyID int64, member *models.Member) error {
 	}
 	defer tx.Rollback()
 
+	if err := UpdateMemberTx(tx, companyID, member); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// UpdateMemberTx is UpdateMember inside a transaction the caller owns.
+// sql.ErrNoRows when the id is unknown, deleted, or in another company.
+func UpdateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 	query := `UPDATE people SET full_name = $1, membership_type = $2, active = $3,
 	          fingerprint_template = NULLIF($4, '')
 	          WHERE external_id = $5 AND company_id = $6 AND deleted_at IS NULL
 	          RETURNING id, public_id, created_at, updated_at`
 
-	err = tx.QueryRow(query, member.FullName, member.MembershipType, member.Active,
+	err := tx.QueryRow(query, member.FullName, member.MembershipType, member.Active,
 		member.FingerprintTemplate, member.MemberID, companyID).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 	if err != nil {
 		return err
 	}
 
-	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, member, false); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, member, false)
 }
 
 // DeleteMember soft-deletes a member and queues a DELETE sync job.
@@ -222,20 +239,32 @@ func DeleteMember(companyID int64, memberID string) error {
 	}
 	defer tx.Rollback()
 
+	if _, err := DeleteMemberTx(tx, companyID, memberID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DeleteMemberTx is DeleteMember inside a transaction the caller owns.
+//
+// Reports whether a row was deleted, because the two callers want different
+// things from a miss: the legacy wrapper treats it as an idempotent no-op, and
+// the service layer answers not-found so an integrator learns the id was wrong.
+func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) {
 	var member models.Member
 	query := `UPDATE people SET deleted_at = CURRENT_TIMESTAMP
 	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
 	          RETURNING id, public_id, external_id, full_name, membership_type, active, updated_at`
 
-	err = tx.QueryRow(query, memberID, companyID).Scan(
+	err := tx.QueryRow(query, memberID, companyID).Scan(
 		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
 		&member.MembershipType, &member.Active, &member.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// The INTENT, stated where an operator can see it, exactly as terminal
@@ -258,13 +287,13 @@ func DeleteMember(companyID int64, memberID string) error {
 		   AND credential_id IN (SELECT id FROM credentials
 		                          WHERE person_id = $1 AND deleted_at IS NULL)`,
 		member.ID); err != nil {
-		return fmt.Errorf("marking placements for removal after delete: %w", err)
+		return false, fmt.Errorf("marking placements for removal after delete: %w", err)
 	}
 
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	return true, nil
 }
 
 // Enrollment Queries
