@@ -29,7 +29,10 @@
 # web/src/test/fixtures.ts:418, :438 and
 # web/src/pages/api-credentials/apiCredentials.test.tsx:46 --
 #
-#   key_prefix: 'atp_live_0123abcd',
+#   key_prefix: '<atp_live_ followed by 8 hex characters>',
+#
+# (Described rather than quoted: this file is scanned too, and the literal
+# in a comment here was itself raised as a fourth finding.)
 #
 # Integration-credential KEY PREFIX fixtures for the console tests: the
 # 17-character public identifier (atp_live_ + 8 hex) that the server returns in
