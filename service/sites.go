@@ -16,18 +16,17 @@ import (
 // another company (404). Both are decided from the TenantContext and the row's
 // company_id; nothing the caller sends can move a site between the two.
 
-// Site is the public projection of a site. The provisioning key and the
-// settings blob are absent by construction.
+// Site is the public projection of a site (API_SPEC.md section 18). The
+// provisioning key, the settings blob and the offline policy are absent by
+// construction; `address` is always present, "" when the site has none.
 type Site struct {
-	ID                  string    `json:"id"`
-	Name                string    `json:"name"`
-	Address             string    `json:"address,omitempty"`
-	Timezone            string    `json:"timezone"`
-	Active              bool      `json:"active"`
-	TerminalCount       int       `json:"terminal_count"`
-	OfflinePolicy       string    `json:"offline_policy"`
-	OfflineGraceMinutes int       `json:"offline_grace_minutes"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Address       string    `json:"address"`
+	Timezone      string    `json:"timezone"`
+	Active        bool      `json:"active"`
+	TerminalCount int       `json:"terminal_count"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // SiteService is the site operations. Construct with NewSiteService.
@@ -91,14 +90,12 @@ func (s *SiteService) List(ctx context.Context, tc *TenantContext) ([]Site, erro
 
 func publicSite(row *database.TenantSite) *Site {
 	return &Site{
-		ID:                  row.Site.ID,
-		Name:                row.Site.Name,
-		Address:             row.Site.Address,
-		Timezone:            row.Site.Timezone,
-		Active:              row.Site.Active,
-		TerminalCount:       row.Site.DeviceCount,
-		OfflinePolicy:       row.Site.OfflinePolicy,
-		OfflineGraceMinutes: row.Site.OfflineGraceMinutes,
-		CreatedAt:           row.Site.CreatedAt,
+		ID:            row.Site.ID,
+		Name:          row.Site.Name,
+		Address:       row.Site.Address,
+		Timezone:      row.Site.Timezone,
+		Active:        row.Site.Active,
+		TerminalCount: row.Site.DeviceCount,
+		CreatedAt:     row.Site.CreatedAt,
 	}
 }

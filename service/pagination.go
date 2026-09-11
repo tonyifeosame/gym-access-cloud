@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"access-terminal-cloud-api/database"
@@ -20,15 +21,17 @@ import (
 const (
 	// DefaultPageSize applies when the caller names no limit.
 	DefaultPageSize = 50
-	// MaxPageSize bounds what a caller may ask for. Larger requests are
-	// clamped, not refused: an integrator asking for 1,000 wants "a lot", and
-	// the answer is a page and a cursor, not an error.
+	// MaxPageSize bounds what a caller may ask for. Beyond it the request is
+	// REFUSED, not clamped (API_SPEC.md section 18): the console's clamping
+	// rule exists for a search box, and an integration asking for 5,000 has a
+	// bug that should be reported to it rather than quietly served 200.
 	MaxPageSize = 200
 )
 
 // PageRequest is what a list operation is asked for.
 type PageRequest struct {
-	// Limit is the page size wanted; 0 means DefaultPageSize.
+	// Limit is the page size wanted; 0 means DefaultPageSize. Anything else
+	// outside 1..MaxPageSize is refused as invalid_field on `limit`.
 	Limit int
 	// Cursor continues an earlier page; "" starts from the beginning.
 	Cursor string
@@ -43,15 +46,16 @@ type Page[T any] struct {
 	HasMore bool
 }
 
-// pageSize normalises and clamps a requested limit.
-func pageSize(limit int) int {
+// pageSize validates a requested limit. Zero is "not supplied".
+func pageSize(limit int) (int, error) {
 	switch {
-	case limit <= 0:
-		return DefaultPageSize
-	case limit > MaxPageSize:
-		return MaxPageSize
+	case limit == 0:
+		return DefaultPageSize, nil
+	case limit < 1 || limit > MaxPageSize:
+		return 0, ErrInvalidField("limit",
+			fmt.Sprintf("limit must be an integer between 1 and %d.", MaxPageSize))
 	default:
-		return limit
+		return limit, nil
 	}
 }
 

@@ -54,11 +54,14 @@ func MemberInTenant(q Querier, companyID int64, externalID string) (*models.Memb
 	return &m, nil
 }
 
-// MembersAfter reads one page of live people in (created_at, id) order.
+// MembersAfter reads one page of live people, NEWEST FIRST: (created_at, id)
+// descending, which is the public contract (API_SPEC.md section 18).
 //
 // KEYSET, NOT OFFSET. The caller passes the position of the last row it has
-// and gets the rows strictly after it; a row inserted or deleted between pages
-// cannot shift the window. `after` nil starts from the beginning. The caller
+// and gets the rows strictly after it in listing order -- that is, older; a
+// row inserted or deleted between pages cannot shift the window, and a row
+// created while paging appears at the front of a fresh listing rather than on
+// a page the client is holding. `after` nil starts from the newest. The caller
 // asks for one row more than it will serve, to learn whether a next page exists.
 func MembersAfter(q Querier, companyID int64, after *KeysetPosition, limit int) ([]models.Member, error) {
 	var (
@@ -72,8 +75,8 @@ func MembersAfter(q Querier, companyID int64, after *KeysetPosition, limit int) 
 	rows, err := q.Query(`SELECT `+memberColumns+`
 	          FROM people
 	         WHERE company_id = $1 AND deleted_at IS NULL
-	           AND (NOT $2 OR (created_at, id) > ($3::timestamptz, $4::bigint))
-	         ORDER BY created_at, id
+	           AND (NOT $2 OR (created_at, id) < ($3::timestamptz, $4::bigint))
+	         ORDER BY created_at DESC, id DESC
 	         LIMIT $5`,
 		companyID, paging, afterTS, afterID, limit)
 	if err != nil {

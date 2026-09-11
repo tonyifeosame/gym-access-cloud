@@ -718,6 +718,38 @@ func NewRouter() *gin.Engine {
 		}
 	}
 
+	// ---------------------------------------------------------------------
+	// Public API v1 -- API_SPEC.md section 18. THE FIRST ROUTES TO READ AN
+	// INTEGRATION CREDENTIAL.
+	// ---------------------------------------------------------------------
+	//
+	// Its own tree, its own authentication, its own error shape. The middleware
+	// resolves Authorization: Bearer atp_… to a service.TenantContext and sets
+	// nothing else -- in particular not the "company_id" key the console and
+	// site-key groups use, so a handler wired onto the wrong group gets no
+	// tenant rather than someone's. RequireScope refuses at the edge; every
+	// service method checks the same scope again regardless.
+	//
+	// READ ROUTES ONLY IN THIS VERSION. The write semantics are specified in
+	// section 18 and follow with the idempotency middleware and a write rate
+	// class; a route for any other resource is added to the specification
+	// before it is mounted here, never after. TestPublicAPIMountsExactlyTheSpecifiedRoutes
+	// pins the set.
+	publicAPI := r.Group("/api/public/v1")
+	publicAPI.Use(middleware.APICredentialAuthMiddleware(handlers.APIEnvironment()))
+	{
+		members := publicAPI.Group("/members", middleware.RequireScope(models.ScopeMembersRead))
+		{
+			members.GET("", handlers.PublicListMembers)
+			members.GET("/:member_id", handlers.PublicGetMember)
+		}
+		sites := publicAPI.Group("/sites", middleware.RequireScope(models.ScopeSitesRead))
+		{
+			sites.GET("", handlers.PublicListSites)
+			sites.GET("/:site_id", handlers.PublicGetSite)
+		}
+	}
+
 	// API v1 routes with authentication
 	v1 := r.Group("/api/v1")
 	v1.Use(middleware.AuthMiddleware())

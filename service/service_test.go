@@ -193,10 +193,19 @@ func TestAuthenticateRefusesBeforeTheDatabaseIsNeeded(t *testing.T) {
 	}
 }
 
-func TestPageSizeIsClampedNotRefused(t *testing.T) {
-	for in, want := range map[int]int{0: DefaultPageSize, -5: DefaultPageSize, 1: 1, 200: 200, 5000: MaxPageSize} {
-		if got := pageSize(in); got != want {
-			t.Errorf("pageSize(%d) = %d, want %d", in, got, want)
+func TestPageSizeIsRefusedOutsideBoundsNotClamped(t *testing.T) {
+	for in, want := range map[int]int{0: DefaultPageSize, 1: 1, 50: 50, 200: 200} {
+		if got, err := pageSize(in); err != nil || got != want {
+			t.Errorf("pageSize(%d) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []int{-5, 201, 5000} {
+		_, err := pageSize(in)
+		if !errors.Is(err, ErrInvalidField("limit", "")) {
+			t.Errorf("pageSize(%d) = %v, want invalid_field on limit", in, err)
+		}
+		if svc, _ := As(err); svc == nil || svc.Param() != "limit" {
+			t.Errorf("pageSize(%d) param = %v, want limit", in, err)
 		}
 	}
 }

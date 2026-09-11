@@ -101,16 +101,19 @@ func (s *MemberService) Get(ctx context.Context, tc *TenantContext, memberID str
 	return out, err
 }
 
-// List reads one page of members in creation order. Requires members:read.
+// List reads one page of members, newest first. Requires members:read.
 func (s *MemberService) List(ctx context.Context, tc *TenantContext, page PageRequest) (*Page[Member], error) {
 	if err := tc.RequireScope(models.ScopeMembersRead); err != nil {
+		return nil, err
+	}
+	size, err := pageSize(page.Limit)
+	if err != nil {
 		return nil, err
 	}
 	after, err := decodeCursor(s.signer, tc, page.Cursor, membersListFilter, 0)
 	if err != nil {
 		return nil, err
 	}
-	size := pageSize(page.Limit)
 
 	var rows []models.Member
 	err = database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {

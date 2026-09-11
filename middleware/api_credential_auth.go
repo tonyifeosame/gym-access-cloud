@@ -8,11 +8,11 @@ import (
 
 // Integration-credential authentication for the public API.
 //
-// MOUNTED NOWHERE IN THIS BUILD. The public tree does not exist, and
-// TestNoPublicAPIRouteExistsYet keeps it that way; this middleware is the
-// piece a P3 route group will attach, and it is here now so that the whole
-// path from an Authorization header to a TenantContext is written and tested
-// before a route depends on it.
+// MOUNTED ON /api/public/v1 (router.go), and nowhere else. It was written and
+// tested in P2 before any route depended on it, so that the whole path from an
+// Authorization header to a TenantContext existed ahead of the first
+// consumer; TestPublicAPIMountsExactlyTheSpecifiedRoutes pins what sits
+// behind it.
 //
 // WHAT IT SETS, AND WHAT IT DOES NOT. On success the request carries a
 // *service.TenantContext under ContextTenant, and that is ALL a public handler

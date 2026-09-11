@@ -112,6 +112,20 @@ func ErrTenantIdentity(param string) *Error {
 	return newError(models.CodeTenantIdentity, param, "", nil)
 }
 
+// ErrUnknownParameter refuses a query parameter this version does not define.
+// Refused rather than ignored: a misspelt parameter that is silently dropped
+// looks like an answer to the question that was asked.
+func ErrUnknownParameter(param string) *Error {
+	return newError(models.CodeUnknownParameter, param,
+		"The query parameter "+param+" is not recognised.", nil)
+}
+
+// ErrUnknownField refuses a body field this version does not define.
+func ErrUnknownField(param string) *Error {
+	return newError(models.CodeUnknownField, param,
+		"The field "+param+" is not recognised.", nil)
+}
+
 // ErrMissingField reports a required field that was not supplied.
 func ErrMissingField(param string) *Error {
 	return newError(models.CodeMissingField, param, "The "+param+" field is required.", nil)

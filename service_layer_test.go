@@ -360,8 +360,16 @@ func TestMemberListPagesByKeysetAndCursorsAreTenantBound(t *testing.T) {
 			t.Fatal("pagination did not terminate")
 		}
 	}
-	if strings.Join(seen, ",") != "PAGE-001,PAGE-002,PAGE-003,PAGE-004,PAGE-005" || pages != 3 {
+	// Newest first (API_SPEC.md section 18), three pages of two.
+	if strings.Join(seen, ",") != "PAGE-005,PAGE-004,PAGE-003,PAGE-002,PAGE-001" || pages != 3 {
 		t.Errorf("paged %v in %d pages", seen, pages)
+	}
+
+	// An out-of-range limit is refused, not clamped.
+	for _, limit := range []int{-1, 201} {
+		if _, err := members.List(ctx, one, service.PageRequest{Limit: limit}); codeOf(t, err) != models.CodeInvalidField {
+			t.Errorf("limit %d = %v, want invalid_field", limit, err)
+		}
 	}
 
 	// A cursor minted for company one is refused for company two.
@@ -522,13 +530,12 @@ func TestCredentialMiddlewareResolvesTenantFromTheCredentialAndIgnoresTheRequest
 	}
 }
 
-// The line P1 drew still holds after P2: nothing public is mounted, and the
-// credential-console surface is exactly what it was.
-func TestP2MountsNoRoutes(t *testing.T) {
+// The throwaway probe engine above is never part of the real router.
+func TestTheProbeRouteIsNotOnTheRealRouter(t *testing.T) {
 	env := newTestEnv(t)
 	for _, route := range env.router.Routes() {
-		if strings.HasPrefix(route.Path, "/api/public") || strings.Contains(route.Path, "/probe") {
-			t.Errorf("P2 mounted a route: %s %s", route.Method, route.Path)
+		if strings.Contains(route.Path, "/probe") {
+			t.Errorf("a test-only route is mounted: %s %s", route.Method, route.Path)
 		}
 	}
 }

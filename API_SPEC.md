@@ -42,7 +42,7 @@ written by hand.
 
 ## 1. Authentication
 
-There are four authentication modes. Which one applies is stated on every
+There are five authentication modes. Which one applies is stated on every
 endpoint below.
 
 | Mode | Credential | Who uses it |
@@ -51,13 +51,13 @@ endpoint below.
 | Device key | `X-Device-Key` | one terminal |
 | Site key + serial | `X-API-Key` + `X-Device-Serial` | deprecated terminal fallback |
 | **Operator session** | `__Host-al_session` cookie | the browser dashboard |
+| **Integration credential** | `Authorization: Bearer atp_…` | third-party integrations, on `/api/public/v1` only |
 
-> **A fifth class exists but authenticates nothing yet.** Integration
+> **The fifth class authenticates the Public API v1 tree.** Integration
 > credentials (`atp_live_…`, migration 030) are issued, rotated and revoked from
-> `/api/v1/console/api-credentials` and are the credential the future public API
-> will accept. **No route in this build reads one** — there is no public API
-> tree. They are listed here so the class is not a surprise when it arrives, and
-> so nobody mistakes one for a site key.
+> `/api/v1/console/api-credentials` and authenticate the routes under
+> `/api/public/v1` — [section 18](#18-public-api-v1). In this contract no route
+> under `/api/v1` reads one; an integration credential is not a site key.
 
 **A browser must use an operator session, never a site API key.** The site key
 is the *provisioning secret*: whoever holds it can register a terminal and rotate
@@ -3436,12 +3436,13 @@ authentication, its own error shape and its own pagination, because the rules
 that serve a console written by the same people as the server do not serve a
 party that has to branch on something stable.
 
-**Status: normative, not yet served.** This section is the contract the first
-public routes will be built to. No route under `/api/public` exists in this
-build, and a test (`TestNoPublicAPIRouteExistsYet`) refuses one until it is
-mounted deliberately. Where an example is marked *captured in P3*, the route
-must be implemented first and the example captured from it, per the rule in the
-preamble — none is written by hand here.
+**Status: normative and served.** The four read endpoints at the end of this
+section are mounted; everything else here is contract ahead of its route. A
+test (`TestPublicAPIMountsExactlyTheSpecifiedRoutes`) pins the mounted set to
+this section, so a route cannot arrive without its contract. Every example
+below was captured from a running server against a seeded database, per the
+rule in the preamble; a block marked *captured with the route* is for a route
+this version does not yet mount.
 
 - **Base path:** `/api/public/v1`
 - **Content type:** `application/json`
@@ -3481,6 +3482,30 @@ distinction until a later version states that it is made.
 A database failure during authentication is `503 service_unavailable` with
 `Retry-After`, never `401`: a credential problem is not reported during an
 outage that is not one.
+
+No credential at all:
+
+```bash
+curl http://localhost:8080/api/public/v1/members
+```
+
+```
+HTTP/1.1 401 Unauthorized
+Www-Authenticate: Bearer realm="accesslink"
+```
+
+```json
+{
+  "error": {
+    "type": "authentication_error",
+    "code": "api_credential_missing",
+    "message": "No credential was presented. Send Authorization: Bearer <your key>.",
+    "request_id": "6e4a99b280eb9e6e",
+    "doc_url": "https://docs.accesslink.store/errors/api_credential_missing"
+  }
+}
+```
+→ `401`
 
 ### Tenant identity
 
@@ -3528,6 +3553,21 @@ credential scope is
 reported even for a resource that does not exist; a foreign-company site is
 `404` even when the credential is site-restricted, because nothing about
 another company's resources is confirmed.
+
+A credential issued with `sites:read` only, asking for members:
+
+```json
+{
+  "error": {
+    "type": "permission_error",
+    "code": "insufficient_scope",
+    "message": "This credential does not carry the scope this endpoint requires.",
+    "request_id": "d1566e1129a1f7bb",
+    "doc_url": "https://docs.accesslink.store/errors/insufficient_scope"
+  }
+}
+```
+→ `403`
 
 ### Identifiers
 
@@ -3680,8 +3720,98 @@ Credential scope `members:read`. Paginated as above; newest first. No filters in
 version — a query parameter other than `limit` and `cursor` is
 `400 unknown_parameter`.
 
-> **Example: captured in P3.** The route must be implemented and the request
-> and response captured from a running server before this block is filled in.
+First page of two, then the page after it. `id` values are the members'
+public UUIDs; the cursor is opaque and is shown only to make its shape
+unambiguous.
+
+```bash
+curl "http://localhost:8080/api/public/v1/members?limit=2" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "94ed94c2-6984-40eb-a19b-7dc752caaa9e",
+      "member_id": "MEM003",
+      "full_name": "Alan Turing",
+      "membership_type": "ANNUAL",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.389158Z",
+      "updated_at": "2026-09-11T10:35:00.389158Z"
+    },
+    {
+      "id": "30aa0802-c537-4fad-a647-7035d0c5a398",
+      "member_id": "MEM002",
+      "full_name": "Grace Hopper",
+      "membership_type": "MONTHLY",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.347723Z",
+      "updated_at": "2026-09-11T10:35:00.347723Z"
+    }
+  ],
+  "has_more": true,
+  "next_cursor": "eyJjIjoyLCJrIjoiMjAyNi0wOS0xMVQxMDozNTowMC4zNDc3MjNaIiwiaSI6MiwiZiI6Im1lbWJlcnM6djEiLCJ0IjoiMjAyNi0wOS0xMVQxMDozNTo0OC43MzMyMTMzWiJ9.tEu_rdN-3pSIKi7a9JlD62f0A59Zr2q9zV4hLxQAvtc"
+}
+```
+→ `200`
+
+```bash
+curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=eyJj…" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070",
+      "member_id": "MEM001",
+      "full_name": "Ada Lovelace",
+      "membership_type": "ANNUAL",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.289175Z",
+      "updated_at": "2026-09-11T10:35:00.289175Z"
+    }
+  ],
+  "has_more": false,
+  "next_cursor": null
+}
+```
+→ `200`. The last page: `has_more` is `false` and `next_cursor` is `null`.
+
+A limit outside the bounds:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_field",
+    "message": "limit must be an integer between 1 and 200.",
+    "param": "limit",
+    "request_id": "2f54349499400475",
+    "doc_url": "https://docs.accesslink.store/errors/invalid_field"
+  }
+}
+```
+→ `400`
+
+A request that tries to name its tenant:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "tenant_identity_not_permitted",
+    "message": "The account is determined by your credential and cannot be supplied in a request.",
+    "param": "company_id",
+    "request_id": "e6e7d3d987e1531a",
+    "doc_url": "https://docs.accesslink.store/errors/tenant_identity_not_permitted"
+  }
+}
+```
+→ `400`
 
 #### `GET /api/public/v1/members/{member_id}`
 
@@ -3691,7 +3821,36 @@ Credential scope `members:read`. Returns one member object → `200`.
 |---|---|---|
 | No such member in this company, or soft-deleted | `404` | `resource_not_found` |
 
-> **Example: captured in P3.**
+```bash
+curl http://localhost:8080/api/public/v1/members/MEM001 \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "id": "ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070",
+  "member_id": "MEM001",
+  "full_name": "Ada Lovelace",
+  "membership_type": "ANNUAL",
+  "active": true,
+  "created_at": "2026-09-11T10:35:00.289175Z",
+  "updated_at": "2026-09-11T10:35:00.289175Z"
+}
+```
+→ `200`
+
+```json
+{
+  "error": {
+    "type": "not_found_error",
+    "code": "resource_not_found",
+    "message": "No such resource.",
+    "request_id": "5cf64ccbac9a0b34",
+    "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+  }
+}
+```
+→ `404` — the same body for a member in another company.
 
 #### Writes — `POST`, `PATCH`, `DELETE` (semantics fixed here; routes follow)
 
@@ -3723,7 +3882,8 @@ by.
 | The change would give a terminal more people than it can hold | `409` | `roster_exceeds_terminal_capacity` |
 | `PATCH` of a missing member | `404` | `resource_not_found` |
 
-> **Examples: captured in P3**, with the routes.
+> **Examples: captured with the routes.** The write routes are not mounted in
+> this version.
 
 ### Sites
 
@@ -3779,7 +3939,57 @@ there are none.
 
 Credential scope `sites:read`.
 
-> **Example: captured in P3.**
+An unrestricted credential, in a company with two sites:
+
+```bash
+curl http://localhost:8080/api/public/v1/sites \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "3e2550b2-d1cd-4d0a-915d-dd79c68120e5",
+      "name": "Abuja Studio",
+      "address": "",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.327588Z"
+    },
+    {
+      "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+      "name": "Lagos Depot",
+      "address": "14 Marina Road",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.32243Z"
+    }
+  ]
+}
+```
+→ `200`
+
+The same request with a credential restricted to one site:
+
+```json
+{
+  "data": [
+    {
+      "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+      "name": "Lagos Depot",
+      "address": "14 Marina Road",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.32243Z"
+    }
+  ]
+}
+```
+→ `200`
 
 #### `GET /api/public/v1/sites/{site_id}`
 
@@ -3791,7 +4001,38 @@ Credential scope `sites:read`. `{site_id}` is the public UUID. Returns one site 
 | Not in this company, retired, or malformed | `404` | `resource_not_found` |
 | In this company but outside the credential's site restriction | `403` | `site_not_permitted` |
 
-> **Example: captured in P3.**
+```bash
+curl http://localhost:8080/api/public/v1/sites/46e57753-0143-481a-83f6-e93a36cfb9a7 \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+  "name": "Lagos Depot",
+  "address": "14 Marina Road",
+  "timezone": "Africa/Lagos",
+  "active": true,
+  "terminal_count": 0,
+  "created_at": "2026-09-11T10:34:35.32243Z"
+}
+```
+→ `200`
+
+The restricted credential asking for the site it was not issued for:
+
+```json
+{
+  "error": {
+    "type": "permission_error",
+    "code": "site_not_permitted",
+    "message": "This credential is not scoped to that site.",
+    "request_id": "433be31abd341a5c",
+    "doc_url": "https://docs.accesslink.store/errors/site_not_permitted"
+  }
+}
+```
+→ `403`
 
 ### Endpoints in this version
 
@@ -3830,6 +4071,10 @@ its return exists and passes.
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
+   **The public API v1 tree ([section 18](#18-public-api-v1)) is not rate
+   limited in this version.** `rate_limit_exceeded` is registered and no
+   allowance is defined; until one is, the public routes must not be exposed
+   to customers. This is a pre-production blocker, not a contract change.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).
