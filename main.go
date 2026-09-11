@@ -170,6 +170,27 @@ func main() {
 	// fall back to per-instance allowances.
 	middleware.UseSharedRateStore(database.NewPostgresRateStore(database.DB))
 
+	// The public API's cursor signing key (API_SPEC.md section 18).
+	//
+	// Set: cursors survive restarts and are honoured by every instance sharing
+	// the key. Unset: an ephemeral key, logged as such -- every cursor this
+	// process signs is refused after a restart or by a sibling instance as
+	// cursor_invalid, and the client starts its listing again. That is the safe
+	// direction, and it is deliberately not fatal: the key is an availability
+	// nicety for pagination, not a security boundary (the tenant filter is
+	// applied to every query regardless of what a cursor claims), and a deploy
+	// must not fail to boot for want of one. A key that IS set but too short
+	// is fatal, because somebody configured it and got it wrong.
+	cursorKey := []byte(os.Getenv("CURSOR_SIGNING_KEY"))
+	if len(cursorKey) == 0 {
+		cursorKey = handlers.EphemeralCursorKey()
+		log.Printf("CURSOR_SIGNING_KEY is not set; public API cursors are signed with an " +
+			"ephemeral key and will not survive a restart or span instances")
+	}
+	if err := handlers.ConfigurePublicAPI(cursorKey); err != nil {
+		log.Fatalf("CURSOR_SIGNING_KEY: %v", err)
+	}
+
 	// Create the first operator, if this system has none and the environment
 	// says who it should be.
 	//

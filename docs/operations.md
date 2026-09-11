@@ -137,6 +137,7 @@ must not be missed belongs in `sync_jobs`.
 | `API_HOUSEKEEPING_INTERVAL_SECONDS` | `600` | How often rate buckets, idempotency records and usage rows are swept |
 | `RATE_BUCKET_IDLE_SECONDS` | `600` | How long an idle per-address rate bucket is kept |
 | `API_USAGE_RETENTION_DAYS` | `90` | How long the per-day usage rollup is kept |
+| `CURSOR_SIGNING_KEY` | *(ephemeral)* | Signs public API pagination cursors; ≥ 32 bytes. Unset: a per-process key, logged at startup, and cursors do not survive a restart or span instances — development and test only. **Production deployments must set a persistent `CURSOR_SIGNING_KEY` of at least 32 bytes.** |
 
 The effective configuration is logged at startup, so an operator can see what the
 process will actually do without reading the environment back.
@@ -175,6 +176,29 @@ Two maintenance tasks come with this:
   records and old usage rows. Credential and company buckets are never swept:
   there is one per credential and one per company, so they are bounded by the
   tenant rather than by traffic.
+
+**PRE-PRODUCTION BLOCKER — the public API v1 tree is not rate limited.** The
+four read routes under `/api/public/v1` (API_SPEC.md section 18) authenticate
+an integration credential and open a tenant-scoped transaction per request, and
+nothing bounds how often. The shared store already supports a per-credential
+class and `rate_limit_exceeded` is registered; what is missing is a decided
+allowance, which this document deliberately does not invent. Do not issue a
+customer an integration credential against a production deployment until it
+is in place.
+
+**PRE-PRODUCTION BLOCKER — the members cursor exposes internal ids.**
+`models/cursor.go` signs the cursor (HMAC) but does not encrypt it: the
+base64 payload carries `c` (the internal company id) and `i` (the internal
+id of the last row served), which API_SPEC.md section 18 says are never
+exposed. Nothing can be done with them — every query is filtered on the
+credential's company and a tampered cursor fails its signature — but the
+contract is violated as written. Minimum fix, scoped to `Encode`/`Decode`
+only: AEAD-encrypt the payload under a key derived from `CURSOR_SIGNING_KEY`
+(AES-GCM or XChaCha20-Poly1305), so the wire form is opaque and the keyset
+position stays `(created_at, id)`; no query, handler or test outside
+`models/cursor_test.go` changes. The alternative — dropping `c` and keying the
+tiebreak on `public_id` — touches the ordering SQL and is not the minimum.
+Do this with the rate-limit work, before customer exposure.
 
 ## Shutdown
 

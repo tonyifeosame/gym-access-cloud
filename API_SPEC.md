@@ -36,12 +36,13 @@ written by hand.
 15. [Authorization — permissions and schedules](#15-authorization--permissions-and-schedules)
 16. [Events — the activity trail](#16-events--the-activity-trail)
 17. [Device protocol additions](#17-device-protocol-additions)
+18. [Public API v1](#18-public-api-v1)
 
 ---
 
 ## 1. Authentication
 
-There are four authentication modes. Which one applies is stated on every
+There are five authentication modes. Which one applies is stated on every
 endpoint below.
 
 | Mode | Credential | Who uses it |
@@ -50,6 +51,13 @@ endpoint below.
 | Device key | `X-Device-Key` | one terminal |
 | Site key + serial | `X-API-Key` + `X-Device-Serial` | deprecated terminal fallback |
 | **Operator session** | `__Host-al_session` cookie | the browser dashboard |
+| **Integration credential** | `Authorization: Bearer atp_…` | third-party integrations, on `/api/public/v1` only |
+
+> **The fifth class authenticates the Public API v1 tree.** Integration
+> credentials (`atp_live_…`, migration 030) are issued, rotated and revoked from
+> `/api/v1/console/api-credentials` and authenticate the routes under
+> `/api/public/v1` — [section 18](#18-public-api-v1). In this contract no route
+> under `/api/v1` reads one; an integration credential is not a site key.
 
 **A browser must use an operator session, never a site API key.** The site key
 is the *provisioning secret*: whoever holds it can register a terminal and rotate
@@ -216,6 +224,11 @@ underlying validator message, e.g.:
 
 These strings are for humans and logs — **do not parse them**. Branch on the
 HTTP status code.
+
+> **Exception: the public API.** Under `/api/public/v1` every error is a
+> structured object with a stable `code` — see
+> [section 18](#18-public-api-v1). The string rule above is the contract for
+> everything else.
 
 ### Status codes
 
@@ -1346,6 +1359,13 @@ one. CSRF is required on every unsafe method.
 | `PUT` | `/api/v1/console/operators/{operator_id}/sites` | session + CSRF | ADMIN |
 | `POST` | `/api/v1/console/operators/{operator_id}/invite` | session + CSRF | ADMIN |
 | `POST` | `/api/v1/console/operators/{operator_id}/reset` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/api-credentials` | session | ADMIN |
+| `POST` | `/api/v1/console/api-credentials` | session + CSRF | ADMIN |
+| `GET` | `/api/v1/console/api-credentials/{id}` | session | ADMIN |
+| `GET` | `/api/v1/console/api-credentials/{id}/usage` | session | ADMIN |
+| `POST` | `/api/v1/console/api-credentials/{id}/rotate` | session + CSRF | ADMIN |
+| `DELETE` | `/api/v1/console/api-credentials/{id}` | session + CSRF | ADMIN |
+| `POST` | `/api/v1/console/api-credentials/revoke-all` | session + CSRF | ADMIN |
 | `POST` | `/api/v1/console/sites` | session + CSRF | ADMIN |
 | `PUT` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
 | `DELETE` | `/api/v1/console/sites/{site_id}` | session + CSRF | ADMIN |
@@ -3408,6 +3428,628 @@ door moved. Two authors, two trails, and neither is a summary of the other.
 
 ---
 
+## 18. Public API v1
+
+The contract for third-party integrations: a customer's booking system, a
+membership platform, a reporting tool. It is a separate tree with its own
+authentication, its own error shape and its own pagination, because the rules
+that serve a console written by the same people as the server do not serve a
+party that has to branch on something stable.
+
+**Status: normative and served.** The four read endpoints at the end of this
+section are mounted; everything else here is contract ahead of its route. A
+test (`TestPublicAPIMountsExactlyTheSpecifiedRoutes`) pins the mounted set to
+this section, so a route cannot arrive without its contract. Every example
+below was captured from a running server against a seeded database, per the
+rule in the preamble; a block marked *captured with the route* is for a route
+this version does not yet mount.
+
+- **Base path:** `/api/public/v1`
+- **Content type:** `application/json`
+- **Request correlation:** `X-Request-ID` exactly as in
+  [section 2](#request-correlation); the same id is repeated inside every error
+  body (below).
+
+### Authentication
+
+```
+Authorization: Bearer atp_live_<64 hex>
+```
+
+An integration credential, issued from `/api/v1/console/api-credentials` (see
+the [operator session routes](#operator-session-routes)). The secret is shown
+once at issue and at rotation and is never retrievable afterwards; the server
+stores only its SHA-256.
+
+The credential carries its **environment** in the string — `atp_live_…` or
+`atp_test_…` — and a deployment accepts exactly one kind (`API_ENVIRONMENT`,
+default `live`). A key of the other kind is refused by shape before any lookup.
+
+| Presented | Status | `code` |
+|---|---|---|
+| No `Authorization` header, or a scheme other than `Bearer` | `401` | `api_credential_missing` |
+| A value that is not `atp_<env>_<64 hex>` | `401` | `api_credential_invalid` |
+| A key of the other environment | `401` | `api_credential_wrong_environment` |
+| Unknown, revoked, expired, or rotated out past its grace window | `401` | `api_credential_invalid` |
+| The credential's company is not active | `401` | `api_credential_invalid` |
+
+Every `401` carries `WWW-Authenticate: Bearer realm="accesslink"`. The
+`api_credential_revoked` and `api_credential_expired` codes are **registered
+and reserved** but not served in this version: a refused key answers
+`api_credential_invalid` regardless of why, and a client must not depend on the
+distinction until a later version states that it is made.
+
+A database failure during authentication is `503 service_unavailable` with
+`Retry-After`, never `401`: a credential problem is not reported during an
+outage that is not one.
+
+No credential at all:
+
+```bash
+curl http://localhost:8080/api/public/v1/members
+```
+
+```
+HTTP/1.1 401 Unauthorized
+Www-Authenticate: Bearer realm="accesslink"
+```
+
+```json
+{
+  "error": {
+    "type": "authentication_error",
+    "code": "api_credential_missing",
+    "message": "No credential was presented. Send Authorization: Bearer <your key>.",
+    "request_id": "6e4a99b280eb9e6e",
+    "doc_url": "https://docs.accesslink.store/errors/api_credential_missing"
+  }
+}
+```
+→ `401`
+
+### Tenant identity
+
+**The company is the credential's company, and nothing else.** It is read from
+the credential row on every request. No path segment, query parameter, header
+or body field names a tenant, and one that tries is refused:
+
+| Supplied | Status | `code` |
+|---|---|---|
+| `company_id` or `company` in a request body | `400` | `tenant_identity_not_permitted` (`param` names the field) |
+| `company_id` or `company` as a query parameter | `400` | `tenant_identity_not_permitted` |
+
+A resource that belongs to another company is **`404 resource_not_found`**,
+indistinguishable in status, code and message from one that never existed —
+the rule in [section 2](#status-codes), restated here because it is the whole
+of the isolation an integrator can observe.
+
+### Credential scopes
+
+A credential carries a fixed set of **credential scopes**, chosen at issue.
+These are unrelated to the authorization *scopes* of
+[section 15](#scopes) (`COMPANY` / `SITE` / `TERMINAL`), which describe how far
+a person's access permission reaches; a credential scope describes what an
+integration may do with this API. A route names the one credential scope it
+requires; a credential without it is refused **before any lookup**.
+
+| Credential scope | Unlocks |
+|---|---|
+| `members:read` | reading members |
+| `members:write` | creating, updating and deleting members. **Implies `members:read`** — the implied scope is stored on the credential at issue, so a credential's scope list is exactly what it can do |
+| `sites:read` | reading sites |
+| `terminals:read` | reading terminals — **no route in this version** |
+| `events:read` | reading the activity trail — **no route in this version** |
+| `access:read` | reading access logs — **no route in this version** |
+| `webhooks:manage` | managing webhook endpoints — **no route in this version** |
+
+| Refusal | Status | `code` |
+|---|---|---|
+| The credential lacks the route's credential scope | `403` | `insufficient_scope` |
+| The site is in the credential's company but outside its site restriction | `403` | `site_not_permitted` |
+
+Order of checks, which decides which error a caller sees: **authentication,
+then credential scope, then tenant lookup, then site restriction.** A missing
+credential scope is
+reported even for a resource that does not exist; a foreign-company site is
+`404` even when the credential is site-restricted, because nothing about
+another company's resources is confirmed.
+
+A credential issued with `sites:read` only, asking for members:
+
+```json
+{
+  "error": {
+    "type": "permission_error",
+    "code": "insufficient_scope",
+    "message": "This credential does not carry the scope this endpoint requires.",
+    "request_id": "d1566e1129a1f7bb",
+    "doc_url": "https://docs.accesslink.store/errors/insufficient_scope"
+  }
+}
+```
+→ `403`
+
+### Identifiers
+
+The public tree departs from the two-identifier rule in
+[section 2](#identifiers):
+
+- `id` is the record's **public UUID** — the `public_id` of every other section.
+- The internal `BIGSERIAL` **is never exposed**, under any name.
+- **Member routes are addressed by `member_id`**, the badge number the terminal
+  reads, exactly as [section 3](#3-members) addresses them. It is unique per
+  company.
+- **Site routes are addressed by `id`**, the public UUID. A malformed value is
+  `404 resource_not_found`, not `400` — the rule
+  [section 13](#company-and-sites) already applies to `{site_id}`.
+
+### Errors
+
+Every public error is one object, and the **legacy string rule in
+[section 2](#error-shape) does not apply under `/api/public`**:
+
+```json
+{
+  "error": {
+    "type": "not_found_error",
+    "code": "resource_not_found",
+    "message": "No such resource.",
+    "param": "member_id",
+    "request_id": "7bd8490b23dbdbcc",
+    "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+  }
+}
+```
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `type` | always | coarse class; branch on it generically |
+| `code` | always | the stable identifier. **Additive only** — a code is never renamed, removed or given a different meaning |
+| `message` | always | for a human; **not stable, do not parse** |
+| `param` | when there is one | the body field or query parameter at fault |
+| `request_id` | always | the same value as the `X-Request-ID` response header |
+| `doc_url` | when published | `https://docs.accesslink.store/errors/<code>`. The site is not yet live; the codes are stable regardless |
+
+**Clients branch on `code` and status, never on `message`.** No public message
+is ever built from an internal error string, a validator's field path or a
+database error.
+
+| `type` | Status | Codes in this version |
+|---|---|---|
+| `authentication_error` | `401` | `api_credential_missing`, `api_credential_invalid`, `api_credential_wrong_environment` (reserved: `api_credential_expired`, `api_credential_revoked`) |
+| `permission_error` | `403` | `insufficient_scope`, `site_not_permitted`, `company_inactive` (reserved) |
+| `invalid_request_error` | `400` | `unknown_parameter`, `unknown_field`, `missing_field`, `invalid_field`, `invalid_timestamp`, `cursor_invalid`, `sort_not_supported`, `tenant_identity_not_permitted`, `member_id_unusable`, `idempotency_key_invalid`, `body_too_large` |
+| `not_found_error` | `404` | `resource_not_found` |
+| `conflict_error` | `409` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `idempotency_key_reuse`, `idempotency_in_progress`, `webhook_limit_reached` |
+| `gone_error` | `410` | `cursor_expired` |
+| `rate_limit_error` | `429` | `rate_limit_exceeded`, with `Retry-After` |
+| `api_error` | `500` / `503` | `internal_error` / `service_unavailable` (`503` carries `Retry-After`) |
+
+One code, one status: a code is always served with the status in this table.
+Codes marked *reserved* are registered so their meaning is fixed, and are not
+served by any route in this version.
+
+**Unknown input is refused, not ignored.** A body field this version does not
+define is `400 unknown_field`; a query parameter it does not define is
+`400 unknown_parameter`; both name the offender in `param`. This is the
+opposite of the console's clamping rule and deliberately so — an integrator
+who misspells `membership_type` must find out from the response, not from a
+member created without one.
+
+### Pagination
+
+List endpoints page by **signed, opaque cursor**, not by offset.
+
+| Parameter | Type | Default | Bounds |
+|---|---|---|---|
+| `limit` | integer | `50` | `1`–`200` |
+| `cursor` | string | — | a value from a previous `next_cursor`, verbatim |
+
+**`limit` outside `1`–`200`, or not an integer, is `400 invalid_field` with
+`param: "limit"`.** Rejected, not clamped: the console's clamping rule in
+[section 13](#people) exists for a search box; an integration that asks for
+5000 has a bug that should be reported to it.
+
+```json
+{
+  "data": [ … ],
+  "has_more": true,
+  "next_cursor": "…"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data` | this page. `[]` when empty, never `null` |
+| `has_more` | whether a further page exists |
+| `next_cursor` | the cursor for the next page; **`null` when `has_more` is `false`** |
+
+**Ordering is newest first**, by creation time with the record's identity as a
+stable tiebreak, so paging visits every row exactly once and a row created
+while paging appears at the front of a fresh listing rather than shifting the
+page a client is on.
+
+A cursor is **bound to the credential's company and to the query it was
+issued for**. Presenting it with another credential's company, with different
+filters, with a tampered payload or with a signature this server did not
+produce is `400 cursor_invalid`. A cursor that points past the data retained
+for the resource is `410 cursor_expired`; members are retained indefinitely, so
+their cursors do not expire in this version. **The cursor's contents are not
+part of the contract**: do not decode, construct or compare them.
+
+### Members
+
+The `people` table, projected for integrators. **Auth: integration credential.**
+
+```json
+{
+  "id": "de49b725-2b19-4e2a-bdc1-10be7402fdca",
+  "member_id": "MEM001",
+  "full_name": "Ada Lovelace",
+  "membership_type": "ANNUAL",
+  "active": true,
+  "created_at": "2026-08-07T19:20:27.655424Z",
+  "updated_at": "2026-08-07T19:20:27.655424Z"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string (UUID) | the public identifier |
+| `member_id` | string | the identifier a terminal reads; unique per company; the path parameter |
+| `full_name` | string | |
+| `membership_type` | string | free text. The console calls the same column `category` |
+| `active` | bool | |
+| `created_at`, `updated_at` | timestamp | [section 2](#timestamps) |
+
+**These seven fields are the whole object.** There is no internal `id`, no
+`public_id` (it *is* `id`), and no `fingerprint_template`, `biometric_enrolled`,
+`enrolment_source` or any other biometric field — not omitted when empty,
+**absent from the type**. Biometrics are an abstraction the platform owns and
+are not part of this contract.
+
+**`member_id` is validated against what a terminal can store** — the FW-09 rule
+in [section 3](#post-apiv1members), unchanged: at most 31 characters, printable
+ASCII `0x21`–`0x7E`, no spaces. A UUID does not fit. An id that fails is
+`400 member_id_unusable`; it is validated and stored as supplied, never trimmed
+or normalised.
+
+#### `GET /api/public/v1/members`
+
+Credential scope `members:read`. Paginated as above; newest first. No filters in this
+version — a query parameter other than `limit` and `cursor` is
+`400 unknown_parameter`.
+
+First page of two, then the page after it. `id` values are the members'
+public UUIDs; the cursor is opaque and is shown only to make its shape
+unambiguous.
+
+```bash
+curl "http://localhost:8080/api/public/v1/members?limit=2" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "94ed94c2-6984-40eb-a19b-7dc752caaa9e",
+      "member_id": "MEM003",
+      "full_name": "Alan Turing",
+      "membership_type": "ANNUAL",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.389158Z",
+      "updated_at": "2026-09-11T10:35:00.389158Z"
+    },
+    {
+      "id": "30aa0802-c537-4fad-a647-7035d0c5a398",
+      "member_id": "MEM002",
+      "full_name": "Grace Hopper",
+      "membership_type": "MONTHLY",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.347723Z",
+      "updated_at": "2026-09-11T10:35:00.347723Z"
+    }
+  ],
+  "has_more": true,
+  "next_cursor": "eyJjIjoyLCJrIjoiMjAyNi0wOS0xMVQxMDozNTowMC4zNDc3MjNaIiwiaSI6MiwiZiI6Im1lbWJlcnM6djEiLCJ0IjoiMjAyNi0wOS0xMVQxMDozNTo0OC43MzMyMTMzWiJ9.tEu_rdN-3pSIKi7a9JlD62f0A59Zr2q9zV4hLxQAvtc"
+}
+```
+→ `200`
+
+```bash
+curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=eyJj…" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070",
+      "member_id": "MEM001",
+      "full_name": "Ada Lovelace",
+      "membership_type": "ANNUAL",
+      "active": true,
+      "created_at": "2026-09-11T10:35:00.289175Z",
+      "updated_at": "2026-09-11T10:35:00.289175Z"
+    }
+  ],
+  "has_more": false,
+  "next_cursor": null
+}
+```
+→ `200`. The last page: `has_more` is `false` and `next_cursor` is `null`.
+
+A limit outside the bounds:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_field",
+    "message": "limit must be an integer between 1 and 200.",
+    "param": "limit",
+    "request_id": "2f54349499400475",
+    "doc_url": "https://docs.accesslink.store/errors/invalid_field"
+  }
+}
+```
+→ `400`
+
+A request that tries to name its tenant:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "tenant_identity_not_permitted",
+    "message": "The account is determined by your credential and cannot be supplied in a request.",
+    "param": "company_id",
+    "request_id": "e6e7d3d987e1531a",
+    "doc_url": "https://docs.accesslink.store/errors/tenant_identity_not_permitted"
+  }
+}
+```
+→ `400`
+
+#### `GET /api/public/v1/members/{member_id}`
+
+Credential scope `members:read`. Returns one member object → `200`.
+
+| Error | Status | `code` |
+|---|---|---|
+| No such member in this company, or soft-deleted | `404` | `resource_not_found` |
+
+```bash
+curl http://localhost:8080/api/public/v1/members/MEM001 \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "id": "ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070",
+  "member_id": "MEM001",
+  "full_name": "Ada Lovelace",
+  "membership_type": "ANNUAL",
+  "active": true,
+  "created_at": "2026-09-11T10:35:00.289175Z",
+  "updated_at": "2026-09-11T10:35:00.289175Z"
+}
+```
+→ `200`
+
+```json
+{
+  "error": {
+    "type": "not_found_error",
+    "code": "resource_not_found",
+    "message": "No such resource.",
+    "request_id": "5cf64ccbac9a0b34",
+    "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+  }
+}
+```
+→ `404` — the same body for a member in another company.
+
+#### Writes — `POST`, `PATCH`, `DELETE` (semantics fixed here; routes follow)
+
+Credential scope `members:write`. **These semantics differ from the legacy site-key
+routes in [section 3](#3-members) on purpose**, and the differences are the
+contract:
+
+| | Legacy `/api/v1/members` (site key) | Public `/api/public/v1/members` |
+|---|---|---|
+| `membership_type` on create | required | **optional, default `STANDARD`** |
+| `active` on create | optional, default `false` | optional, default **`true`** |
+| update verb | `PUT`, full replacement; omitted `active` deactivates | **`PATCH`, partial**: absent fields keep their value; `member_id` cannot be changed |
+| delete of a missing member | `200` with a message, no job queued | **`204`, no body, no job queued** — idempotent, and the same answer for a member that never existed or exists in another company |
+| unknown body field | ignored | `400 unknown_field` |
+| `fingerprint_template` | accepted | **not a field**; sending it is `400 unknown_field` |
+
+`POST` creates → `201` with the member object. `PATCH` → `200` with the
+updated object. Both queue the same sync jobs as the legacy and console paths
+(`CREATE` / `UPDATE`; `DELETE` on a delete that removed something), in the same
+transaction as the write, so a terminal cannot tell which door a person came in
+by.
+
+| Error | Status | `code` |
+|---|---|---|
+| `member_id` or `full_name` absent on create | `400` | `missing_field` |
+| `member_id` fails FW-09 | `400` | `member_id_unusable` |
+| `full_name` over 200 characters | `400` | `invalid_field` |
+| `member_id` already used in this company | `409` | `member_id_already_exists` |
+| The change would give a terminal more people than it can hold | `409` | `roster_exceeds_terminal_capacity` |
+| `PATCH` of a missing member | `404` | `resource_not_found` |
+
+> **Examples: captured with the routes.** The write routes are not mounted in
+> this version.
+
+### Sites
+
+**Auth: integration credential.**
+
+```json
+{
+  "id": "5120e7c4-…",
+  "name": "Site A",
+  "address": "14 Marina Road",
+  "timezone": "Africa/Lagos",
+  "active": true,
+  "terminal_count": 3,
+  "created_at": "2026-08-07T19:20:27.655424Z"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string (UUID) | the public identifier; the path parameter |
+| `name` | string | |
+| `address` | string | **always present**; `""` when the site has none |
+| `timezone` | string | IANA name; where the hardware stands |
+| `active` | bool | |
+| `terminal_count` | integer | live (non-retired) terminals at the site |
+| `created_at` | timestamp | |
+
+**These seven fields are the whole object.** No `api_key` — the provisioning
+secret is never selected for any public route. **No `offline_policy` and no
+`offline_grace_minutes`** in this version: they are a safety setting owned by
+the operator ([section 6](#6-site-settings)) and are not part of the public
+site object.
+
+**Site restriction.** A credential is issued either for every site in its
+company or for a named set:
+
+| Credential | `GET /sites` | `GET /sites/{id}` |
+|---|---|---|
+| unrestricted | every live site in the company | any of them |
+| restricted to a set | **only the sites in the set** | a site in the set → the object; a site in the company but **outside the set → `403 site_not_permitted`**; a site in another company → `404 resource_not_found` |
+
+The list is **not paginated** and carries no envelope fields beyond `data`:
+
+```json
+{ "data": [ … ] }
+```
+
+Sites are counted in tens, not thousands, and `data` is every site the
+credential reaches, ordered by `name` with `id` as the tiebreak. `[]` when
+there are none.
+
+#### `GET /api/public/v1/sites`
+
+Credential scope `sites:read`.
+
+An unrestricted credential, in a company with two sites:
+
+```bash
+curl http://localhost:8080/api/public/v1/sites \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "3e2550b2-d1cd-4d0a-915d-dd79c68120e5",
+      "name": "Abuja Studio",
+      "address": "",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.327588Z"
+    },
+    {
+      "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+      "name": "Lagos Depot",
+      "address": "14 Marina Road",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.32243Z"
+    }
+  ]
+}
+```
+→ `200`
+
+The same request with a credential restricted to one site:
+
+```json
+{
+  "data": [
+    {
+      "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+      "name": "Lagos Depot",
+      "address": "14 Marina Road",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-11T10:34:35.32243Z"
+    }
+  ]
+}
+```
+→ `200`
+
+#### `GET /api/public/v1/sites/{site_id}`
+
+Credential scope `sites:read`. `{site_id}` is the public UUID. Returns one site object →
+`200`.
+
+| Error | Status | `code` |
+|---|---|---|
+| Not in this company, retired, or malformed | `404` | `resource_not_found` |
+| In this company but outside the credential's site restriction | `403` | `site_not_permitted` |
+
+```bash
+curl http://localhost:8080/api/public/v1/sites/46e57753-0143-481a-83f6-e93a36cfb9a7 \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
+  "name": "Lagos Depot",
+  "address": "14 Marina Road",
+  "timezone": "Africa/Lagos",
+  "active": true,
+  "terminal_count": 0,
+  "created_at": "2026-09-11T10:34:35.32243Z"
+}
+```
+→ `200`
+
+The restricted credential asking for the site it was not issued for:
+
+```json
+{
+  "error": {
+    "type": "permission_error",
+    "code": "site_not_permitted",
+    "message": "This credential is not scoped to that site.",
+    "request_id": "433be31abd341a5c",
+    "doc_url": "https://docs.accesslink.store/errors/site_not_permitted"
+  }
+}
+```
+→ `403`
+
+### Endpoints in this version
+
+| Method | Path | Credential scope |
+|---|---|---|
+| `GET` | `/api/public/v1/members` | `members:read` |
+| `GET` | `/api/public/v1/members/{member_id}` | `members:read` |
+| `GET` | `/api/public/v1/sites` | `sites:read` |
+| `GET` | `/api/public/v1/sites/{site_id}` | `sites:read` |
+
+The member write routes are specified above and follow once idempotent replay
+(`Idempotency-Key`) and the write rate class are mounted with them. Terminals,
+events, access logs and webhooks have credential scopes but no contract yet; a route for
+any of them is added to this section before it is served, never after.
+
+---
+
 ## Known limitations
 
 Behaviour a client must design around today. This list is maintained against the
@@ -3429,6 +4071,19 @@ its return exists and passes.
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
+   **The public API v1 tree ([section 18](#18-public-api-v1)) is not rate
+   limited in this version.** `rate_limit_exceeded` is registered and no
+   allowance is defined; until one is, the public routes must not be exposed
+   to customers. This is a pre-production blocker, not a contract change.
+   **The members cursor is signed, not encrypted, and its payload carries the
+   internal company id and the last row's internal id** — readable by anyone
+   who base64-decodes `next_cursor`, which conflicts with section 18's rule
+   that the internal `BIGSERIAL` is never exposed. It grants nothing (every
+   query is tenant-filtered and the signature prevents forgery), but it is a
+   second pre-production blocker: the payload must be made opaque — the
+   minimum change is to encrypt it (AEAD under a key derived from
+   `CURSOR_SIGNING_KEY`) inside `Encode`/`Decode`, leaving queries and
+   handlers untouched — before a customer credential is issued.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).

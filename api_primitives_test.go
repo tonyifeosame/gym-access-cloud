@@ -48,25 +48,36 @@ func integrationCredentialRowID(t *testing.T, publicID string) int64 {
 // The P1 boundary
 // ---------------------------------------------------------------------------
 
-// P1 SHIPS PRIMITIVES AND NO PUBLIC SURFACE. The credential class, the scope
-// registry, the shared limiter, idempotency, the error registry, the cursor
-// signer and the scoped transaction all exist and are tested; no route consumes
-// any of them.
-//
-// This test is what keeps that true. A public route added by accident -- or by
-// somebody continuing the work without reading the plan -- fails here rather
-// than arriving in production ahead of the tenant isolation that is meant to sit
-// underneath it.
-func TestNoPublicAPIRouteExistsYet(t *testing.T) {
+// P1 SHIPPED PRIMITIVES AND NO PUBLIC SURFACE; P3 mounts exactly the routes
+// API_SPEC.md section 18 specifies, and nothing else. A public route that is
+// not in the specification -- added by accident, or by somebody continuing the
+// work without reading the plan -- fails here rather than arriving in
+// production ahead of its contract. Every addition to this list is preceded
+// by an addition to section 18.
+func TestPublicAPIMountsExactlyTheSpecifiedRoutes(t *testing.T) {
 	env := newTestEnv(t)
 
+	found := map[string]bool{}
 	for _, route := range env.router.Routes() {
 		if strings.HasPrefix(route.Path, "/api/public") {
-			t.Errorf("a public API route is registered: %s %s\n"+
-				"P1 is foundations only -- the public tree belongs with P3, after "+
-				"the service layer and alongside the cross-tenant test suite.",
-				route.Method, route.Path)
+			found[route.Method+" "+route.Path] = true
 		}
+	}
+
+	want := []string{
+		"GET /api/public/v1/members",
+		"GET /api/public/v1/members/:member_id",
+		"GET /api/public/v1/sites",
+		"GET /api/public/v1/sites/:site_id",
+	}
+	for _, w := range want {
+		if !found[w] {
+			t.Errorf("specified public route is not mounted: %s", w)
+		}
+		delete(found, w)
+	}
+	for extra := range found {
+		t.Errorf("public route mounted without a section 18 contract: %s", extra)
 	}
 }
 
