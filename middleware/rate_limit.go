@@ -318,6 +318,11 @@ func (m *memoryStore) Allow(_ context.Context, subjectType, subjectKey, class st
 type limiter struct {
 	class     string
 	perMinute int
+	// burst, when set, is the bucket's capacity, decoupled from the refill
+	// rate. Zero keeps the original behaviour, where capacity equals the
+	// per-minute allowance -- which is what every credential-endpoint limiter
+	// still uses. The public API limiters set it (middleware/public_rate_limit.go).
+	burst float64
 	// subject resolves the bucket key for a request. Returning "" means the
 	// request carries no identity this limiter can bound; the request is
 	// permitted, because inventing a bucket for "unidentifiable" would put every
@@ -332,7 +337,12 @@ type limiter struct {
 	shared bool
 }
 
-func (l *limiter) capacity() float64  { return float64(l.perMinute) }
+func (l *limiter) capacity() float64 {
+	if l.burst > 0 {
+		return l.burst
+	}
+	return float64(l.perMinute)
+}
 func (l *limiter) perSecond() float64 { return float64(l.perMinute) / 60 }
 
 func (l *limiter) store() RateStore {
@@ -351,10 +361,7 @@ func (l *limiter) handle(c *gin.Context) bool {
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), rateStoreTimeout)
-	defer cancel()
-
-	decision, err := l.store().Allow(ctx, kind, key, l.class, l.capacity(), l.perSecond())
+	decision, err := l.decideFor(c, kind, key)
 	if err != nil {
 		// FAIL CLOSED. A limiter that cannot answer must not be read as "yes":
 		// the store is the database, and a database that cannot serve this
@@ -376,6 +383,16 @@ func (l *limiter) handle(c *gin.Context) bool {
 		return false
 	}
 	return true
+}
+
+// decideFor asks the store for one token for an explicit subject, bounded by
+// rateStoreTimeout. It writes nothing: the caller decides how a refusal or a
+// store failure is answered, which is what lets the public API answer in its
+// own error shape over the same allowance machinery.
+func (l *limiter) decideFor(c *gin.Context, kind, key string) (database.RateDecision, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), rateStoreTimeout)
+	defer cancel()
+	return l.store().Allow(ctx, kind, key, l.class, l.capacity(), l.perSecond())
 }
 
 // newLimiter builds one allowance over a caller-chosen subject.

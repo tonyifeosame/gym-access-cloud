@@ -136,6 +136,9 @@ must not be missed belongs in `sync_jobs`.
 | `API_CREDENTIAL_FLUSH_INTERVAL_SECONDS` | `60` | How often buffered credential telemetry is written |
 | `API_HOUSEKEEPING_INTERVAL_SECONDS` | `600` | How often rate buckets, idempotency records and usage rows are swept |
 | `RATE_BUCKET_IDLE_SECONDS` | `600` | How long an idle per-address rate bucket is kept |
+| `PUBLIC_READ_RATE_BURST` / `PUBLIC_READ_RATE_LIMIT_PER_MINUTE` | `60` / `300` | Public API read allowance per integration credential (burst / sustained) |
+| `PUBLIC_COMPANY_RATE_BURST` / `PUBLIC_COMPANY_RATE_LIMIT_PER_MINUTE` | `200` / `900` | Public API read allowance per company, across all its credentials |
+| `PUBLIC_AUTH_FAILURE_RATE_BURST` / `PUBLIC_AUTH_FAILURE_RATE_LIMIT_PER_MINUTE` | `30` / `60` | Refused unauthenticated public API attempts per client address (service-wide on Render, see below) |
 | `API_USAGE_RETENTION_DAYS` | `90` | How long the per-day usage rollup is kept |
 | `CURSOR_SIGNING_KEY` | *(ephemeral)* | Signs public API pagination cursors; ≥ 32 bytes. Unset: a per-process key, logged at startup, and cursors do not survive a restart or span instances — development and test only. **Production deployments must set a persistent `CURSOR_SIGNING_KEY` of at least 32 bytes.** |
 
@@ -177,14 +180,31 @@ Two maintenance tasks come with this:
   there is one per credential and one per company, so they are bounded by the
   tenant rather than by traffic.
 
-**PRE-PRODUCTION BLOCKER — the public API v1 tree is not rate limited.** The
-four read routes under `/api/public/v1` (API_SPEC.md section 18) authenticate
-an integration credential and open a tenant-scoped transaction per request, and
-nothing bounds how often. The shared store already supports a per-credential
-class and `rate_limit_exceeded` is registered; what is missing is a decided
-allowance, which this document deliberately does not invent. Do not issue a
-customer an integration credential against a production deployment until it
-is in place.
+**The public API v1 tree is rate limited on the shared store** (API_SPEC.md
+section 18, "Rate limits"; `middleware/public_rate_limit.go`). Three buckets:
+`read` per credential (burst 60, 300/min), `read` per company (burst 200,
+900/min) and `auth_failure` per client address (burst 30, 60/min). The
+credential bucket is checked first, then the company's; both are spent on every
+authenticated request whatever the handler answers. Authentication failures
+are charged to `auth_failure` only, and only after the failure, so a spray of
+bad keys never drains a customer's allowance and never delays a valid key.
+A 429 carries the section-18 envelope, `Retry-After`, and the `RateLimit-*`
+headers every public response carries. A store that cannot answer is a 503
+(`service_unavailable`) — the limiter fails closed. An exhausted bucket is
+remembered in process for its `Retry-After`, so hammering it costs no database
+statement until it could hold a token again. Every authenticated public request
+also feeds the credential usage rollup (`api_credential_flush`), which is what
+the console's credential usage endpoint reports.
+
+**KNOWN GAP — client addresses on Render.** `TRUSTED_PROXIES=none` makes
+`ClientIP()` Render's own proxy for every request, so every ADDRESS-keyed
+limiter is one service-wide bucket there: the public `auth_failure` bucket by
+design (a cap on refused attempts, not per-source fairness — a valid key is
+never delayed by it), but also, and less intentionally, the P1 **login, claim
+and platform-login** allowances (10/min each) are shared by every operator of
+every tenant. That is a pre-existing platform issue tracked separately; the
+fix is to trust Render's proxy ranges so `ClientIP()` is real, and it is
+deliberately NOT changed by the public API work.
 
 **Cursors are encrypted (v2).** Public API pagination cursors are
 XChaCha20-Poly1305 tokens under a key HKDF-derived from `CURSOR_SIGNING_KEY`,

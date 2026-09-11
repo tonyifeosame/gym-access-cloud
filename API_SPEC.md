@@ -3680,6 +3680,50 @@ for the resource is `410 cursor_expired`; members are retained indefinitely, so
 their cursors do not expire in this version. **The cursor's contents are not
 part of the contract**: do not decode, construct or compare them.
 
+### Rate limits
+
+Every public request is subject to token-bucket allowances kept on the shared
+store, so they hold however many instances are serving. **These are defaults,
+subject to change with notice** — the headers below are what a client should
+pace against, not the numbers here.
+
+| Bucket | Applies to | Burst | Sustained |
+|---|---|---|---|
+| credential | each integration credential | 60 | 300 per minute |
+| company | all of a company's credentials together | 200 | 900 per minute |
+| authentication failures | unauthenticated attempts, per client address | 30 | 60 per minute |
+
+**What consumes what.** An authenticated request spends one token from the
+credential bucket and one from the company bucket, in that order, **whatever
+the response** — a `403`, `404` or `400` did the same work as a `200`. A
+request that fails authentication spends a token from the
+authentication-failure bucket **only**; it never touches a credential's or a
+company's allowance, so a stream of bad keys cannot exhaust an integrator's
+quota. A `503` spends nothing.
+
+**Every response** on this tree carries the credential bucket's state:
+
+| Header | Meaning |
+|---|---|
+| `RateLimit-Limit` | the burst ceiling |
+| `RateLimit-Remaining` | whole tokens left after this request |
+| `RateLimit-Reset` | seconds until the bucket is full again |
+| `RateLimit-Policy` | the sustained allowance, `300;w=60` |
+
+A refusal is `429 rate_limit_exceeded` with `Retry-After` (whole seconds,
+never less than 1) and, when the credential bucket refused, `RateLimit-Remaining:
+0`; a company-level refusal leaves the credential's headers as they were, since
+that bucket is the one the caller can act on. A refusal of an unauthenticated
+attempt is a `429` **in place of** the `401` — the caller learns only that it
+must slow down, nothing about the key it presented. A `429` is not an
+authentication challenge and carries no `WWW-Authenticate`.
+
+**If the limiter's store cannot answer, the request is refused** with
+`503 service_unavailable` and `Retry-After`; nothing is served unlimited
+because the limiter was down.
+
+> **Example: captured with the routes.**
+
 ### Members
 
 The `people` table, projected for integrators. **Auth: integration credential.**
@@ -4074,10 +4118,14 @@ its return exists and passes.
    limiter is **in-process**, so with more than one instance the effective rate
    multiplies by the instance count (SEC-09, open). Nothing else is limited — a
    leaked site key can still be brute-forced against `/devices/register`.
-   **The public API v1 tree ([section 18](#18-public-api-v1)) is not rate
-   limited in this version.** `rate_limit_exceeded` is registered and no
-   allowance is defined; until one is, the public routes must not be exposed
-   to customers. This is a pre-production blocker, not a contract change.
+   The public API v1 tree ([section 18](#18-public-api-v1)) **is** limited, on
+   the shared store. **On a deployment that trusts no proxy** (the Render
+   service sets `TRUSTED_PROXIES=none`) every per-address allowance — the
+   credential-endpoint limiters above and the public authentication-failure
+   bucket — sees one address for every caller and is therefore one
+   service-wide bucket. A valid integration credential is never delayed by
+   that; operators sharing one login allowance is a platform issue tracked
+   separately.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).
