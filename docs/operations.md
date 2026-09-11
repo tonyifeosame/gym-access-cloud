@@ -186,6 +186,20 @@ allowance, which this document deliberately does not invent. Do not issue a
 customer an integration credential against a production deployment until it
 is in place.
 
+**PRE-PRODUCTION BLOCKER — the members cursor exposes internal ids.**
+`models/cursor.go` signs the cursor (HMAC) but does not encrypt it: the
+base64 payload carries `c` (the internal company id) and `i` (the internal
+id of the last row served), which API_SPEC.md section 18 says are never
+exposed. Nothing can be done with them — every query is filtered on the
+credential's company and a tampered cursor fails its signature — but the
+contract is violated as written. Minimum fix, scoped to `Encode`/`Decode`
+only: AEAD-encrypt the payload under a key derived from `CURSOR_SIGNING_KEY`
+(AES-GCM or XChaCha20-Poly1305), so the wire form is opaque and the keyset
+position stays `(created_at, id)`; no query, handler or test outside
+`models/cursor_test.go` changes. The alternative — dropping `c` and keying the
+tiebreak on `public_id` — touches the ordering SQL and is not the minimum.
+Do this with the rate-limit work, before customer exposure.
+
 ## Shutdown
 
 On `SIGTERM`/`SIGINT` the process drains in dependency order:

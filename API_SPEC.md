@@ -4075,6 +4075,15 @@ its return exists and passes.
    limited in this version.** `rate_limit_exceeded` is registered and no
    allowance is defined; until one is, the public routes must not be exposed
    to customers. This is a pre-production blocker, not a contract change.
+   **The members cursor is signed, not encrypted, and its payload carries the
+   internal company id and the last row's internal id** — readable by anyone
+   who base64-decodes `next_cursor`, which conflicts with section 18's rule
+   that the internal `BIGSERIAL` is never exposed. It grants nothing (every
+   query is tenant-filtered and the signature prevents forgery), but it is a
+   second pre-production blocker: the payload must be made opaque — the
+   minimum change is to encrypt it (AEAD under a key derived from
+   `CURSOR_SIGNING_KEY`) inside `Encode`/`Decode`, leaving queries and
+   handlers untouched — before a customer credential is issued.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).

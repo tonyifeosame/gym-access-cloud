@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
+	"access-terminal-cloud-api/models"
 	"access-terminal-cloud-api/service"
 )
 
@@ -42,7 +45,11 @@ func APICredentialAuthMiddleware(environment string) gin.HandlerFunc {
 			if svcErr, ok := service.As(err); ok {
 				code = svcErr.Code()
 			}
-			if code == service.ErrCredentialMissing().Code() {
+			// EVERY 401 carries the challenge (RFC 6750 section 3 and API_SPEC.md
+			// section 18): missing, malformed, unknown, revoked, expired, wrong
+			// environment alike. A 503 for a store failure is not a challenge
+			// and does not carry it.
+			if models.APIErrors[code].Status == http.StatusUnauthorized {
 				c.Header("WWW-Authenticate", `Bearer realm="accesslink"`)
 			}
 			writeAPIError(c, code)

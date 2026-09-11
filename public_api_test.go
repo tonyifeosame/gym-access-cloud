@@ -87,14 +87,60 @@ func TestPublicRoutesRefuseWithoutACredential(t *testing.T) {
 		}
 	}
 
-	// Wrong environment and unknown key: 401 with the specific codes.
-	status, headers, body, _ := publicGet(t, env, "atp_test_"+strings.Repeat("0", 64), "/api/public/v1/sites")
-	if code := publicError(t, status, headers, body, http.StatusUnauthorized); code != models.CodeCredentialWrongEnvironment {
-		t.Errorf("test key on live: %s", code)
+	// The five documented 401 cases (API_SPEC.md section 18), every one with
+	// the challenge header: missing, wrong scheme, malformed, wrong
+	// environment, unknown/revoked. Revoked is exercised through a real
+	// credential so the store's refusal path is the one under test.
+	cheapBcrypt(t)
+	_, token, csrf := consoleOperatorSession(t, env.router, operatorCompanyID(t, "one"),
+		"p3-revoked@example.com", models.RoleAdmin)
+	issued := issueCredential(t, env, token, csrf, `{"name":"to revoke","scopes":["sites:read"]}`)
+	revoked := secretOf(t, issued)
+	if code, _ := consoleCall(t, env.router, "DELETE", credentialsPath+"/"+issued["id"].(string),
+		`{"reason":"test"}`, token, csrf); code != http.StatusOK {
+		t.Fatalf("revoking through the console = %d", code)
 	}
-	status, headers, body, _ = publicGet(t, env, "atp_live_"+strings.Repeat("0", 64), "/api/public/v1/sites")
-	if code := publicError(t, status, headers, body, http.StatusUnauthorized); code != models.CodeCredentialInvalid {
-		t.Errorf("unknown key: %s", code)
+	cases := []struct {
+		name, authorization, code string
+	}{
+		{"missing", "", models.CodeCredentialMissing},
+		{"wrong scheme", "Basic dXNlcjpwYXNz", models.CodeCredentialMissing},
+		{"malformed", "Bearer not-a-key", models.CodeCredentialInvalid},
+		{"wrong environment", "Bearer atp_test_" + strings.Repeat("0", 64), models.CodeCredentialWrongEnvironment},
+		{"unknown", "Bearer atp_live_" + strings.Repeat("0", 64), models.CodeCredentialInvalid},
+		{"revoked", "Bearer " + revoked, models.CodeCredentialInvalid},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/api/public/v1/sites", nil)
+		if c.authorization != "" {
+			req.Header.Set("Authorization", c.authorization)
+		}
+		w := httptest.NewRecorder()
+		env.router.ServeHTTP(w, req)
+		var body map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		if code := publicError(t, w.Code, w.Header(), body, http.StatusUnauthorized); code != c.code {
+			t.Errorf("%s: code %s, want %s", c.name, code, c.code)
+		}
+		if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="accesslink"` {
+			t.Errorf("%s: WWW-Authenticate = %q, want the challenge on every 401", c.name, got)
+		}
+	}
+
+	// And the challenge is a 401 thing only: no 403, 404 or 400 carries it.
+	valid := publicCredential(t, env, "one", "p3-nochallenge@example.com", `{"name":"sites","scopes":["sites:read"]}`)
+	for path, want := range map[string]int{
+		"/api/public/v1/members":            http.StatusForbidden,
+		"/api/public/v1/sites/not-a-uuid":   http.StatusNotFound,
+		"/api/public/v1/sites?unexpected=1": http.StatusBadRequest,
+	} {
+		status, headers, _, raw := publicGet(t, env, valid, path)
+		if status != want {
+			t.Errorf("%s = %d, want %d (%s)", path, status, want, raw)
+		}
+		if headers.Get("WWW-Authenticate") != "" {
+			t.Errorf("%s: a %d must not carry WWW-Authenticate", path, status)
+		}
 	}
 }
 
@@ -205,6 +251,7 @@ func TestPublicMembersListRefusesBadLimitsCursorsAndParameters(t *testing.T) {
 		{"limit=201", 400, models.CodeInvalidField, "limit"},
 		{"limit=-1", 400, models.CodeInvalidField, "limit"},
 		{"limit=abc", 400, models.CodeInvalidField, "limit"},
+		{"limit=", 400, models.CodeInvalidField, "limit"},
 		{"offset=10", 400, models.CodeUnknownParameter, "offset"},
 		{"company_id=1", 400, models.CodeTenantIdentity, "company_id"},
 		{"company=two&limit=abc", 400, models.CodeTenantIdentity, "company"},
@@ -219,9 +266,13 @@ func TestPublicMembersListRefusesBadLimitsCursorsAndParameters(t *testing.T) {
 		}
 	}
 
-	// limit=200 is the ceiling and is accepted.
+	// limit=200 is the ceiling and is accepted; an OMITTED limit is the
+	// default, which is the only way to get it.
 	if status, _, _, raw := publicGet(t, env, secret, "/api/public/v1/members?limit=200"); status != 200 {
 		t.Errorf("limit=200 = %d %s", status, raw)
+	}
+	if status, _, _, raw := publicGet(t, env, secret, "/api/public/v1/members"); status != 200 {
+		t.Errorf("no limit = %d %s", status, raw)
 	}
 
 	// A cursor minted for company one is refused for company two.
@@ -302,6 +353,23 @@ func TestPublicSitesHonourTheCredentialRestriction(t *testing.T) {
 	data := body["data"].([]any)
 	if len(data) != 2 || data[0].(map[string]any)["name"] != "Site A" || data[1].(map[string]any)["name"] != "Site B" {
 		t.Errorf("unrestricted sites = %s", raw)
+	}
+
+	// Order is by name (section 18). The tiebreak is the public id in the SQL
+	// (database.SitesInTenant); it cannot be observed here because site names
+	// are unique per company (sites_company_id_site_name_key), so a third site
+	// sorting between the two is what proves the ORDER BY is on the name.
+	companyOne := operatorCompanyID(t, "one")
+	mustExec(t, `INSERT INTO sites (company_id, site_name, api_key_hash, api_key_prefix, active)
+	             VALUES ($1, 'Site AB', encode(sha256('site-ab-key'::bytea), 'hex'), 'ab', TRUE)`, companyOne)
+	_, _, body, raw = publicGet(t, env, unrestricted, "/api/public/v1/sites")
+	data = body["data"].([]any)
+	var names []string
+	for _, s := range data {
+		names = append(names, s.(map[string]any)["name"].(string))
+	}
+	if strings.Join(names, ",") != "Site A,Site AB,Site B" {
+		t.Errorf("sites are not ordered by name: %v (%s)", names, raw)
 	}
 	siteObj := data[0].(map[string]any)
 	for _, k := range []string{"id", "name", "address", "timezone", "active", "terminal_count", "created_at"} {

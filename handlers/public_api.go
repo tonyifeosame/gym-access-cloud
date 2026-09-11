@@ -140,16 +140,15 @@ func checkQuery(c *gin.Context, allowed ...string) bool {
 // pageRequest reads limit and cursor. A limit that is not an integer is
 // refused here; one that is an integer outside the bounds is refused by the
 // service, with the same code, so the two cannot disagree about the message.
+//
+// PRESENT IS NOT OMITTED. `?limit=` names the parameter and supplies no
+// integer, which is the "not an integer" case, not the default: only an
+// absent parameter means 50.
 func pageRequest(c *gin.Context) (service.PageRequest, bool) {
 	var page service.PageRequest
-	if raw := c.Query("limit"); raw != "" {
+	if raw, present := c.GetQuery("limit"); present {
 		limit, err := strconv.Atoi(raw)
-		if err != nil {
-			RespondServiceError(c, "public page", service.ErrInvalidField("limit",
-				fmt.Sprintf("limit must be an integer between 1 and %d.", service.MaxPageSize)))
-			return page, false
-		}
-		if limit == 0 {
+		if err != nil || limit == 0 {
 			// Zero means "not supplied" to the service; a caller who sent it
 			// literally asked for nothing, which is out of bounds.
 			RespondServiceError(c, "public page", service.ErrInvalidField("limit",

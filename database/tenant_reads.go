@@ -124,6 +124,10 @@ func SiteInTenant(q Querier, companyID int64, publicID string) (*TenantSite, err
 // set of internal ids -- the credential's restriction. nil means every site;
 // an empty non-nil slice means none, which cannot arise from a credential but
 // is answered honestly rather than widened.
+//
+// THE TIEBREAK IS THE PUBLIC ID, not the internal one: the public contract
+// (API_SPEC.md section 18) orders by `name` then `id`, and `id` on that tree
+// is the UUID. The internal sequence is not part of any public ordering.
 func SitesInTenant(q Querier, companyID int64, siteIDs []int64) ([]TenantSite, error) {
 	scoped := siteIDs != nil
 	rows, err := q.Query(`
@@ -132,7 +136,7 @@ func SitesInTenant(q Querier, companyID int64, siteIDs []int64) ([]TenantSite, e
 		 WHERE s.company_id = $1
 		   AND s.deleted_at IS NULL
 		   AND (NOT $2 OR s.id = ANY($3::bigint[]))
-		 ORDER BY s.site_name, s.id`,
+		 ORDER BY s.site_name, s.public_id`,
 		companyID, scoped, pq.Array(siteIDs))
 	if err != nil {
 		return nil, err
