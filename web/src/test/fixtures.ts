@@ -1,4 +1,6 @@
 import type {
+  APICredential,
+  APICredentialUsage,
   Enrollment,
   AuditRecord,
   FieldEvent,
@@ -398,6 +400,48 @@ export function makeApplication(
     settings: {},
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
+/**
+ * One integration credential, as the LIST and DETAIL routes return it: no
+ * secret, ever. The issue and rotate handlers in server.ts add one on the way
+ * out, which is the only place a test can meet a secret -- exactly like the
+ * server.
+ */
+export function makeAPICredential(overrides: Partial<APICredential> = {}): APICredential {
+  return {
+    id: 'cred-1',
+    name: 'Roster sync',
+    environment: 'live',
+    key_prefix: 'atp_live_0123abcd',
+    scopes: ['members:read', 'sites:read'],
+    sites: [],
+    all_sites: true,
+    created_by_email: 'ops@example.com',
+    created_at: '2026-09-01T10:00:00Z',
+    expires_at: '2027-09-01T10:00:00Z',
+    last_used_at: '2026-09-10T08:00:00Z',
+    last_used_ip: '203.0.113.7',
+    status: 'ACTIVE',
+    ...overrides,
+  }
+}
+
+export function makeAPICredentialUsage(
+  overrides: Partial<APICredentialUsage> = {},
+): APICredentialUsage {
+  return {
+    id: 'cred-1',
+    name: 'Roster sync',
+    key_prefix: 'atp_live_0123abcd',
+    last_used_at: '2026-09-10T08:00:00Z',
+    last_used_ip: '203.0.113.7',
+    days: [
+      { day: '2026-09-10', class: 'read', requests: 412, refusals: 3 },
+      { day: '2026-09-09', class: 'read', requests: 380, refusals: 0 },
+    ],
     ...overrides,
   }
 }

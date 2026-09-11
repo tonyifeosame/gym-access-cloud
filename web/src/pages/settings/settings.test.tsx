@@ -316,6 +316,7 @@ describe('console navigation', () => {
       'operators',
       'activity',
       'firmware',
+      'api-credentials',
       'applications',
       'settings',
     ])

@@ -1,6 +1,10 @@
 import { ApiError, api } from './client'
 import { setCsrfToken } from './csrf'
 import type {
+  APICredential,
+  APICredentialIssued,
+  APICredentialUsage,
+  APICredentialsResponse,
   AccessDecision,
   AccessEvaluationRequest,
   AdoptTerminalRequest,
@@ -28,6 +32,7 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  IssueAPICredentialRequest,
   OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
@@ -45,6 +50,8 @@ import type {
   RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
+  RevokeAPICredentialRequest,
+  RotateAPICredentialRequest,
   Schedule,
   ScheduleRequest,
   SchedulesResponse,
@@ -941,4 +948,63 @@ export function createFirmware(body: CreateFirmwareRequest): Promise<FirmwareVer
  */
 export function setCurrentFirmware(id: number): Promise<FirmwareVersion> {
   return api.put<FirmwareVersion>(`/api/v1/console/firmware/${encodeURIComponent(id)}/current`)
+}
+
+// ---------------------------------------------------------------------------
+// Integration credentials
+// ---------------------------------------------------------------------------
+//
+// The seven ADMIN console routes behind the public API's keys. Six are wrapped
+// here. THE SEVENTH, POST /api-credentials/revoke-all, IS DELIBERATELY ABSENT:
+// it is the incident-response control that turns every integration off at
+// once, and it does not belong on a screen where the button beside it rotates
+// one key. When it is needed it is called from a place that says what it is.
+//
+// Every call rides the operator session and the CSRF token exactly as the
+// operator routes do; the server's RequireRole(ADMIN) is the authority and the
+// route guard in the console only spares an administrator a 403.
+
+export function fetchAPICredentials(): Promise<APICredentialsResponse> {
+  return api.get<APICredentialsResponse>('/api/v1/console/api-credentials')
+}
+
+export function fetchAPICredential(credentialId: string): Promise<APICredential> {
+  return api.get<APICredential>(
+    `/api/v1/console/api-credentials/${encodeURIComponent(credentialId)}`,
+  )
+}
+
+/** Returns the secret. The caller shows it once and lets it go; see SecretPanel. */
+export function issueAPICredential(body: IssueAPICredentialRequest): Promise<APICredentialIssued> {
+  return api.post<APICredentialIssued>('/api/v1/console/api-credentials', body)
+}
+
+/** Returns the NEW credential's secret, once. The old row is superseded. */
+export function rotateAPICredential(
+  credentialId: string,
+  body: RotateAPICredentialRequest,
+): Promise<APICredentialIssued> {
+  return api.post<APICredentialIssued>(
+    `/api/v1/console/api-credentials/${encodeURIComponent(credentialId)}/rotate`,
+    body,
+  )
+}
+
+export function revokeAPICredential(
+  credentialId: string,
+  body: RevokeAPICredentialRequest = {},
+): Promise<APICredential> {
+  return api.delete<APICredential>(
+    `/api/v1/console/api-credentials/${encodeURIComponent(credentialId)}`,
+    { body },
+  )
+}
+
+export function fetchAPICredentialUsage(
+  credentialId: string,
+  days = 30,
+): Promise<APICredentialUsage> {
+  return api.get<APICredentialUsage>(
+    `/api/v1/console/api-credentials/${encodeURIComponent(credentialId)}/usage?days=${encodeURIComponent(days)}`,
+  )
 }

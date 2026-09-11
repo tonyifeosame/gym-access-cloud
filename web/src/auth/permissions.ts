@@ -105,6 +105,16 @@ export const ACTION_ROLES = {
   manageOperators: 'ADMIN',
 
   /**
+   * Integration credentials for the public API: issue, rotate, revoke.
+   *
+   * ADMIN, matching the server, and for the same reason site keys are: a key
+   * lets the company's data leave it, which is not day-to-day work. The
+   * server's issuer bound additionally stops an ADMIN granting a scope only an
+   * OWNER may; that is enforced there and surfaced here as a 403 message.
+   */
+  manageAPICredentials: 'ADMIN',
+
+  /**
    * Site lifecycle: create, rename, deactivate, retire, rotate the key.
    *
    * ADMIN rather than MANAGER, matching the server. Creating a site mints a

@@ -249,6 +249,15 @@ export function SettingsPage() {
               <span>Who can sign in, and what each of them may do.</span>
             </li>
           ) : null}
+          {can(maybeSession, 'manageAPICredentials') ? (
+            <li>
+              <Link to="/settings/api-credentials">Manage API access</Link>
+              <span>
+                Keys that let your own systems read your roster and sites through the
+                public API.
+              </span>
+            </li>
+          ) : null}
         </ul>
       </section>
     </div>

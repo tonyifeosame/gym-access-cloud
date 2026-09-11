@@ -109,5 +109,13 @@ describe('platform navigation', () => {
     expect(platformNav('MANAGER').map((item) => item.id)).not.toContain('applications')
     expect(platformNav('ADMIN').map((item) => item.id)).toContain('applications')
     expect(platformNav('OWNER').map((item) => item.id)).toContain('applications')
+
+    // Integration credentials are ADMIN on the server's route group; the entry
+    // matches. A MANAGER never sees it, and typing the URL meets the server's
+    // 403 behind the console's own guard.
+    expect(platformNav('VIEWER').map((item) => item.id)).not.toContain('api-credentials')
+    expect(platformNav('MANAGER').map((item) => item.id)).not.toContain('api-credentials')
+    expect(platformNav('ADMIN').map((item) => item.id)).toContain('api-credentials')
+    expect(platformNav('OWNER').map((item) => item.id)).toContain('api-credentials')
   })
 })

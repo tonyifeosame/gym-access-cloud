@@ -2,6 +2,8 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 
 import type {
+  APICredential,
+  APICredentialUsage,
   Enrollment,
   AuditRecord,
   ConfiguredApplication,
@@ -23,6 +25,7 @@ import type {
 import { standingOf } from '../pages/access/accessVocabulary'
 import type { PlatformCompany, PlatformSession } from '../platform/types'
 import {
+  makeAPICredential,
   makeAuditRecord,
   makeCredentialToken,
   makeEvent,
@@ -66,6 +69,10 @@ interface ServerState {
   /** Enrolments, keyed by the person's external id. */
   enrollments: Record<string, Enrollment>
   operators: OperatorAccount[]
+  /** Integration credentials, secret-free exactly as the list route serves them. */
+  apiCredentials: APICredential[]
+  /** Usage rollups keyed by credential id; absent means no use recorded. */
+  apiCredentialUsage: Record<string, APICredentialUsage>
   applications: ConfiguredApplication[]
   available: string[]
   settings: Record<string, { settings: Record<string, unknown>; settings_version: number }>
@@ -119,6 +126,8 @@ function initialState(): ServerState {
     people: [],
     enrollments: {},
     operators: [],
+    apiCredentials: [],
+    apiCredentialUsage: {},
     applications: [],
     available: [
       'ACCESS_CONTROL',
@@ -274,6 +283,21 @@ function normalizeSlug(raw: string): string {
 }
 
 /** The delivery notice every minted token is returned beside. */
+/**
+ * Integration credentials are on the server's ADMIN group. The console's own
+ * guard keeps a MANAGER off the page, but a test that renders the page for one
+ * anyway must meet the same 403 the API would send.
+ */
+function roleAtLeastAdmin(): boolean {
+  const role = state.session?.role
+  return role === 'ADMIN' || role === 'OWNER'
+}
+
+/** Shaped like the real thing -- atp_live_ + 64 hex -- and never stored. */
+function fakeSecret(n: number): string {
+  return `atp_live_${String(n).padStart(8, '0')}${'ef'.repeat(28)}`
+}
+
 const DELIVERY_NOTICE =
   'This link is shown once and is not stored. Send it to the operator over a ' +
   'channel you trust; the platform does not deliver it.'
@@ -2060,6 +2084,173 @@ export const handlers = [
     }
     state.operators = state.operators.filter((entry) => entry.id !== operatorId)
     return noContent()
+  }),
+
+  // --- integration credentials --------------------------------------------
+  //
+  // The seven ADMIN routes, minus revoke-all (the console does not call it).
+  // THE SECRET IS ADDED ON THE WAY OUT OF ISSUE AND ROTATE ONLY, exactly as
+  // the server does it: the stored rows never carry one, so a test that finds
+  // a secret anywhere but those two responses has found the console leaking it.
+
+  http.get('*/api/v1/console/api-credentials', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const failure = takeFailure('api-credentials-list')
+    if (failure) return json({ error: 'Failed to retrieve integration credentials' }, failure)
+    return json({ count: state.apiCredentials.length, credentials: state.apiCredentials })
+  }),
+
+  http.post('*/api/v1/console/api-credentials', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const failure = takeFailure('api-credentials-issue')
+    if (failure) {
+      if (failure === 403) {
+        return json(
+          { error: 'Your role cannot grant this scope', scope: 'webhooks:manage', required: 'OWNER' },
+          403,
+        )
+      }
+      if (failure === 409) {
+        return json(
+          { error: 'this company already has 20 credentials', code: 'API_CREDENTIAL_LIMIT_REACHED' },
+          409,
+        )
+      }
+      return json({ error: 'Failed to issue the integration credential' }, failure)
+    }
+
+    const body = (await request.json()) as {
+      name: string
+      scopes: APICredential['scopes']
+      site_ids?: string[]
+      expires_at?: string
+    }
+    if (!body.name?.trim()) return json({ error: 'name is required' }, 400)
+    if (state.apiCredentials.some((c) => c.name === body.name && c.status === 'ACTIVE')) {
+      return json({ error: 'a credential with that name already exists' }, 409)
+    }
+    const n = state.apiCredentials.length + 1
+    const credential = makeAPICredential({
+      id: `cred-${n}`,
+      name: body.name,
+      key_prefix: `atp_live_${String(n).padStart(8, '0')}`,
+      scopes: body.scopes,
+      all_sites: !body.site_ids || body.site_ids.length === 0,
+      sites: (body.site_ids ?? []).map((id) => ({
+        site_id: id,
+        site_name: state.sites.find((site) => site.id === id)?.name ?? id,
+      })),
+      // The server defaults a year when the KEY is absent; the fixture only
+      // records what was sent so a test can assert on the body's shape.
+      expires_at: 'expires_at' in body ? body.expires_at : '2027-09-01T10:00:00Z',
+      last_used_at: undefined,
+      last_used_ip: undefined,
+      created_by_email: state.session?.operator.email,
+      status: 'ACTIVE',
+    })
+    state.apiCredentials = [...state.apiCredentials, credential]
+    return json({ ...credential, secret: fakeSecret(n), shown_once: true }, 201)
+  }),
+
+  http.get('*/api/v1/console/api-credentials/:credentialId/usage', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const id = String(params.credentialId)
+    const credential = state.apiCredentials.find((c) => c.id === id)
+    if (!credential) return json({ error: 'Integration credential not found' }, 404)
+    const usage = state.apiCredentialUsage[id]
+    return json(
+      usage ?? {
+        id,
+        name: credential.name,
+        key_prefix: credential.key_prefix,
+        last_used_at: credential.last_used_at,
+        last_used_ip: credential.last_used_ip,
+        days: [],
+      },
+    )
+  }),
+
+  http.post('*/api/v1/console/api-credentials/:credentialId/rotate', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const failure = takeFailure('api-credentials-rotate')
+    if (failure) return json({ error: 'Failed to rotate the integration credential' }, failure)
+    const id = String(params.credentialId)
+    const old = state.apiCredentials.find((c) => c.id === id)
+    if (!old) return json({ error: 'Integration credential not found' }, 404)
+    if (old.status !== 'ACTIVE' && old.status !== 'IN_GRACE') {
+      return json({ error: 'credential is not active' }, 409)
+    }
+    const body = (await request.json()) as { grace_seconds?: number; reason?: string }
+    const n = state.apiCredentials.length + 1
+    const replacement = makeAPICredential({
+      ...old,
+      id: `cred-${n}`,
+      key_prefix: `atp_live_${String(n).padStart(8, '0')}`,
+      last_used_at: undefined,
+      last_used_ip: undefined,
+      created_at: '2026-09-11T12:00:00Z',
+      status: 'ACTIVE',
+    })
+    const graced = (body.grace_seconds ?? 259200) > 0
+    const superseded: APICredential = {
+      ...old,
+      status: graced ? 'IN_GRACE' : 'EXPIRED',
+      superseded_at: '2026-09-11T12:00:00Z',
+      grace_expires_at: graced ? '2026-09-14T12:00:00Z' : '2026-09-11T12:00:00Z',
+      superseded_by: replacement.id,
+    }
+    state.apiCredentials = [
+      ...state.apiCredentials.map((c) => (c.id === id ? superseded : c)),
+      replacement,
+    ]
+    return json({ ...replacement, secret: fakeSecret(n), shown_once: true })
+  }),
+
+  http.get('*/api/v1/console/api-credentials/:credentialId', ({ request, params }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const credential = state.apiCredentials.find((c) => c.id === String(params.credentialId))
+    if (!credential) return json({ error: 'Integration credential not found' }, 404)
+    return json(credential)
+  }),
+
+  http.delete('*/api/v1/console/api-credentials/:credentialId', async ({ request, params }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (!roleAtLeastAdmin()) return json({ error: 'Insufficient role' }, 403)
+    const failure = takeFailure('api-credentials-revoke')
+    if (failure) return json({ error: 'Failed to revoke the integration credential' }, failure)
+    const id = String(params.credentialId)
+    const credential = state.apiCredentials.find((c) => c.id === id)
+    if (!credential) return json({ error: 'Integration credential not found' }, 404)
+    if (credential.status === 'REVOKED') return json({ error: 'already revoked' }, 409)
+    let reason: string | undefined
+    try {
+      reason = ((await request.json()) as { reason?: string }).reason
+    } catch {
+      reason = undefined
+    }
+    const revoked: APICredential = {
+      ...credential,
+      status: 'REVOKED',
+      revoked_at: '2026-09-11T12:30:00Z',
+      revoked_reason: reason,
+      revoked_by_email: state.session?.operator.email,
+    }
+    state.apiCredentials = state.apiCredentials.map((c) => (c.id === id ? revoked : c))
+    return json(revoked)
   }),
 
   // --- access control ------------------------------------------------------
