@@ -3701,7 +3701,11 @@ authentication-failure bucket **only**; it never touches a credential's or a
 company's allowance, so a stream of bad keys cannot exhaust an integrator's
 quota. A `503` spends nothing.
 
-**Every response** on this tree carries the credential bucket's state:
+**Every response to an authenticated request** on this tree — a `200`, and
+equally a `400`, `403`, `404` or `429` — carries the credential bucket's
+state. A response that never reached that bucket carries none of these
+headers: a `401`, the `429` that stands in for one, and a `503` (refused
+before authentication, or because the store could not be consulted).
 
 | Header | Meaning |
 |---|---|

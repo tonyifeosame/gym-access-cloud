@@ -68,7 +68,11 @@ func credentialRowID(t *testing.T, secret string) int64 {
 
 func TestPublicReadsAreLimitedPerCredentialWithHeaders(t *testing.T) {
 	t.Setenv("PUBLIC_READ_RATE_BURST", "5")
-	t.Setenv("PUBLIC_READ_RATE_LIMIT_PER_MINUTE", "300") // 5 a second
+	// One token a second: the six requests below must all land inside the
+	// refill of a single token for the sixth to be refused, and a full second
+	// is a margin a loaded CI runner meets; the 200 ms that 300/min would
+	// allow is not.
+	t.Setenv("PUBLIC_READ_RATE_LIMIT_PER_MINUTE", "60")
 	env := newTestEnv(t)
 	secret := publicCredential(t, env, "one", "rl-cred@example.com", `{"name":"rl","scopes":["sites:read"]}`)
 
@@ -78,11 +82,13 @@ func TestPublicReadsAreLimitedPerCredentialWithHeaders(t *testing.T) {
 			t.Fatalf("request %d = %d %s", i, status, raw)
 		}
 		limit, remaining, reset, policy := rateHeaders(t, headers)
-		if limit != 5 || remaining != 5-i || policy != "300;w=60" {
-			t.Errorf("request %d: Limit=%d Remaining=%d Policy=%q, want 5/%d/300;w=60", i, limit, remaining, policy, 5-i)
+		if limit != 5 || remaining != 5-i || policy != "60;w=60" {
+			t.Errorf("request %d: Limit=%d Remaining=%d Policy=%q, want 5/%d/60;w=60", i, limit, remaining, policy, 5-i)
 		}
-		if reset < 0 || reset > 2 {
-			t.Errorf("request %d: Reset=%d, want the seconds to a full bucket (<= 1s at 5/s)", i, reset)
+		// Seconds to a full bucket: i tokens spent at one a second, less
+		// whatever has refilled since the first request.
+		if reset < 0 || reset > i {
+			t.Errorf("request %d: Reset=%d, want the seconds to a full bucket (<= %d at 1/s)", i, reset, i)
 		}
 	}
 
@@ -93,10 +99,49 @@ func TestPublicReadsAreLimitedPerCredentialWithHeaders(t *testing.T) {
 		t.Errorf("Remaining on a 429 = %d, want 0", remaining)
 	}
 
-	// Continuous refill: at 5 a second, a token is back within a second.
+	// Continuous refill: at one a second, a token is back within 1.2 s.
 	time.Sleep(1200 * time.Millisecond)
 	if status, _, _, raw := publicGet(t, env, secret, "/api/public/v1/sites"); status != 200 {
 		t.Errorf("after refill = %d %s", status, raw)
+	}
+}
+
+// Section 18: an authenticated request spends its token "whatever the
+// response -- a 403, 404 or 400 did the same work as a 200". The spend happens
+// before the handler runs, so a refactor that moved it after would pass every
+// other test here and silently hand out free refusals; this pins it.
+//
+// Refill is one token a MINUTE, so the balance cannot drift by a whole token
+// inside the test and the Remaining values below are exact without a sleep.
+func TestAuthenticatedRefusalsConsumeReadQuota(t *testing.T) {
+	t.Setenv("PUBLIC_READ_RATE_BURST", "10")
+	t.Setenv("PUBLIC_READ_RATE_LIMIT_PER_MINUTE", "1")
+	env := newTestEnv(t)
+	sitesOnly := publicCredential(t, env, "one", "rl-refusals@example.com", `{"name":"refusals","scopes":["sites:read"]}`)
+
+	for i, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"/api/public/v1/members", http.StatusForbidden, models.CodeInsufficientScope},  // scope refused at the edge
+		{"/api/public/v1/sites/NOPE", http.StatusNotFound, models.CodeResourceNotFound}, // lookup missed
+		{"/api/public/v1/sites?bogus=1", http.StatusBadRequest, models.CodeUnknownParameter},
+		{"/api/public/v1/sites", http.StatusOK, ""},
+	} {
+		status, headers, body, raw := publicGet(t, env, sitesOnly, tc.path)
+		if tc.code != "" {
+			if code := publicError(t, status, headers, body, tc.status); code != tc.code {
+				t.Fatalf("%s: code %s, want %s", tc.path, code, tc.code)
+			}
+		} else if status != tc.status {
+			t.Fatalf("%s = %d %s", tc.path, status, raw)
+		}
+		limit, remaining, _, _ := rateHeaders(t, headers)
+		if limit != 10 || remaining != 10-(i+1) {
+			t.Errorf("%s (%d): Limit=%d Remaining=%d, want 10/%d -- the refusal must have spent a token",
+				tc.path, status, limit, remaining, 10-(i+1))
+		}
 	}
 }
 
@@ -207,6 +252,7 @@ func TestPublicRoutesFailClosedWhenTheRateStoreFails(t *testing.T) {
 // store the first drained.
 func TestPublicAllowanceIsSharedAcrossRouterInstances(t *testing.T) {
 	t.Setenv("PUBLIC_READ_RATE_BURST", "3")
+	t.Setenv("PUBLIC_READ_RATE_LIMIT_PER_MINUTE", "60") // one a second: see the headers test
 	env := newTestEnv(t)
 	secret := publicCredential(t, env, "one", "rl-two@example.com", `{"name":"two","scopes":["sites:read"]}`)
 	second := &testEnv{t: t, router: NewRouter(), siteAKey: env.siteAKey, siteBKey: env.siteBKey, siteCKey: env.siteCKey}
@@ -238,6 +284,7 @@ func TestPublicAllowanceIsSharedAcrossRouterInstances(t *testing.T) {
 
 func TestPublicReadsProduceUsageDataAfterFlush(t *testing.T) {
 	t.Setenv("PUBLIC_READ_RATE_BURST", "2")
+	t.Setenv("PUBLIC_READ_RATE_LIMIT_PER_MINUTE", "60") // one a second: see the headers test
 	env := newTestEnv(t)
 	// The usage buffer is process-wide and the fixture restarts identities, so
 	// an earlier test's notes could be attributed to this test's credential.

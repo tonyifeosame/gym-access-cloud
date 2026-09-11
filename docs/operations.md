@@ -188,8 +188,11 @@ credential bucket is checked first, then the company's; both are spent on every
 authenticated request whatever the handler answers. Authentication failures
 are charged to `auth_failure` only, and only after the failure, so a spray of
 bad keys never drains a customer's allowance and never delays a valid key.
-A 429 carries the section-18 envelope, `Retry-After`, and the `RateLimit-*`
-headers every public response carries. A store that cannot answer is a 503
+A 429 carries the section-18 envelope and `Retry-After`. The `RateLimit-*`
+headers describe the credential bucket and are carried by every response to
+an **authenticated** request (200, 400, 403, 404 and 429 alike); a 401, the
+429 that stands in for one, and a 503 never reached that bucket and carry
+none. A store that cannot answer is a 503
 (`service_unavailable`) — the limiter fails closed. An exhausted bucket is
 remembered in process for its `Retry-After`, so hammering it costs no database
 statement until it could hold a token again. Every authenticated public request

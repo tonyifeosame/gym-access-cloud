@@ -68,7 +68,9 @@ import (
 //
 // THE NUMBERS ARE DEFAULTS, NOT CONTRACT. Each is overridable by environment
 // (below) and section 18 publishes them as subject to change with notice; the
-// RateLimit-* headers on every response are what a client paces against.
+// RateLimit-* headers on every authenticated response are what a client paces
+// against (a 401, the 429 in its place, and a 503 never reached a credential
+// bucket and carry none).
 
 const (
 	RateClassRead        = "read"
