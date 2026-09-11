@@ -3638,7 +3638,10 @@ member created without one.
 
 ### Pagination
 
-List endpoints page by **signed, opaque cursor**, not by offset.
+List endpoints page by **opaque cursor**, not by offset. A cursor is
+encrypted and authenticated (XChaCha20-Poly1305 under a key derived from the
+deployment's `CURSOR_SIGNING_KEY`); its contents cannot be read or altered by
+a client, and rotating the key invalidates every outstanding cursor at once.
 
 | Parameter | Type | Default | Bounds |
 |---|---|---|---|
@@ -3671,8 +3674,8 @@ page a client is on.
 
 A cursor is **bound to the credential's company and to the query it was
 issued for**. Presenting it with another credential's company, with different
-filters, with a tampered payload or with a signature this server did not
-produce is `400 cursor_invalid`. A cursor that points past the data retained
+filters, with a tampered or truncated token, or with a token this deployment
+did not produce is `400 cursor_invalid` — one answer for all of them. A cursor that points past the data retained
 for the resource is `410 cursor_expired`; members are retained indefinitely, so
 their cursors do not expire in this version. **The cursor's contents are not
 part of the contract**: do not decode, construct or compare them.
@@ -4075,15 +4078,6 @@ its return exists and passes.
    limited in this version.** `rate_limit_exceeded` is registered and no
    allowance is defined; until one is, the public routes must not be exposed
    to customers. This is a pre-production blocker, not a contract change.
-   **The members cursor is signed, not encrypted, and its payload carries the
-   internal company id and the last row's internal id** — readable by anyone
-   who base64-decodes `next_cursor`, which conflicts with section 18's rule
-   that the internal `BIGSERIAL` is never exposed. It grants nothing (every
-   query is tenant-filtered and the signature prevents forgery), but it is a
-   second pre-production blocker: the payload must be made opaque — the
-   minimum change is to encrypt it (AEAD under a key derived from
-   `CURSOR_SIGNING_KEY`) inside `Encode`/`Decode`, leaving queries and
-   handlers untouched — before a customer credential is issued.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).

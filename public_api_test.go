@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -216,6 +218,18 @@ func TestPublicMembersListPagesNewestFirstWithTheSpecifiedEnvelope(t *testing.T)
 		cursor, _ := body["next_cursor"].(string)
 		if cursor == "" {
 			t.Fatalf("has_more=true without a cursor: %v", body)
+		}
+		// OPAQUE (API_SPEC.md section 18): a client that base64-decodes the
+		// cursor must not find the JSON keys, the internal company id or the
+		// internal row id that a v1 cursor carried in the clear.
+		decodedCursor, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil {
+			t.Fatalf("cursor is not base64url: %v", err)
+		}
+		for _, leak := range []string{`"c":`, `"i":`, `"k":`, `"f":`, `members:v1`} {
+			if bytes.Contains(decodedCursor, []byte(leak)) {
+				t.Errorf("cursor payload is readable: contains %q", leak)
+			}
 		}
 		path = "/api/public/v1/members?limit=2&cursor=" + cursor
 		if pages > 5 {
