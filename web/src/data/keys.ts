@@ -218,4 +218,12 @@ export const keys = {
     all: [ROOT, 'firmware'] as const,
     list: () => [ROOT, 'firmware', 'list'] as const,
   },
+
+  apiCredentials: {
+    all: [ROOT, 'api-credentials'] as const,
+    list: () => [ROOT, 'api-credentials', 'list'] as const,
+    detail: (credentialId: string) => [ROOT, 'api-credentials', 'detail', credentialId] as const,
+    usage: (credentialId: string, days: number) =>
+      [ROOT, 'api-credentials', 'usage', credentialId, { days }] as const,
+  },
 } as const

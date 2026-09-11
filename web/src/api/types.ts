@@ -1617,3 +1617,107 @@ export interface ApplicationRequest {
   enabled?: boolean
   settings?: Record<string, unknown>
 }
+
+// ---------------------------------------------------------------------------
+// Integration credentials (the public API's keys)
+// ---------------------------------------------------------------------------
+//
+// Mirrors models.APICredential and friends, served by the ADMIN console routes
+// under /api/v1/console/api-credentials. THE SECRET APPEARS IN EXACTLY TWO
+// RESPONSES -- issue and rotate, as APICredentialIssued -- and in no read shape:
+// no list, detail or usage response can carry one, and the types say so.
+
+/** models.Scopes keys. The server is the registry; this is what it publishes. */
+export type APICredentialScope =
+  | 'members:read'
+  | 'members:write'
+  | 'sites:read'
+  | 'terminals:read'
+  | 'events:read'
+  | 'access:read'
+  | 'webhooks:manage'
+
+/**
+ * Resolved lifecycle state, computed by the server rather than stored, so a
+ * console never has to combine four timestamps and get it wrong.
+ */
+export type APICredentialStatus = 'ACTIVE' | 'IN_GRACE' | 'EXPIRED' | 'REVOKED'
+
+export interface APICredential {
+  id: string
+  name: string
+  environment: 'live' | 'test'
+  /** The non-secret prefix (`atp_live_` + 8 hex), for logs and for this UI. */
+  key_prefix: string
+  /** The EXPANDED scope set: members:write is listed with the members:read it implies. */
+  scopes: APICredentialScope[]
+  /** Empty when the credential reaches every site; `all_sites` says which. */
+  sites: SiteGrant[]
+  all_sites: boolean
+  created_by_email?: string
+  created_at: string
+  expires_at?: string
+  last_used_at?: string
+  last_used_ip?: string
+  superseded_at?: string
+  grace_expires_at?: string
+  superseded_by?: string
+  revoked_at?: string
+  revoked_reason?: string
+  revoked_by_email?: string
+  status: APICredentialStatus
+}
+
+/** The one-time shape: a credential plus the secret, returned by issue and rotate only. */
+export interface APICredentialIssued extends APICredential {
+  secret: string
+  shown_once: boolean
+}
+
+export interface APICredentialsResponse {
+  count: number
+  credentials: APICredential[]
+}
+
+export interface IssueAPICredentialRequest {
+  name: string
+  scopes: APICredentialScope[]
+  /** Omitted, not empty: an empty list and an absent key both mean every site. */
+  site_ids?: string[]
+  /**
+   * OMIT THE KEY for the server's default lifetime (a year). The server checks
+   * for the key's presence, so `undefined` must not be serialised as `null`.
+   */
+  expires_at?: string
+}
+
+export interface RotateAPICredentialRequest {
+  /**
+   * How long the superseded key keeps working. 0 is a hard cutover -- the right
+   * choice for a leaked key. Absent means the server's default (72 hours), so
+   * the console always sends it explicitly.
+   */
+  grace_seconds: number
+  reason?: string
+}
+
+export interface RevokeAPICredentialRequest {
+  reason?: string
+}
+
+export interface APICredentialUsageDay {
+  /** YYYY-MM-DD, UTC. */
+  day: string
+  class: string
+  requests: number
+  refusals: number
+}
+
+export interface APICredentialUsage {
+  id: string
+  name: string
+  key_prefix: string
+  last_used_at?: string
+  last_used_ip?: string
+  days: APICredentialUsageDay[]
+}

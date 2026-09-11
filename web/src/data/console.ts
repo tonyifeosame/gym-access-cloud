@@ -10,6 +10,10 @@ import {
 
 import * as endpoints from '../api/endpoints'
 import type {
+  APICredential,
+  APICredentialIssued,
+  APICredentialUsage,
+  APICredentialsResponse,
   AccessDecision,
   AccessEvaluationRequest,
   AdoptTerminalRequest,
@@ -37,6 +41,7 @@ import type {
   FirmwareVersion,
   FleetSummary,
   InvitationResponse,
+  IssueAPICredentialRequest,
   OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
@@ -53,6 +58,8 @@ import type {
   RejectTerminalRequest,
   ResetResponse,
   RetireSiteResponse,
+  RevokeAPICredentialRequest,
+  RotateAPICredentialRequest,
   RotateSiteKeyResponse,
   Schedule,
   ScheduleRequest,
@@ -1298,6 +1305,96 @@ export function useSetCurrentFirmware(): UseMutationResult<FirmwareVersion, Erro
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.firmware.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Integration credentials
+// ---------------------------------------------------------------------------
+//
+// THE SECRET NEVER ENTERS THE QUERY CACHE. Issue and rotate are mutations, and
+// a mutation's result lives only on the hook that ran it until `reset()` is
+// called -- which the dialogs do the moment the one-time panel is dismissed.
+// Nothing here writes an APICredentialIssued into a query with setQueryData;
+// the list and detail are simply invalidated and refetched, and what comes back
+// has no secret in it.
+
+export function useAPICredentials(): UseQueryResult<APICredentialsResponse> {
+  return useQuery({
+    queryKey: keys.apiCredentials.list(),
+    queryFn: () => endpoints.fetchAPICredentials(),
+  })
+}
+
+export function useAPICredential(credentialId: string | undefined): UseQueryResult<APICredential> {
+  return useQuery({
+    queryKey: keys.apiCredentials.detail(credentialId ?? ''),
+    queryFn: () => endpoints.fetchAPICredential(credentialId as string),
+    enabled: Boolean(credentialId),
+  })
+}
+
+export function useAPICredentialUsage(
+  credentialId: string | undefined,
+  days = 30,
+): UseQueryResult<APICredentialUsage> {
+  return useQuery({
+    queryKey: keys.apiCredentials.usage(credentialId ?? '', days),
+    queryFn: () => endpoints.fetchAPICredentialUsage(credentialId as string, days),
+    enabled: Boolean(credentialId),
+  })
+}
+
+export function useIssueAPICredential(): UseMutationResult<
+  APICredentialIssued,
+  Error,
+  IssueAPICredentialRequest
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: IssueAPICredentialRequest) => endpoints.issueAPICredential(body),
+    // THE RESULT CARRIES THE SECRET. A mutation's state is kept in the mutation
+    // cache for gcTime after its last observer lets go; the default is five
+    // minutes, which would leave the secret readable from the cache long after
+    // the panel closed. Zero drops it on the tick after the dialog resets it.
+    gcTime: 0,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+export function useRotateAPICredential(): UseMutationResult<
+  APICredentialIssued,
+  Error,
+  { credentialId: string; body: RotateAPICredentialRequest }
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ credentialId, body }) => endpoints.rotateAPICredential(credentialId, body),
+    // Carries the new secret: collected immediately, as for issue.
+    gcTime: 0,
+    onSuccess: () => {
+      // Both the old row (now superseded) and the new one changed.
+      void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
+export function useRevokeAPICredential(): UseMutationResult<
+  APICredential,
+  Error,
+  { credentialId: string; body: RevokeAPICredentialRequest }
+> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ credentialId, body }) => endpoints.revokeAPICredential(credentialId, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
   })

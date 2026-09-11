@@ -10,6 +10,8 @@ import { DashboardPage } from './pages/DashboardPage'
 import { Forbidden, NotFound } from './pages/ErrorPage'
 import { ActivityPage } from './pages/activity/ActivityPage'
 import { SchedulesPage } from './pages/access/SchedulesPage'
+import { ApiCredentialDetailPage } from './pages/api-credentials/ApiCredentialDetailPage'
+import { ApiCredentialsListPage } from './pages/api-credentials/ApiCredentialsListPage'
 import { EventsPage } from './pages/events/EventsPage'
 import { FirmwarePage } from './pages/firmware/FirmwarePage'
 import { ApplicationDetailPage } from './pages/applications/ApplicationDetailPage'
@@ -156,6 +158,27 @@ export const router = createBrowserRouter([
         element: (
           <RequireRole minimum="ADMIN">
             <ApplicationDetailPage />
+          </RequireRole>
+        ),
+      },
+
+      // ADMIN, matching the server's route group for /console/api-credentials.
+      // Same courtesy as the operators routes: the API refuses MANAGER and
+      // below with 403 regardless; this only spares an administrator's
+      // colleague a request that would fail.
+      {
+        path: 'settings/api-credentials',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <ApiCredentialsListPage />
+          </RequireRole>
+        ),
+      },
+      {
+        path: 'settings/api-credentials/:credentialId',
+        element: (
+          <RequireRole minimum="ADMIN">
+            <ApiCredentialDetailPage />
           </RequireRole>
         ),
       },

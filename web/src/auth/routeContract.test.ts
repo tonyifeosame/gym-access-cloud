@@ -117,6 +117,7 @@ const ACTION_ROUTES: Record<keyof typeof ACTION_ROLES, string> = {
   viewEvents: 'GET /events',
 
   manageOperators: 'POST /operators',
+  manageAPICredentials: 'POST /api-credentials',
   manageSites: 'POST /sites',
   manageTerminalLifecycle: 'PUT /terminals/:serial/state',
   changeTerminalWifi: 'POST /terminals/:serial/wifi-recovery',

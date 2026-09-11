@@ -69,6 +69,17 @@ export const PLATFORM_NAV: NavItem[] = [
     minimumRole: 'ADMIN',
   },
   {
+    id: 'api-credentials',
+    label: 'API access',
+    path: '/settings/api-credentials',
+    // ADMIN, matching the server's route group: issuing a key is "let this
+    // company's data leave it", the same decision as rotating a site key, and
+    // the server mounts both on the same ADMIN group. OWNER qualifies through
+    // the hierarchy; MANAGER and below never see the entry and get 403 from
+    // the API if they type the URL.
+    minimumRole: 'ADMIN',
+  },
+  {
     id: 'applications',
     // "Features" is the customer-facing word for a capability throughout the
     // console. The id and the path stay as they are: one is what tests and code

@@ -9,6 +9,8 @@ import { RequireAuth } from '../auth/guards'
 import { AppShell } from '../layout/AppShell'
 import { ActivityPage } from '../pages/activity/ActivityPage'
 import { SchedulesPage } from '../pages/access/SchedulesPage'
+import { ApiCredentialDetailPage } from '../pages/api-credentials/ApiCredentialDetailPage'
+import { ApiCredentialsListPage } from '../pages/api-credentials/ApiCredentialsListPage'
 import { EventsPage } from '../pages/events/EventsPage'
 import { FirmwarePage } from '../pages/firmware/FirmwarePage'
 import { PersonDetailPage } from '../pages/people/PersonDetailPage'
@@ -21,6 +23,8 @@ import { SitesListPage } from '../pages/sites/SitesListPage'
 import { TerminalDetailPage } from '../pages/terminals/TerminalDetailPage'
 import { TerminalsListPage } from '../pages/terminals/TerminalsListPage'
 import {
+  makeAPICredential,
+  makeAPICredentialUsage,
   makeApplication,
   makeAuditRecord,
   makeEvent,
@@ -106,6 +110,11 @@ function signIn(role: Role = 'OWNER') {
     events: [makeEvent()],
     firmware: [makeFirmwareVersion()],
     operators: [makeOperatorAccount(), makeOperatorAccount({ id: 'op-2', email: 'a@b.example' })],
+    apiCredentials: [
+      makeAPICredential(),
+      makeAPICredential({ id: 'cred-2', name: 'Retired key', status: 'REVOKED' }),
+    ],
+    apiCredentialUsage: { 'cred-1': makeAPICredentialUsage() },
     applications: [makeApplication()],
     audit: [makeAuditRecord()],
   })
@@ -148,6 +157,8 @@ function renderInShell(path: string, client = makeTestQueryClient()) {
           { path: 'people/:externalId', element: <PersonDetailPage /> },
           { path: 'settings/applications', element: <ApplicationsPage /> },
           { path: 'settings/firmware', element: <FirmwarePage /> },
+          { path: 'settings/api-credentials', element: <ApiCredentialsListPage /> },
+          { path: 'settings/api-credentials/:credentialId', element: <ApiCredentialDetailPage /> },
         ],
       },
     ],
@@ -186,6 +197,12 @@ describe('every screen passes the automated sweep', () => {
     ['one person', '/people/P-0001', () => screen.findByRole('heading', { name: 'Access' })],
     ['applications', '/settings/applications', () => screen.findByText('Access Control')],
     ['firmware', '/settings/firmware', () => screen.findByRole('heading', { name: /Firmware/ })],
+    ['api access', '/settings/api-credentials', () => screen.findByText('Roster sync')],
+    [
+      'one credential',
+      '/settings/api-credentials/cred-1',
+      () => screen.findByRole('table', { name: /Requests per day/ }),
+    ],
   ]
 
   for (const [name, path, settled] of screens) {
@@ -251,6 +268,26 @@ describe('dialogs', () => {
     await user.click(screen.getByRole('button', { name: 'Issue claim code' }))
 
     await screen.findByLabelText('Claim code')
+    await expectNoViolations()
+  })
+
+  it('the issue-credential dialog and its secret panel are free of violations', async () => {
+    // The same nested shape as the claim code: a one-time secret in an
+    // alertdialog inside a dialog, with a programmatically focused heading.
+    const user = userEvent.setup()
+    signIn()
+    renderInShell('/settings/api-credentials')
+
+    await screen.findByText('Roster sync')
+    await user.click(screen.getByRole('button', { name: 'Issue credential' }))
+    await screen.findByRole('dialog')
+    await expectNoViolations()
+
+    await user.type(screen.getByLabelText(/Name/), 'Swept key')
+    await user.click(screen.getByLabelText(/^Read sites/))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Issue credential' }))
+
+    await screen.findByLabelText('Secret')
     await expectNoViolations()
   })
 
