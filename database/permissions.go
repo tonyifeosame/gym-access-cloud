@@ -26,7 +26,15 @@ import (
 
 // ListPersonPermissions returns every live rule for one person.
 func ListPersonPermissions(companyID int64, externalID string) ([]models.Permission, error) {
-	rows, err := DB.Query(`
+	return ListPersonPermissionsTx(DB, companyID, externalID)
+}
+
+// ListPersonPermissionsTx is ListPersonPermissions on a caller-supplied
+// querier -- the public API reads inside its tenant-scoped transaction, so
+// the statement timeout and tenant setting apply to this read as to every
+// other one on that path.
+func ListPersonPermissionsTx(q Querier, companyID int64, externalID string) ([]models.Permission, error) {
+	rows, err := q.Query(`
 		SELECT pm.public_id, p.public_id, pm.scope_type,
 		       s.public_id, s.site_name, d.serial_number, d.device_name,
 		       pm.application, pm.effect,

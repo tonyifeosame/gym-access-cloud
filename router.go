@@ -742,18 +742,42 @@ func NewRouter() *gin.Engine {
 	// succeeds, and one middleware that sees both outcomes cannot be mis-ordered.
 	// It sets exactly what APICredentialAuthMiddleware sets, so Tenant(c) and
 	// RequireScope are unchanged.
+	//
+	// IDEMPOTENCY SITS DIRECTLY BEHIND AUTHENTICATION. It keys replay records
+	// on the TenantContext the limiter set, passes safe methods and keyless
+	// writes straight through, and replays or refuses a repeated key before
+	// the scope check or the handler run -- a replay is the ORIGINAL response,
+	// whatever the handler would say today. Writes are charged to the same
+	// credential and company allowances as reads in this version (section 18).
 	publicAPI := r.Group("/api/public/v1")
 	publicAPI.Use(middleware.PublicAPILimiter(handlers.APIEnvironment()))
+	publicAPI.Use(middleware.IdempotencyMiddleware())
 	{
+		// Reads and writes on members carry DIFFERENT scopes, so they are two
+		// groups on one path rather than one group with a looser gate.
 		members := publicAPI.Group("/members", middleware.RequireScope(models.ScopeMembersRead))
 		{
 			members.GET("", handlers.PublicListMembers)
 			members.GET("/:member_id", handlers.PublicGetMember)
 		}
+		memberWrites := publicAPI.Group("/members", middleware.RequireScope(models.ScopeMembersWrite))
+		{
+			memberWrites.POST("", handlers.PublicCreateMember)
+			memberWrites.PATCH("/:member_id", handlers.PublicUpdateMember)
+			memberWrites.DELETE("/:member_id", handlers.PublicDeleteMember)
+		}
+		access := publicAPI.Group("/members", middleware.RequireScope(models.ScopeAccessRead))
+		{
+			access.GET("/:member_id/access", handlers.PublicMemberAccess)
+		}
 		sites := publicAPI.Group("/sites", middleware.RequireScope(models.ScopeSitesRead))
 		{
 			sites.GET("", handlers.PublicListSites)
 			sites.GET("/:site_id", handlers.PublicGetSite)
+		}
+		events := publicAPI.Group("/events", middleware.RequireScope(models.ScopeEventsRead))
+		{
+			events.GET("", handlers.PublicListEvents)
 		}
 	}
 

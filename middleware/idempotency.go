@@ -15,16 +15,16 @@ import (
 // Idempotency-Key handling for the public API.
 //
 // ---------------------------------------------------------------------------
-// NOT MOUNTED ON ANYTHING
+// MOUNTED ON THE PUBLIC GROUP, AFTER AUTHENTICATION
 // ---------------------------------------------------------------------------
 //
-// This middleware is complete and tested and is registered on no route, because
-// the routes it is for -- the public write endpoints -- do not exist in this
-// build. It reads two context keys that only the public authentication
-// middleware will set, so mounting it on a console route today would be a no-op
-// rather than a hazard; it is still not mounted, because a primitive that is
-// quietly live somewhere nobody expects is worse than one that is obviously
-// dormant.
+// router.go mounts this on /api/public/v1 directly after PublicAPILimiter, so
+// the identity a record is keyed on is the authenticated integration
+// credential, read from the TenantContext that middleware set and from nothing
+// else. It deliberately does not read the console's "company_id" gin key: the
+// public tree never sets that key (see api_credential_auth.go), and a request
+// that carries no TenantContext did not authenticate here, for which the only
+// right behaviour is to store nothing and pass through.
 //
 // ---------------------------------------------------------------------------
 // WHAT IT DOES
@@ -45,14 +45,6 @@ import (
 // Re-running the handler to produce a "fresh" answer would be a different
 // response to the same request, which is the thing idempotency exists to
 // prevent.
-
-// Context keys the public authentication middleware will set. Named here so the
-// dependency is one-directional: this file knows what it needs, and the
-// middleware that will provide it does not have to know about this one.
-const (
-	ContextAPICredentialID = "api_credential_id"
-	ContextAPICompanyID    = "company_id"
-)
 
 // IdempotencyHeader carries the key.
 const IdempotencyHeader = "Idempotency-Key"
@@ -90,15 +82,18 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		companyID := c.GetInt64(ContextAPICompanyID)
-		credentialID := c.GetInt64(ContextAPICredentialID)
-		if companyID == 0 || credentialID == 0 {
+		// The integration credential this request authenticated as, from the
+		// TenantContext PublicAPILimiter set -- never from the console's
+		// "company_id" gin key, which the public tree deliberately leaves unset.
+		tc := Tenant(c)
+		if tc == nil || tc.CompanyID() == 0 || tc.CredentialID() == 0 {
 			// Reached only if this is mounted without the public authentication
 			// middleware in front of it. There is no tenant to scope the record
 			// to, and a record scoped to nothing would be reachable by everyone.
 			c.Next()
 			return
 		}
+		companyID, credentialID := tc.CompanyID(), tc.CredentialID()
 
 		body, err := readAndRestoreBody(c)
 		if err != nil {

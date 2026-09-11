@@ -134,8 +134,10 @@ func TestForeignCompanyMembersResolveAsNotFound(t *testing.T) {
 	if _, err := members.Update(ctx, two, "ONE-001", service.MemberInput{FullName: "Hijacked"}); codeOf(t, err) != models.CodeResourceNotFound {
 		t.Errorf("update of a foreign member = %v", err)
 	}
-	if err := members.Delete(ctx, two, "ONE-001"); codeOf(t, err) != models.CodeResourceNotFound {
-		t.Errorf("delete of a foreign member = %v", err)
+	// A foreign delete is a silent no-op (section 18: 204 for "gone" and
+	// "never here" alike), and the row must be untouched.
+	if removed, err := members.Delete(ctx, two, "ONE-001"); err != nil || removed {
+		t.Errorf("delete of a foreign member = removed %v, err %v; want a no-op", removed, err)
 	}
 	if name := queryString(t, `SELECT full_name FROM people WHERE external_id = 'ONE-001'`); name != "One Person" {
 		t.Errorf("company one's person was touched: %q", name)
@@ -230,7 +232,7 @@ func TestServicesRefuseOperationsOutsideTheCredentialScopes(t *testing.T) {
 	if _, err := members.Update(ctx, readOnly, "ONE-001", service.MemberInput{FullName: "Y"}); codeOf(t, err) != models.CodeInsufficientScope {
 		t.Errorf("update without members:write = %v", err)
 	}
-	if err := members.Delete(ctx, readOnly, "ONE-001"); codeOf(t, err) != models.CodeInsufficientScope {
+	if _, err := members.Delete(ctx, readOnly, "ONE-001"); codeOf(t, err) != models.CodeInsufficientScope {
 		t.Errorf("delete without members:write = %v", err)
 	}
 	if _, err := sites.List(ctx, readOnly); codeOf(t, err) != models.CodeInsufficientScope {
@@ -283,14 +285,14 @@ func TestServiceMemberWritesFanOutToTerminalsLikeTheLegacyPath(t *testing.T) {
 		t.Error("no UPDATE job after the service update")
 	}
 
-	if err := members.Delete(ctx, writer, "SVC-001"); err != nil {
-		t.Fatalf("delete: %v", err)
+	if removed, err := members.Delete(ctx, writer, "SVC-001"); err != nil || !removed {
+		t.Fatalf("delete: removed %v, err %v", removed, err)
 	}
 	if !contains(jobTypes(env.jobs(deviceKey)), models.SyncJobDelete) {
 		t.Error("no DELETE job after the service delete")
 	}
-	if err := members.Delete(ctx, writer, "SVC-001"); codeOf(t, err) != models.CodeResourceNotFound {
-		t.Errorf("deleting twice = %v, want resource_not_found", err)
+	if removed, err := members.Delete(ctx, writer, "SVC-001"); err != nil || removed {
+		t.Errorf("deleting twice = removed %v, err %v; want an idempotent no-op", removed, err)
 	}
 
 	// The legacy wrapper is unchanged: a repeated DELETE there is still a

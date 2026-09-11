@@ -44,6 +44,8 @@ import (
 type publicServices struct {
 	members *service.MemberService
 	sites   *service.SiteService
+	access  *service.AccessService
+	events  *service.EventService
 }
 
 var (
@@ -67,6 +69,8 @@ func ConfigurePublicAPI(cursorKey []byte) error {
 	public = &publicServices{
 		members: service.NewMemberService(signer),
 		sites:   service.NewSiteService(),
+		access:  service.NewAccessService(),
+		events:  service.NewEventService(signer),
 	}
 	return nil
 }
