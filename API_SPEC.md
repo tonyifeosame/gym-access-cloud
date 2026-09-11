@@ -3722,7 +3722,32 @@ authentication challenge and carries no `WWW-Authenticate`.
 `503 service_unavailable` and `Retry-After`; nothing is served unlimited
 because the limiter was down.
 
-> **Example: captured with the routes.**
+The credential's sixty-first request inside its burst, and its headers:
+
+```
+HTTP/1.1 429 Too Many Requests
+Ratelimit-Limit: 60
+Ratelimit-Policy: 300;w=60
+Ratelimit-Remaining: 0
+Ratelimit-Reset: 12
+Retry-After: 1
+```
+
+(Header names are case-insensitive; the server emits them in Go's canonical
+form, as captured.)
+
+```json
+{
+  "error": {
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded",
+    "message": "Rate limit exceeded.",
+    "request_id": "5fc50d5d15152eb7",
+    "doc_url": "https://docs.accesslink.store/errors/rate_limit_exceeded"
+  }
+}
+```
+→ `429`
 
 ### Members
 
@@ -3768,8 +3793,9 @@ version — a query parameter other than `limit` and `cursor` is
 `400 unknown_parameter`.
 
 First page of two, then the page after it. `id` values are the members'
-public UUIDs; the cursor is opaque and is shown only to make its shape
-unambiguous.
+public UUIDs. The cursor is an encrypted, authenticated token: it is shown
+only to make its shape unambiguous, and nothing in it can be read or altered
+by a client.
 
 ```bash
 curl "http://localhost:8080/api/public/v1/members?limit=2" \
@@ -3799,13 +3825,13 @@ curl "http://localhost:8080/api/public/v1/members?limit=2" \
     }
   ],
   "has_more": true,
-  "next_cursor": "eyJjIjoyLCJrIjoiMjAyNi0wOS0xMVQxMDozNTowMC4zNDc3MjNaIiwiaSI6MiwiZiI6Im1lbWJlcnM6djEiLCJ0IjoiMjAyNi0wOS0xMVQxMDozNTo0OC43MzMyMTMzWiJ9.tEu_rdN-3pSIKi7a9JlD62f0A59Zr2q9zV4hLxQAvtc"
+  "next_cursor": "AkwiRQG6XwT_h0mx7hNHjFINCEMZ8SszybWW7dDh0ZFrJLn0-v7op9IzDmBk3OXLpfxjtfMg8mUAJ_SawP211X5E-odV1sKaKWmn4z23nOEAmv1YpfVvPWYFRCSTaZLu7FBVd8PJPFVJxYcU8lFJbYDcu6fY"
 }
 ```
 → `200`
 
 ```bash
-curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=eyJj…" \
+curl "http://localhost:8080/api/public/v1/members?limit=2&cursor=Akwi…" \
   -H 'Authorization: Bearer atp_live_…'
 ```
 
