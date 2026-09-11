@@ -205,7 +205,8 @@ limiter is one service-wide bucket there: the public `auth_failure` bucket by
 design (a cap on refused attempts, not per-source fairness — a valid key is
 never delayed by it), but also, and less intentionally, the P1 **login, claim
 and platform-login** allowances (10/min each) are shared by every operator of
-every tenant. That is a pre-existing platform issue tracked separately; the
+every tenant. That is a pre-existing platform issue tracked separately as
+[issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8); the
 fix is to trust Render's proxy ranges so `ClientIP()` is real, and it is
 deliberately NOT changed by the public API work.
 

@@ -4155,7 +4155,7 @@ its return exists and passes.
    bucket — sees one address for every caller and is therefore one
    service-wide bucket. A valid integration credential is never delayed by
    that; operators sharing one login allowance is a platform issue tracked
-   separately.
+   separately as [issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8).
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).
