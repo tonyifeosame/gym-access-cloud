@@ -67,8 +67,13 @@ func TestPublicAPIMountsExactlyTheSpecifiedRoutes(t *testing.T) {
 	want := []string{
 		"GET /api/public/v1/members",
 		"GET /api/public/v1/members/:member_id",
+		"POST /api/public/v1/members",
+		"PATCH /api/public/v1/members/:member_id",
+		"DELETE /api/public/v1/members/:member_id",
+		"GET /api/public/v1/members/:member_id/access",
 		"GET /api/public/v1/sites",
 		"GET /api/public/v1/sites/:site_id",
+		"GET /api/public/v1/events",
 	}
 	for _, w := range want {
 		if !found[w] {

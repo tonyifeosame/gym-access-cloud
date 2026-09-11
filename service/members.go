@@ -23,7 +23,7 @@ import (
 // a registry code. It never sees an HTTP request, never reads a header, and
 // takes the tenant from nothing but the context it was handed.
 //
-// The handler above it (none exists yet) will parse the request into a
+// The handler above it (handlers/public_api.go and public_api_writes.go) parses the request into a
 // MemberInput or PageRequest, authenticate into a TenantContext, call one
 // method, and map the result or the *Error to a response. That is all.
 //
@@ -59,6 +59,10 @@ type MemberInput struct {
 	MembershipType string
 	Active         *bool
 }
+
+// DefaultMembershipType is what a member created without one gets. The public
+// contract makes the field optional (section 18); the legacy route requires it.
+const DefaultMembershipType = "STANDARD"
 
 // MaxMemberNameLength bounds full_name. The column is unbounded TEXT; this is
 // the service's own limit so that a terminal's display is not the first thing
@@ -165,10 +169,17 @@ func (s *MemberService) Create(ctx context.Context, tc *TenantContext, in Member
 		return nil, ErrMemberIDUnusable()
 	}
 
+	// DEFAULTS ARE THE PUBLIC CONTRACT (API_SPEC.md section 18), and they differ
+	// from the legacy site-key route on purpose: membership_type is optional
+	// and defaults to STANDARD, and a member is active unless told otherwise.
+	membershipType := strings.TrimSpace(in.MembershipType)
+	if membershipType == "" {
+		membershipType = DefaultMembershipType
+	}
 	member := models.Member{
 		MemberID:       in.MemberID,
 		FullName:       strings.TrimSpace(in.FullName),
-		MembershipType: strings.TrimSpace(in.MembershipType),
+		MembershipType: membershipType,
 		Active:         in.Active == nil || *in.Active,
 	}
 	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
@@ -221,22 +232,29 @@ func (s *MemberService) Update(ctx context.Context, tc *TenantContext, memberID 
 }
 
 // Delete soft-deletes a member and fans the removal out to terminals.
-// Requires members:write. Not-found when the id is unknown or already deleted:
-// unlike the legacy DELETE, the public API tells the caller the id was wrong.
-func (s *MemberService) Delete(ctx context.Context, tc *TenantContext, memberID string) error {
+// Requires members:write.
+//
+// IDEMPOTENT, AND SILENT ABOUT WHY. The contract (API_SPEC.md section 18) is
+// 204 for a member that was removed, a member that was already removed, and a
+// member that never existed -- including one that exists in another company.
+// A client retrying a delete must get the same answer twice, and a caller must
+// not be able to probe another tenant's ids by the difference between "gone"
+// and "never here". The returned bool says whether THIS call removed a row, so
+// the handler can audit the removal without auditing a no-op.
+func (s *MemberService) Delete(ctx context.Context, tc *TenantContext, memberID string) (bool, error) {
 	if err := tc.RequireScope(models.ScopeMembersWrite); err != nil {
-		return err
+		return false, err
 	}
-	return database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
+	removed := false
+	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
 		deleted, err := database.DeleteMemberTx(tx.Tx, tx.CompanyID(), memberID)
 		if err != nil {
 			return writeFailure(err)
 		}
-		if !deleted {
-			return ErrNotFound()
-		}
+		removed = deleted
 		return nil
 	})
+	return removed, err
 }
 
 // ---------------------------------------------------------------------------
@@ -266,9 +284,6 @@ func validateMemberInput(in MemberInput, creating bool) error {
 		}
 		if strings.TrimSpace(in.FullName) == "" {
 			return ErrMissingField("full_name")
-		}
-		if strings.TrimSpace(in.MembershipType) == "" {
-			return ErrMissingField("membership_type")
 		}
 	}
 	if len(in.FullName) > MaxMemberNameLength {

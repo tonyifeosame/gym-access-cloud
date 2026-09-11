@@ -10,7 +10,7 @@ import (
 
 // The one place a service failure becomes a public API response.
 //
-// A handler on the public tree (none exists yet) calls a service method and,
+// A handler on the public tree calls a service method and,
 // on error, calls RespondServiceError and returns. It does not inspect the
 // error, choose a status, or write a message: the code on the service.Error
 // selects all three from the registry in models/api_errors.go, and anything

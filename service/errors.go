@@ -155,6 +155,12 @@ func ErrRosterOverCapacity(serial string, rosterSize, capacity int) *Error {
 			serial, rosterSize, capacity), nil)
 }
 
+// ErrInvalidTimestamp is a query parameter or field that should be RFC 3339
+// and is not.
+func ErrInvalidTimestamp(param string) *Error {
+	return newError(models.CodeInvalidTimestamp, param, "", nil)
+}
+
 // ErrCursorInvalid covers a cursor that is malformed, signed by another key,
 // issued for another tenant or for a different query.
 func ErrCursorInvalid() *Error { return newError(models.CodeCursorInvalid, "cursor", "", nil) }

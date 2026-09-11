@@ -3929,7 +3929,7 @@ curl http://localhost:8080/api/public/v1/members/MEM001 \
 ```
 → `404` — the same body for a member in another company.
 
-#### Writes — `POST`, `PATCH`, `DELETE` (semantics fixed here; routes follow)
+#### Writes — `POST`, `PATCH`, `DELETE`
 
 Credential scope `members:write`. **These semantics differ from the legacy site-key
 routes in [section 3](#3-members) on purpose**, and the differences are the
@@ -3945,22 +3945,188 @@ contract:
 | `fingerprint_template` | accepted | **not a field**; sending it is `400 unknown_field` |
 
 `POST` creates → `201` with the member object. `PATCH` → `200` with the
-updated object. Both queue the same sync jobs as the legacy and console paths
-(`CREATE` / `UPDATE`; `DELETE` on a delete that removed something), in the same
-transaction as the write, so a terminal cannot tell which door a person came in
-by.
+updated object. `DELETE` → `204`. All three run the **same write path as the
+console and the legacy API**: a create writes the company's default access
+rule, and `CREATE` / `UPDATE` / `DELETE` sync jobs are queued in the same
+transaction as the write, so a terminal cannot tell which door a person came
+in by. Every write is recorded in the company's audit trail
+(`GET /console/audit`) with the actor role `INTEGRATION` and the credential's
+non-secret key prefix as the actor.
+
+**Deactivation and revocation are different acts, and both are here.**
+
+- **Deactivate** — `PATCH` with `{"active": false}`. Reversible. The person
+  stays on every terminal that holds them, marked inactive, and is refused
+  online with reason `PERSON_INACTIVE` and offline by the terminal itself.
+  `{"active": true}` restores them.
+- **Revoke** — `DELETE`. Not reversible from this API. The person is
+  soft-deleted, removed from every terminal's roster and their stored
+  templates erased there. To let them back in, create them again.
+
+**Members are company-wide.** A credential's site restriction narrows what
+it may read about sites and events; it does not narrow member writes, because
+a member belongs to the company rather than to a site. A restricted
+credential with `members:write` can create, change and remove any member.
+
+**Bodies are strict.** A body must be one JSON object; anything else is
+`400 invalid_field` on `param: "body"`. A field of the wrong type is
+`400 invalid_field` naming the field. Whitespace around `full_name` and
+`membership_type` is trimmed; `member_id` is validated and stored **as
+supplied** (FW-09).
+
+##### `POST /api/public/v1/members`
+
+| Field | Required | Notes |
+|---|---|---|
+| `member_id` | yes | FW-09: ≤ 31 printable ASCII characters, no spaces; unique per company |
+| `full_name` | yes | ≤ 200 characters |
+| `membership_type` | no | ≤ 50 characters; default `STANDARD` |
+| `active` | no | default `true` |
+
+```bash
+curl -X POST "http://localhost:8080/api/public/v1/members" \
+  -H 'Authorization: Bearer atp_live_…' \
+  -H 'Idempotency-Key: 0f3f1c0e-issue-1' \
+  -H 'Content-Type: application/json' \
+  -d '{"member_id":"MEM042","full_name":"Ada Lovelace"}'
+```
+
+```json
+{
+  "id": "0cae6469-6671-4611-9ca4-012a199c0fc8",
+  "member_id": "MEM042",
+  "full_name": "Ada Lovelace",
+  "membership_type": "STANDARD",
+  "active": true,
+  "created_at": "2026-09-11T19:20:46.204475Z",
+  "updated_at": "2026-09-11T19:20:46.204475Z"
+}
+```
+→ `201`
+
+The same request again with the same `Idempotency-Key` is the stored
+response — `201`, the same `id`, with `Idempotent-Replay: true` — and no
+second member. Without a key it is `409 member_id_already_exists`:
+
+```json
+{
+  "error": {
+    "type": "conflict_error",
+    "code": "member_id_already_exists",
+    "message": "A member with that id already exists.",
+    "param": "member_id",
+    "request_id": "ed315d247eb6e49a",
+    "doc_url": "https://docs.accesslink.store/errors/member_id_already_exists"
+  }
+}
+```
+→ `409`
+
+A field this version does not define — here the one that must never be
+accepted:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "unknown_field",
+    "message": "The field fingerprint_template is not recognised.",
+    "param": "fingerprint_template",
+    "request_id": "9334e2ce31af790b",
+    "doc_url": "https://docs.accesslink.store/errors/unknown_field"
+  }
+}
+```
+→ `400`
+
+##### `PATCH /api/public/v1/members/{member_id}`
+
+Any of `full_name`, `membership_type`, `active`; at least one. An absent field
+keeps its value; an explicitly empty `full_name` or `membership_type` is
+`400 invalid_field`. `member_id` in the body is `400 invalid_field` — it is
+the path parameter and cannot change.
+
+```bash
+curl -X PATCH "http://localhost:8080/api/public/v1/members/MEM042" \
+  -H 'Authorization: Bearer atp_live_…' \
+  -H 'Content-Type: application/json' \
+  -d '{"active":false}'
+```
+
+```json
+{
+  "id": "0cae6469-6671-4611-9ca4-012a199c0fc8",
+  "member_id": "MEM042",
+  "full_name": "Ada Lovelace",
+  "membership_type": "STANDARD",
+  "active": false,
+  "created_at": "2026-09-11T19:20:46.204475Z",
+  "updated_at": "2026-09-11T19:20:46.244582Z"
+}
+```
+→ `200`
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_field",
+    "message": "member_id identifies the member and cannot be changed.",
+    "param": "member_id",
+    "request_id": "c8167bf9f5e8329f",
+    "doc_url": "https://docs.accesslink.store/errors/invalid_field"
+  }
+}
+```
+→ `400`
+
+##### `DELETE /api/public/v1/members/{member_id}`
+
+```bash
+curl -X DELETE "http://localhost:8080/api/public/v1/members/MEM042" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+→ `204`, no body — whether the member was removed by this call, had already
+been removed, never existed, or belongs to another company. Only a removal
+queues a `DELETE` job and writes an audit record.
 
 | Error | Status | `code` |
 |---|---|---|
 | `member_id` or `full_name` absent on create | `400` | `missing_field` |
 | `member_id` fails FW-09 | `400` | `member_id_unusable` |
-| `full_name` over 200 characters | `400` | `invalid_field` |
+| `full_name` over 200 characters, empty on `PATCH`, or wrong type | `400` | `invalid_field` |
+| body absent, not an object, or nothing to change on `PATCH` | `400` | `invalid_field` (`param: "body"`) |
+| `member_id` in a `PATCH` body | `400` | `invalid_field` |
+| a field this version does not define | `400` | `unknown_field` |
 | `member_id` already used in this company | `409` | `member_id_already_exists` |
 | The change would give a terminal more people than it can hold | `409` | `roster_exceeds_terminal_capacity` |
-| `PATCH` of a missing member | `404` | `resource_not_found` |
+| `PATCH` of a missing member, or one in another company | `404` | `resource_not_found` |
 
-> **Examples: captured with the routes.** The write routes are not mounted in
-> this version.
+##### Idempotency
+
+Every write accepts an optional `Idempotency-Key` header (1–255 characters,
+unique per credential). A repeat of the **same** request under the same key
+within 24 hours is answered with the **stored** response — the original
+status and body, plus `Idempotent-Replay: true` — and the write does not run
+again. The same key with a **different** method, path or body is
+`409 idempotency_key_reuse`; a repeat while the first attempt is still running
+is `409 idempotency_in_progress`. Keys are scoped to the credential: another
+credential's key of the same value is unrelated.
+
+**A refusal is a decision and is stored too.** A `400` or `409` under a key is
+replayed exactly like a `201`; a client that corrects its request sends it
+under a **new** key. Only a `5xx` releases the key, so that a transient failure
+is retried rather than made permanent. A replayed body is the stored JSON
+value: semantically identical to the original, though its key order may
+differ.
+
+Keys are recommended on `POST`, where a retry without one can only be told
+apart from a duplicate by the `409`. On `PATCH` and `DELETE` a retry without a
+key is harmless — both are naturally repeatable — and a key simply saves the
+second execution.
+
+Writes are charged to the same credential and company allowances as reads
+(see *Rate limits*); there is no separate write allowance in this version.
 
 ### Sites
 
@@ -4111,19 +4277,224 @@ The restricted credential asking for the site it was not issued for:
 ```
 → `403`
 
+### Access
+
+A member's access rules and their standing. **Auth: integration credential,
+scope `access:read`.**
+
+**Rules, not a verdict.** Whether a person is admitted is decided at a
+terminal, at a moment, by the authorization engine with the terminal's site,
+timezone and schedules in hand; a yes/no without those would be wrong
+somewhere. What this route gives an integrator is the set of rules that
+decision draws on, each with whether it is in force **now** — the same
+reading the console gives an operator. Whether a given presentation was
+admitted is in *Events*, below.
+
+**No credentials.** Which fingerprints or cards a person has enrolled belongs
+to the platform and is not part of this contract; the object cannot carry it.
+
+#### `GET /api/public/v1/members/{member_id}/access`
+
+No query parameters — any is `400 unknown_parameter`. `404 resource_not_found`
+for a member that is unknown, removed, or in another company: one answer for
+all three.
+
+```bash
+curl "http://localhost:8080/api/public/v1/members/MEM042/access" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "member_id": "P4-EV-001",
+  "active": true,
+  "rules": [
+    {
+      "id": "a30363e0-f216-4b47-83f9-b45bd74ef19f",
+      "scope": "COMPANY",
+      "effect": "ALLOW",
+      "standing": "IN_FORCE"
+    }
+  ]
+}
+```
+→ `200`
+
+| Field | Type | Notes |
+|---|---|---|
+| `member_id` | string | the member the rules belong to |
+| `active` | bool | the member's own flag; an inactive member is refused everywhere whatever the rules say |
+| `rules[].id` | string (UUID) | the rule's public identifier |
+| `rules[].scope` | `COMPANY` · `SITE` · `TERMINAL` | where the rule applies |
+| `rules[].site_id` | string (UUID) | present for `SITE` |
+| `rules[].terminal_serial` | string | present for `TERMINAL` |
+| `rules[].effect` | `ALLOW` · `DENY` | |
+| `rules[].application` | string | present when the rule is narrowed to one capability (for example `ACCESS_CONTROL`); absent means every capability |
+| `rules[].schedule_id` | string (UUID) | present when the rule applies only inside a schedule's windows |
+| `rules[].starts_at`, `rules[].ends_at` | timestamp | the rule's validity window, either or both absent |
+| `rules[].standing` | `IN_FORCE` · `NOT_YET` · `EXPIRED` · `INACTIVE` | as of the request: switched off, not yet started, ended, or in force |
+
+Rules are listed for the member whatever the credential's site restriction:
+a `SITE` rule for a site outside the restriction still appears, because it
+describes the person rather than that site's data. A member created through
+this API carries the company's default rule (a company-wide `ALLOW`, unless
+the company's default policy says otherwise), which is why a fresh member has
+one rule here.
+
+### Events
+
+The record of what happened at the doors — every presentation a terminal
+reported, admitted or refused, and why. **Auth: integration credential, scope
+`events:read`.**
+
+```json
+{
+  "id": "b86cbd42-0a1c-40cc-b641-1e01ff7fc58a",
+  "event_type": "ACCESS_DENIED",
+  "decision": "DENIED",
+  "reason": "OUTSIDE_SCHEDULE",
+  "member_id": "P4-EV-001",
+  "member": "378bddff-8412-41e1-be6e-8a44829c0a69",
+  "subject": "P-AUTH",
+  "site_id": "96126c0e-0e81-4bbb-81ba-da4fb4b29081",
+  "terminal_serial": "P4-EV-A",
+  "occurred_at": "2026-09-11T12:14:00Z",
+  "occurred_at_trusted": true,
+  "recorded_at": "2026-09-11T19:20:46.187594Z"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string (UUID) | the event's public identifier |
+| `event_type` | string | uppercase token, for example `ACCESS_GRANTED`, `ACCESS_DENIED`; open, new types may appear |
+| `decision` | `GRANTED` · `DENIED` · `RECORDED` · `ERROR` | closed |
+| `reason` | string | machine-readable, for example `ALLOWED`, `NO_PERMISSION`, `OUTSIDE_SCHEDULE`, `PERSON_INACTIVE`, `PERSON_UNKNOWN`; absent when the terminal gave none; open |
+| `direction` | `IN` · `OUT` | absent when not applicable |
+| `application` | string | the capability that produced the event; absent for platform events |
+| `member_id` | string | the member the platform matched; **absent when nobody was matched** |
+| `member` | string (UUID) | that member's `id` |
+| `subject` | string | what the terminal read, kept so an unmatched attempt is still traceable |
+| `site_id` | string (UUID) | absent for an event with no site |
+| `terminal_serial` | string | absent when the terminal is unknown |
+| `occurred_at` | timestamp | when it happened **at the terminal** |
+| `occurred_at_trusted` | bool | whether the terminal's clock was believable; `false` means `occurred_at` is the server's arrival time |
+| `recorded_at` | timestamp | when the server heard about it — hours after `occurred_at` for a queued upload |
+
+**Absent from the type**, not merely omitted: the credential presented (its
+type names a biometric modality), the application payload, and every display
+name — a rename must not rewrite history.
+
+#### `GET /api/public/v1/events`
+
+Paginated as above, **newest `occurred_at` first**. Query parameters, all
+optional; anything else is `400 unknown_parameter`:
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `limit`, `cursor` | | as in *Pagination* |
+| `member_id` | string | events matched to that member |
+| `site_id` | string (UUID) | events at that site |
+| `decision` | `GRANTED` · `DENIED` · `RECORDED` · `ERROR` | case-insensitive; other values `400 invalid_field` |
+| `from` | timestamp | `occurred_at >= from`; not RFC 3339 → `400 invalid_timestamp` |
+| `to` | timestamp | `occurred_at < to`; must be after `from` → else `400 invalid_field` |
+
+The filters are part of the cursor: a `next_cursor` presented with different
+filters is `400 cursor_invalid`.
+
+**A filter that names something the credential cannot see is an empty page,
+not an error.** A `member_id` or `site_id` in another company, a site outside
+the credential's restriction, or a malformed `site_id` all return
+`"data": []` — indistinguishable from a site with no events, which is the
+point.
+
+**The credential's site restriction is a bound.** A credential restricted to
+sites sees only events at those sites; an event with no site (a company-level
+event) is not visible to it.
+
+```bash
+curl "http://localhost:8080/api/public/v1/events?limit=2" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "97f97eca-921e-4522-9ecd-7bafac6b181d",
+      "event_type": "ACCESS_DENIED",
+      "decision": "DENIED",
+      "reason": "PERSON_UNKNOWN",
+      "subject": "P-AUTH",
+      "site_id": "96126c0e-0e81-4bbb-81ba-da4fb4b29081",
+      "terminal_serial": "P4-EV-A",
+      "occurred_at": "2026-09-11T14:14:00Z",
+      "occurred_at_trusted": true,
+      "recorded_at": "2026-09-11T19:20:46.189826Z"
+    },
+    {
+      "id": "b86cbd42-0a1c-40cc-b641-1e01ff7fc58a",
+      "event_type": "ACCESS_DENIED",
+      "decision": "DENIED",
+      "reason": "OUTSIDE_SCHEDULE",
+      "member_id": "P4-EV-001",
+      "member": "378bddff-8412-41e1-be6e-8a44829c0a69",
+      "subject": "P-AUTH",
+      "site_id": "96126c0e-0e81-4bbb-81ba-da4fb4b29081",
+      "terminal_serial": "P4-EV-A",
+      "occurred_at": "2026-09-11T12:14:00Z",
+      "occurred_at_trusted": true,
+      "recorded_at": "2026-09-11T19:20:46.187594Z"
+    }
+  ],
+  "has_more": true,
+  "next_cursor": "Ao7gOw6Tc1Tkea7RH3Rea183EU0WTJc8emJQwQZobSl7pcOwbG2gfPfZNKG2rNm-ttNdbRGJ0TXbRs3Gb33MqhXSvxBtFenXRTdBLx5pw0WfhYnRi33_0ML_vaBj9VXFSslqspthqGJsPeQPCP8"
+}
+```
+→ `200`
+
+The first event above matched nobody — no `member_id`, no `member` — and the
+`subject` is what the terminal read. Events are retained indefinitely in this
+version, so their cursors do not expire.
+
+```bash
+curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
+  -H 'Authorization: Bearer atp_live_…'
+```
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "invalid_timestamp",
+    "message": "A timestamp could not be read. Use RFC 3339, for example 2026-09-09T17:00:00Z.",
+    "param": "from",
+    "request_id": "312d5010d71e231c",
+    "doc_url": "https://docs.accesslink.store/errors/invalid_timestamp"
+  }
+}
+```
+→ `400`
+
 ### Endpoints in this version
 
 | Method | Path | Credential scope |
 |---|---|---|
 | `GET` | `/api/public/v1/members` | `members:read` |
 | `GET` | `/api/public/v1/members/{member_id}` | `members:read` |
+| `POST` | `/api/public/v1/members` | `members:write` |
+| `PATCH` | `/api/public/v1/members/{member_id}` | `members:write` |
+| `DELETE` | `/api/public/v1/members/{member_id}` | `members:write` |
+| `GET` | `/api/public/v1/members/{member_id}/access` | `access:read` |
 | `GET` | `/api/public/v1/sites` | `sites:read` |
 | `GET` | `/api/public/v1/sites/{site_id}` | `sites:read` |
+| `GET` | `/api/public/v1/events` | `events:read` |
 
-The member write routes are specified above and follow once idempotent replay
-(`Idempotency-Key`) and the write rate class are mounted with them. Terminals,
-events, access logs and webhooks have credential scopes but no contract yet; a route for
-any of them is added to this section before it is served, never after.
+`members:write` implies `members:read`; a credential issued with the former
+carries both. Terminals and webhooks have credential scopes but no contract
+yet; a route for either is added to this section before it is served, never
+after. There is no route that unlocks a door, commands a terminal, or touches
+biometric material, and none is planned for this tree.
 
 ---
 
@@ -4156,6 +4527,9 @@ its return exists and passes.
    service-wide bucket. A valid integration credential is never delayed by
    that; operators sharing one login allowance is a platform issue tracked
    separately as [issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8).
+   **Public API writes share the read allowances**: a `POST`, `PATCH` or
+   `DELETE` spends the same credential and company tokens as a `GET`; a
+   separate write allowance is not defined in this version.
 4. **The deprecated site-key + serial device auth is still accepted.** It cannot
    distinguish one terminal at a site from another beyond the serial the caller
    claims. It cannot be removed until firmware self-registration exists (FW-05).
