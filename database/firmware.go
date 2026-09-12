@@ -57,8 +57,9 @@ const deviceInventoryColumns = `
 	d.release_state, d.release_ordered_at, d.release_ordered_by_email,
 	d.release_order_mac IS NOT NULL AS release_verifiable,
 
-	-- Readiness (032): the snapshot this terminal was last seeded with, and
-	-- where it stands. NULL job means nothing gates it.
+	-- Readiness (032): whether the gate was armed at collection, the snapshot
+	-- this terminal was last seeded with, and where that job stands.
+	d.readiness_armed_at IS NOT NULL AS readiness_armed,
 	d.readiness_job_id,
 	(SELECT j.status FROM sync_jobs j WHERE j.id = d.readiness_job_id) AS readiness_job_status`
 
@@ -118,6 +119,7 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			releaseOrderedAt  sql.NullTime
 			releaseOrderedBy  sql.NullString
 			releaseVerifiable bool
+			readinessArmed    bool
 			readinessJobID    sql.NullInt64
 			readinessStatus   sql.NullString
 		)
@@ -131,7 +133,7 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			&d.MemberCapacity, &d.RosterOverflowAt, &d.RosterOverflowCount,
 			&d.ProvisionedVia, &capabilities,
 			&releaseState, &releaseOrderedAt, &releaseOrderedBy, &releaseVerifiable,
-			&readinessJobID, &readinessStatus,
+			&readinessArmed, &readinessJobID, &readinessStatus,
 		)
 		if err != nil {
 			return nil, err
@@ -149,7 +151,7 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			}
 			d.Release = summary
 		}
-		d.Readiness = readinessFor(readinessJobID, readinessStatus)
+		d.Readiness = readinessFor(readinessArmed, readinessJobID, readinessStatus)
 
 		// A malformed list is dropped rather than failing the read. This column
 		// is filled by devices; one terminal that wrote nonsense into it must
@@ -165,13 +167,23 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 
 // readinessFor derives the console's readiness answer from the gate columns.
 //
-// READY when nothing gates the terminal, or when the snapshot it was given has
-// been acknowledged. SETTING_UP for every other state of that job -- PENDING,
-// DELIVERED, FAILED -- and for CANCELLED too, which recordReadinessSnapshotTx
-// prevents from persisting but which must not read as ready if it ever did.
-func readinessFor(jobID sql.NullInt64, status sql.NullString) models.TerminalReadiness {
+// READY when the snapshot the terminal was given has been acknowledged, or
+// when nothing has ever gated it -- a row from before the gate existed.
+// SETTING_UP for every other state of that job -- PENDING, DELIVERED, FAILED
+// -- and for CANCELLED too, which recordReadinessSnapshotTx prevents from
+// persisting but which must not read as ready if it ever did.
+//
+// An ARMED row with NO job is SETTING_UP, not READY. That is the collection
+// whose snapshot was refused for capacity: the unit has been handed a
+// credential and has never been told what to hold, and on a transferred unit
+// it may still hold the previous owner's roster. READY there would be the
+// exact false statement the gate exists to prevent.
+func readinessFor(armed bool, jobID sql.NullInt64, status sql.NullString) models.TerminalReadiness {
 	out := models.TerminalReadiness{State: models.ReadinessReady}
 	if !jobID.Valid {
+		if armed {
+			out.State = models.ReadinessSettingUp
+		}
 		return out
 	}
 	id := jobID.Int64

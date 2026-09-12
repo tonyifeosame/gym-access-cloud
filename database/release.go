@@ -101,6 +101,13 @@ var (
 	// ErrReleaseReceiptMismatch: a confirm whose receipt does not verify
 	// against the order this row carries.
 	ErrReleaseReceiptMismatch = errors.New("that release receipt does not verify")
+
+	// ErrReleaseMismatch: a force that names a release_id other than the one
+	// outstanding. The operator attested to an order that no longer exists --
+	// it was cancelled and another placed while their page was open -- and
+	// must read the current one before attesting again.
+	ErrReleaseMismatch = errors.New(
+		"that release is no longer the one outstanding; reload and review the current order")
 )
 
 // ReleaseOrder is the object a terminal verifies and acts on.
@@ -603,16 +610,36 @@ func nullableJSON(raw json.RawMessage) any {
 // OPERATOR path. Requires the row to be ORDERED -- a force is an escalation of
 // an order the operator already placed and confirmed the consequences of,
 // never a first step. The handler owns the typed attestation.
-func ForceTerminalRelease(companyID int64, serial, reason string) (*ReleaseFinalization, error) {
+//
+// BOUND TO THE ORDER IT NAMES, when the caller names one. The attestation was
+// typed against a specific order, so naming the outstanding order finalizes
+// it and naming any other is refused (ErrReleaseMismatch): the operator is
+// looking at a stale page -- the order was cancelled and another placed while
+// it was open -- and attesting to something that is not what would happen. A
+// caller that names no order gets the outstanding one, or ErrReleaseNotOrdered.
+//
+// A RETRY of a force that succeeded finds no live row: the console route's
+// grant check answers 404 before this is reached, exactly as a retried
+// retirement does, and the console reads that as "gone". Nothing a retry can
+// do reaches a second order.
+func ForceTerminalRelease(companyID int64, serial, reason, releaseID string) (*ReleaseFinalization, error) {
+	releaseID = strings.TrimSpace(releaseID)
+	if releaseID != "" && !looksLikeUUID(releaseID) {
+		return nil, ErrReleaseMismatch
+	}
+
 	tx, err := DB.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	var deviceID int64
+	var (
+		deviceID    int64
+		outstanding sql.NullString
+	)
 	err = tx.QueryRow(`
-		SELECT d.id
+		SELECT d.id, d.release_id::text
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		 WHERE d.serial_number = $2
@@ -620,7 +647,7 @@ func ForceTerminalRelease(companyID int64, serial, reason string) (*ReleaseFinal
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL
 		   AND d.release_state = 'ORDERED'
-		 FOR UPDATE OF d`, companyID, serial).Scan(&deviceID)
+		 FOR UPDATE OF d`, companyID, serial).Scan(&deviceID, &outstanding)
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, lookupErr := loadTerminalRelease(tx, companyID, serial); lookupErr != nil {
 			return nil, lookupErr
@@ -629,6 +656,9 @@ func ForceTerminalRelease(companyID int64, serial, reason string) (*ReleaseFinal
 	}
 	if err != nil {
 		return nil, err
+	}
+	if releaseID != "" && !strings.EqualFold(outstanding.String, releaseID) {
+		return nil, ErrReleaseMismatch
 	}
 
 	out, err := finalizeReleaseTx(tx, deviceID, ReleaseConfirmedByOperator, reason, nil)
@@ -794,27 +824,39 @@ func consumeReleaseReceiptTx(tx *sql.Tx, serial, releaseID string,
 
 // ReleaseOrderForDevice is the order carried on the heartbeat while the
 // authenticated device's row is ORDERED and the order can be verified.
+//
+// ONLY FOR A TERMINAL THAT HAS REPORTED terminal_release. Firmware that has
+// not cannot act on the order, and is not merely indifferent to it: it parses
+// the heartbeat into a fixed document sized for the fields it knows, and an
+// object it cannot use can crowd out the firmware offer beside it -- which is
+// the one thing that would make it capable. So the order waits until the
+// capability is reported. The heartbeat records capabilities before this is
+// read, so a unit reporting the capability for the first time is answered
+// with the order on that same heartbeat. The console reads the same token as
+// terminal_capable and offers the physical procedure meanwhile.
 func ReleaseOrderForDevice(deviceID int64) (*ReleaseOrder, error) {
 	var (
-		out ReleaseOrder
-		id  sql.NullString
-		at  sql.NullTime
-		mac []byte
+		out  ReleaseOrder
+		id   sql.NullString
+		at   sql.NullTime
+		mac  []byte
+		caps []byte
 	)
 	err := DB.QueryRow(`
-		SELECT serial_number, release_id::text, release_ordered_at, release_order_mac
+		SELECT serial_number, release_id::text, release_ordered_at, release_order_mac,
+		       capabilities
 		  FROM devices
 		 WHERE id = $1
 		   AND deleted_at IS NULL
 		   AND release_state = 'ORDERED'`, deviceID).
-		Scan(&out.SerialNumber, &id, &at, &mac)
+		Scan(&out.SerialNumber, &id, &at, &mac, &caps)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if len(mac) != sha256.Size {
+	if len(mac) != sha256.Size || !capabilitiesInclude(caps, CapabilityTerminalRelease) {
 		return nil, nil
 	}
 	out.ReleaseID = id.String

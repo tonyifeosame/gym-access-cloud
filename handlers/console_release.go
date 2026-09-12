@@ -118,7 +118,10 @@ func ConsoleCancelTerminalRelease(c *gin.Context) {
 // THE ESCALATION, and the only way a release completes without the terminal
 // proving it wiped. Requires an outstanding order (an operator cannot force
 // what they never ordered) and an explicit attestation in the body, which the
-// console only sets after a typed confirmation. The consequence -- the unit
+// console only sets after a typed confirmation. The body names the order the
+// attestation was typed against; a force naming any other order is refused
+// with RELEASE_MISMATCH, so a stale page cannot finalize an order its operator
+// never read. The consequence -- the unit
 // keeps admitting this company's members under this company's offline policy
 // until it reconnects or is wiped at the unit -- is the operator's to accept,
 // and it is recorded with the action.
@@ -152,13 +155,16 @@ func ConsoleForceTerminalRelease(c *gin.Context) {
 		return
 	}
 
-	fin, err := database.ForceTerminalRelease(companyID, serial, req.Reason)
+	fin, err := database.ForceTerminalRelease(companyID, serial, req.Reason, req.ReleaseID)
 	switch {
 	case errors.Is(err, models.ErrDeviceNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
 		return
 	case errors.Is(err, database.ErrReleaseNotOrdered):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "RELEASE_NOT_ORDERED"})
+		return
+	case errors.Is(err, database.ErrReleaseMismatch):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "RELEASE_MISMATCH"})
 		return
 	case err != nil:
 		logError(c, "console force terminal release", err)

@@ -3455,7 +3455,11 @@ release record. It is reached by:
 | `OPERATOR` | `POST /console/terminals/{serial}/release/force` with `attest: true`, ORDERED only |
 | `PLATFORM` | `POST /platform/terminals/{serial}/release`, which orders if nothing is ordered and then forces |
 
-Every transition is idempotent on `release_id`.
+Every transition is keyed on `release_id`: a repeated order returns the
+existing one; a repeated confirm or announce-with-receipt is answered as
+already done; a force names the order it attests to and is refused for any
+other. A force or cancel retried after the row is gone is a `404`, exactly as
+a retried retirement is, and changes nothing.
 
 #### The order and the receipt
 
@@ -3482,7 +3486,11 @@ mac `129b952d…54da9f`, receipt `11a15d44…723be1`.
 #### Device routes
 
 **`POST /api/v1/devices/heartbeat`** — response gains, while ORDERED and on
-every heartbeat until confirmed:
+every heartbeat until confirmed, **once the terminal has reported the
+`terminal_release` capability** (firmware that cannot act on the order is not
+sent it — its heartbeat parser is sized for the fields it knows, and the order
+must not crowd out the firmware offer that would make it capable; the first
+heartbeat that reports the capability is answered with the order):
 
 ```json
 {"release_order": {"serial_number": "AT-A1B2C3",
@@ -3525,7 +3533,7 @@ presenting it), `UNKNOWN` (nothing matches — stop presenting it), `ABSENT`.
 | `POST /console/terminals/{serial}/release` `{reason?}` | `200` the release facts; idempotent — a second order returns the first |
 | `GET /console/terminals/{serial}/release` | `200` the facts; `state` is `""` or `ORDERED` |
 | `DELETE /console/terminals/{serial}/release` | `200` cancelled and a FULL_SYNC snapshot queued; `409 RELEASE_NOT_ORDERED` |
-| `POST /console/terminals/{serial}/release/force` `{attest: true, reason?}` | `200` released by OPERATOR; `400 ATTESTATION_REQUIRED`; `409 RELEASE_NOT_ORDERED` |
+| `POST /console/terminals/{serial}/release/force` `{attest: true, release_id?, reason?}` | `200` released by OPERATOR; `400 ATTESTATION_REQUIRED`; `409 RELEASE_NOT_ORDERED`; `409 RELEASE_MISMATCH` when `release_id` names any order but the outstanding one (a stale page) |
 
 The facts: `state`, `release_id`, `ordered_at`, `ordered_by_email`, `reason`,
 `terminal_capable` (the unit reported `terminal_release`), `order_verifiable`
@@ -3548,14 +3556,18 @@ RELEASED row is deleted and the serial verdicts `NEW`.
 
 #### Readiness
 
-Every announcement collection now seeds the new row with a **FULL_SYNC
-snapshot** ahead of the CREATE records (`compactDeviceBacklogTx`), and records
-the snapshot's id as `devices.readiness_job_id`. The terminal is `SETTING_UP`
-until it acknowledges that job and `READY` after — on a transferred unit the
-moment the previous owner's roster is provably gone, and on a new unit merely
-honest. A capacity refusal keeps the CREATE seeding and records the overflow
-rather than failing the claim. Claim-code and site-key registration are
-unchanged.
+Every announcement collection now **arms** the row's readiness gate
+(`devices.readiness_armed_at`), seeds it with a **FULL_SYNC snapshot** ahead
+of the CREATE records (`compactDeviceBacklogTx`), and records the snapshot's
+id as `devices.readiness_job_id`. The terminal is `SETTING_UP` until it
+acknowledges that job and `READY` after — on a transferred unit the moment the
+previous owner's roster is provably gone, and on a new unit merely honest. A
+capacity refusal keeps the CREATE seeding and records the overflow rather
+than failing the claim; the row is then armed with **no** job and stays
+`SETTING_UP` until a snapshot that fits is queued and acknowledged — it is
+never `READY` by the accident of a NULL job. A row from before the gate
+existed is neither armed nor gated and reads `READY`. Claim-code and site-key
+registration are unchanged.
 
 #### Event attribution guard
 

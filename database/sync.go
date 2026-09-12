@@ -864,11 +864,18 @@ func recordReadinessSnapshotTx(tx *sql.Tx, deviceID, snapshotID int64) error {
 // record it, and the claim succeeds. Refusing a customer's setup because their
 // roster is larger than the unit would be the wrong moment to say so.
 //
-// readiness_job_id is set to NULL first so the gate follows THIS snapshot even
-// when the row is a re-provisioned one whose earlier snapshot had completed.
+// The gate is ARMED here -- readiness_armed_at -- and readiness_job_id is set
+// to NULL first, so the gate follows THIS snapshot even when the row is a
+// re-provisioned one whose earlier snapshot had completed. Arming is separate
+// from recording the snapshot because the snapshot may be refused below: an
+// armed row with no job reads SETTING_UP (readinessFor), which is the truth
+// about a unit that has never been told what to hold.
 func seedCollectedDeviceTx(tx *sql.Tx, deviceID int64) error {
-	if _, err := tx.Exec(
-		`UPDATE devices SET readiness_job_id = NULL WHERE id = $1`, deviceID); err != nil {
+	if _, err := tx.Exec(`
+		UPDATE devices
+		   SET readiness_armed_at = CURRENT_TIMESTAMP,
+		       readiness_job_id = NULL
+		 WHERE id = $1`, deviceID); err != nil {
 		return err
 	}
 	if _, err := compactDeviceBacklogTx(tx, deviceID, "superseded by the collection snapshot"); err != nil {

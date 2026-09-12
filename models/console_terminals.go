@@ -135,6 +135,13 @@ type ConsoleTerminalReleaseRequest struct {
 type ConsoleTerminalForceReleaseRequest struct {
 	Attest bool   `json:"attest"`
 	Reason string `json:"reason,omitempty"`
+
+	// ReleaseID names the order the attestation was typed against. Optional,
+	// and the console always sends it: naming any order but the outstanding
+	// one is a 409 RELEASE_MISMATCH rather than a force of whatever happens
+	// to be outstanding now, so a stale page cannot finalize an order its
+	// operator never read.
+	ReleaseID string `json:"release_id,omitempty"`
 }
 
 // ConsoleTerminalRelease is the release facts for a live terminal.

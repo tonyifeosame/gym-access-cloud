@@ -56,6 +56,13 @@
 -- terminal has acknowledged it, and "ready" only after. On a transferred unit
 -- that is the moment the previous owner's roster is provably gone; on a new
 -- unit it is merely honest.
+--
+-- The gate is ARMED at collection (readiness_armed_at) separately from the
+-- snapshot being recorded (readiness_job_id), because the two can come apart:
+-- a collection whose snapshot was refused for capacity has armed a gate with
+-- no job to pass it. Such a row must read SETTING_UP -- it has never been told
+-- what to hold -- and not READY by the accident of a NULL job. A row from
+-- before this migration has neither and reads READY, which is what it was.
 
 ALTER TABLE devices
     ADD COLUMN IF NOT EXISTS release_state            VARCHAR(10),
@@ -68,6 +75,7 @@ ALTER TABLE devices
     ADD COLUMN IF NOT EXISTS release_confirmed_at     TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS release_confirmed_by     VARCHAR(10),
     ADD COLUMN IF NOT EXISTS release_report           JSONB,
+    ADD COLUMN IF NOT EXISTS readiness_armed_at       TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS readiness_job_id         BIGINT;
 
 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_release_ordered_by_fkey;
@@ -131,6 +139,12 @@ COMMENT ON COLUMN devices.release_report IS
     'What the terminal reported having erased -- counts only, never biometric '
     'material -- when it confirmed the release.';
 
+COMMENT ON COLUMN devices.readiness_armed_at IS
+    'When this row was last collected through an announcement and its '
+    'readiness gate armed. NULL on a row provisioned before the gate existed. '
+    'An armed row with no readiness_job_id was refused its snapshot for '
+    'capacity and is SETTING_UP until one is queued and acknowledged.';
+
 COMMENT ON COLUMN devices.readiness_job_id IS
-    'The FULL_SYNC snapshot this terminal was seeded with at collection. The '
-    'terminal is READY once that job is COMPLETED and SETTING_UP until then.';
+    'The FULL_SYNC snapshot this terminal was last seeded with. The terminal '
+    'is READY once that job is COMPLETED and SETTING_UP until then.';
