@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/middleware"
 	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
@@ -170,12 +173,157 @@ func DeviceHeartbeat(c *gin.Context) {
 		offer = nil
 	}
 
+	// The release order, while one is outstanding for this terminal (032).
+	//
+	// ON EVERY HEARTBEAT until the terminal confirms, because a heartbeat is
+	// at-least-once delivery and the terminal dedupes on release_id. Best
+	// effort on the read, like the two above: a heartbeat must record
+	// liveness whatever else fails, and an order that could not be read is
+	// simply re-sent on the next one.
+	var order *models.DeviceReleaseOrder
+	if ro, err := database.ReleaseOrderForDevice(c.GetInt64("device_id")); err != nil {
+		logError(c, "resolve release order", err)
+	} else if ro != nil {
+		order = &models.DeviceReleaseOrder{
+			SerialNumber: ro.SerialNumber,
+			ReleaseID:    ro.ReleaseID,
+			OrderedAt:    ro.OrderedAt.Unix(),
+			MAC:          ro.MACHex(),
+		}
+	}
+
 	c.JSON(http.StatusOK, models.DeviceHeartbeatResponse{
 		ProtocolVersion: models.SyncProtocolVersion,
 		DeviceID:        c.GetString("device_serial"),
 		ServerTime:      time.Now().UTC(),
 		PendingJobs:     pending,
 		FirmwareUpdate:  offer,
+		ReleaseOrder:    order,
+	})
+}
+
+// ConfirmDeviceRelease handles POST /devices/release/confirm
+//
+// The terminal's authenticated proof that it executed a release order: the
+// receipt is an HMAC only the holder of this credential can produce, over the
+// order this row carries. Finalizing revokes that very credential, so this is
+// the last authenticated call the terminal makes -- and the reason it treats a
+// 401 here as "already released" rather than as a failure.
+//
+// A receipt that does not verify changes nothing and is a 409: the terminal
+// has computed something the platform cannot accept, which is worth a
+// distinct answer because the remedy (re-fetch the order, recompute) is not
+// the remedy for "there is no order" (stop).
+func ConfirmDeviceRelease(c *gin.Context) {
+	var req models.DeviceReleaseConfirmRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "release_id and receipt are required"})
+		return
+	}
+	receipt, err := hex.DecodeString(req.Receipt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "receipt must be hex"})
+		return
+	}
+
+	fin, err := database.ConfirmTerminalRelease(c.GetInt64("device_id"), req.ReleaseID,
+		receipt, req.Report)
+	switch {
+	case errors.Is(err, database.ErrReleaseNotOrdered):
+		c.JSON(http.StatusNotFound, gin.H{"error": "No release is ordered for this terminal",
+			"code": "RELEASE_NOT_ORDERED"})
+		return
+	case errors.Is(err, database.ErrReleaseReceiptMismatch):
+		c.JSON(http.StatusConflict, gin.H{"error": "The receipt does not verify",
+			"code": "RELEASE_RECEIPT_MISMATCH"})
+		return
+	case err != nil:
+		logError(c, "confirm device release", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to confirm the release"})
+		return
+	}
+
+	auditReleaseConfirmed(c, fin, req.Report)
+
+	c.JSON(http.StatusOK, models.DeviceReleaseConfirmResponse{
+		SerialNumber: fin.SerialNumber,
+		ReleaseID:    fin.ReleaseID,
+		Released:     true,
+	})
+}
+
+// auditReleaseConfirmed writes the terminal's confirmation into the trail of
+// the company that lost it.
+//
+// NO OPERATOR ON THE REQUEST, exactly as credential collection is audited: the
+// actor named is the role that performed it. The report is counts only -- the
+// terminal never sends biometric material, and the schema would refuse it as
+// anything but an object.
+func auditReleaseConfirmed(c *gin.Context, fin *database.ReleaseFinalization, report []byte) {
+	if fin == nil || fin.AlreadyReleased {
+		return
+	}
+	changes := gin.H{
+		"release_id":             fin.ReleaseID,
+		"site":                   fin.SiteName,
+		"device_name":            fin.DeviceName,
+		"confirmed_by":           fin.ConfirmedBy,
+		"pending_jobs_cancelled": fin.PendingJobsCancelled,
+		"announcements_voided":   fin.AnnouncementsVoided,
+	}
+	if len(report) > 0 {
+		changes["report"] = json.RawMessage(report)
+	}
+	database.WriteAuditEvent(database.AuditEntry{
+		CompanyID:   fin.CompanyID,
+		ActorRole:   actorRoleTerminal,
+		IPAddress:   c.ClientIP(),
+		UserAgent:   c.Request.UserAgent(),
+		RequestID:   middleware.RequestID(c),
+		Action:      auditTerminalReleaseConfirmed,
+		TargetType:  auditTargetTerminal,
+		TargetLabel: fin.SerialNumber,
+		Changes:     changes,
+	})
+}
+
+// actorRoleTerminal names the credential class in the audit trail for actions
+// a terminal performed on its own, with no human on the request.
+const actorRoleTerminal = "TERMINAL"
+
+// GetReleaseOrderBySerial handles GET /devices/release-order?serial=
+//
+// UNAUTHENTICATED, on the announce rate limiter, and the only thing it will
+// say is whether a release order exists for a serial and what it is. A
+// terminal calls it when its credential is refused, to find out whether the
+// 401 is a release it must execute or something else. The MAC is unforgeable
+// and unusable without the terminal's own key, so this discloses nothing a
+// caller could act on.
+//
+// 204 for "no order" AND for an unknown serial, uniformly.
+func GetReleaseOrderBySerial(c *gin.Context) {
+	serial := c.Query("serial")
+	if serial == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "serial is required"})
+		return
+	}
+	order, err := database.ReleaseOrderForSerial(serial)
+	if err != nil {
+		logError(c, "release order by serial", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read the release order"})
+		return
+	}
+	if order == nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"release_order": models.DeviceReleaseOrder{
+			SerialNumber: order.SerialNumber,
+			ReleaseID:    order.ReleaseID,
+			OrderedAt:    order.OrderedAt.Unix(),
+			MAC:          order.MACHex(),
+		},
 	})
 }
 
@@ -442,6 +590,28 @@ func CompleteDeviceJob(c *gin.Context) {
 		logError(c, "read sync backlog", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read sync backlog"})
 		return
+	}
+
+	// READY (032). The acknowledgement that passed this terminal's readiness
+	// gate is recorded for the company, because on a transferred unit it is
+	// the moment the previous owner's roster is provably gone. Best effort:
+	// the acknowledgement itself is already committed.
+	if result.Status == "COMPLETED" {
+		if ready, err := database.ReadinessPassed(deviceID, jobID); err != nil {
+			logError(c, "check readiness", err)
+		} else if ready {
+			database.WriteAuditEvent(database.AuditEntry{
+				CompanyID:   c.GetInt64("company_id"),
+				ActorRole:   actorRoleTerminal,
+				IPAddress:   c.ClientIP(),
+				UserAgent:   c.Request.UserAgent(),
+				RequestID:   middleware.RequestID(c),
+				Action:      auditTerminalReady,
+				TargetType:  auditTargetTerminal,
+				TargetLabel: c.GetString("device_serial"),
+				Changes:     gin.H{"job_id": jobID},
+			})
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

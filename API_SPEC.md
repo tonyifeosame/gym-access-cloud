@@ -3426,6 +3426,156 @@ did is a **field** event (`CREDENTIAL_ENROLLED`), carrying `decision: RECORDED`
 rather than `GRANTED` or `DENIED`, because nothing was admitted or refused and no
 door moved. Two authors, two trails, and neither is a summary of the other.
 
+### 17.8 Terminal release — moving a unit between companies
+
+**Migration 032. Routes on three surfaces, one state machine, and one
+invariant: there is no state in which a new owner has the terminal while the
+previous owner's members and templates are still usable on it.**
+
+#### The state machine
+
+```
+live row ──order (ADMIN)──► ORDERED ──finalize──► RELEASED (soft-deleted, serial free)
+                              │
+                              └──cancel (ADMIN, ORDERED only)──► live row
+```
+
+*ORDERED* keeps the row **live and authenticating**: the terminal must be able
+to fetch the order on its heartbeat, flush its door events to the company it
+still belongs to, and confirm — all with the credential it still holds. Queued
+roster work is cancelled at order time and none is queued while ORDERED.
+
+*RELEASED* is exactly what retirement always did — credential hash cleared,
+soft-delete, queued work cancelled, announcements in flight voided — plus the
+release record. It is reached by:
+
+| finalized by | how |
+|---|---|
+| `TERMINAL` | the terminal's receipt, on `POST /devices/release/confirm` or carried on `POST /devices/announce` |
+| `OPERATOR` | `POST /console/terminals/{serial}/release/force` with `attest: true`, ORDERED only |
+| `PLATFORM` | `POST /platform/terminals/{serial}/release`, which orders if nothing is ordered and then forces |
+
+Every transition is idempotent on `release_id`.
+
+#### The order and the receipt
+
+```
+mac     = HMAC-SHA256(key = raw bytes of sha256(device_key),
+                      msg = "accesslink-release-v1|" + serial + "|" + release_id + "|" + ordered_at)
+receipt = HMAC-SHA256(key = the same,
+                      msg = "accesslink-receipt-v1|" + serial + "|" + release_id)
+```
+
+The platform stores only `sha256(device_key)`; the terminal holds the key and
+derives the same hash. Both can therefore compute the MAC and nothing else can.
+A terminal re-keyed by its next owner computes a different key and ignores a
+stale order. `ordered_at` is epoch **seconds**, and the stored timestamp is
+truncated to the second so the row and the message cannot disagree. The MAC
+stays on the row after the hash is cleared, so a terminal that was offline
+when an operator forced the release can still verify the order later.
+
+Shared test vectors (`terminal_release_test.go`, firmware
+`test_release_order`): device key `vector-device-key`, serial `AT-VECTOR01`,
+release id `0f5b1e7c-9a2d-4c3e-8f10-5a6b7c8d9e0f`, ordered at `1757700000` →
+mac `129b952d…54da9f`, receipt `11a15d44…723be1`.
+
+#### Device routes
+
+**`POST /api/v1/devices/heartbeat`** — response gains, while ORDERED and on
+every heartbeat until confirmed:
+
+```json
+{"release_order": {"serial_number": "AT-A1B2C3",
+                   "release_id": "0f5b1e7c-…", "ordered_at": 1757700000,
+                   "mac": "129b952d…"}}
+```
+
+**`POST /api/v1/devices/release/confirm`** — device key.
+
+```json
+{"release_id": "0f5b1e7c-…", "receipt": "11a15d44…",
+ "report": {"members": 7, "templates_flash": 7, "templates_sensor": 5,
+            "sensor_erased": true, "events_flushed": 2, "events_discarded": 0}}
+```
+
+→ `200 {"serial_number": …, "release_id": …, "released": true}`. Accepting it
+**revokes the credential that authenticated it**, so this is the last
+authenticated call the terminal makes; a retry is a `401`, which the terminal
+reads as "already released". `404 RELEASE_NOT_ORDERED` when no order matches,
+`409 RELEASE_RECEIPT_MISMATCH` when the receipt does not verify — nothing
+changes on either. `report` is optional, an object, ≤ 2 KB, counts only.
+
+**`GET /api/v1/devices/release-order?serial=`** — unauthenticated, on the
+announce rate limiter. `200 {"release_order": {…}}` when an order exists for
+the serial (live or released, newest first); `204` for no order **and** for an
+unknown serial, uniformly; `400` without a serial. A terminal calls it when its
+credential is refused, to tell a release from a rotated key.
+
+**`POST /api/v1/devices/announce`** — request may carry
+`"release_receipt": {"release_id": …, "receipt": …}`. A receipt that verifies
+finalizes the release **before** the announcement is created, so the fresh
+announcement is not among the rows voided. The response gains
+`receipt_status`: `CONSUMED` (this or an earlier announce finalized it — stop
+presenting it), `UNKNOWN` (nothing matches — stop presenting it), `ABSENT`.
+
+#### Console routes — ADMIN, on the caller's own live row
+
+| route | answer |
+|---|---|
+| `POST /console/terminals/{serial}/release` `{reason?}` | `200` the release facts; idempotent — a second order returns the first |
+| `GET /console/terminals/{serial}/release` | `200` the facts; `state` is `""` or `ORDERED` |
+| `DELETE /console/terminals/{serial}/release` | `200` cancelled and a FULL_SYNC snapshot queued; `409 RELEASE_NOT_ORDERED` |
+| `POST /console/terminals/{serial}/release/force` `{attest: true, reason?}` | `200` released by OPERATOR; `400 ATTESTATION_REQUIRED`; `409 RELEASE_NOT_ORDERED` |
+
+The facts: `state`, `release_id`, `ordered_at`, `ordered_by_email`, `reason`,
+`terminal_capable` (the unit reported `terminal_release`), `order_verifiable`
+(the row had a credential hash to key the order with), `last_seen_at`. A
+console offers the automated workflow only when `terminal_capable` is true;
+otherwise it presents the physical procedure and the force path.
+
+`GET /console/terminals` and `/console/terminals/{serial}` gain
+`release: {state, ordered_at, ordered_by_email, order_verifiable}` (present
+only while ORDERED) and `readiness: {state: READY | SETTING_UP, job_id?}`
+(always).
+
+#### Adoption gating
+
+`POST /console/terminal-announcements/adopt` refuses a serial whose own
+company has a release ORDERED with `409 RELEASE_IN_PROGRESS` (cancel it, or
+wait). A serial in another company is refused with the uniform
+`TERMINAL_OWNED_ELSEWHERE` whether or not that company is releasing it. A
+RELEASED row is deleted and the serial verdicts `NEW`.
+
+#### Readiness
+
+Every announcement collection now seeds the new row with a **FULL_SYNC
+snapshot** ahead of the CREATE records (`compactDeviceBacklogTx`), and records
+the snapshot's id as `devices.readiness_job_id`. The terminal is `SETTING_UP`
+until it acknowledges that job and `READY` after — on a transferred unit the
+moment the previous owner's roster is provably gone, and on a new unit merely
+honest. A capacity refusal keeps the CREATE seeding and records the overflow
+rather than failing the claim. Claim-code and site-key registration are
+unchanged.
+
+#### Event attribution guard
+
+`POST /api/v1/devices/access/log` under a row whose serial has a RELEASED
+predecessor refuses an event whose `occurred_at` is more than ten minutes
+before the row's `registered_at`: answered `200 {"recorded": false,
+"refused": "predates this terminal's registration"}` so the terminal drops it,
+audited once as `EVENTS_REFUSED_PRE_REGISTRATION`, never stored. A clockless
+event (no `occurred_at`) cannot be judged and is kept — a documented residual
+limited to firmware that does not wipe its queue.
+
+#### Audit
+
+Into the company that holds or held the terminal: `TERMINAL_RELEASE_ORDERED`,
+`TERMINAL_RELEASE_CANCELLED`, `TERMINAL_RELEASE_CONFIRMED` (actor role
+`TERMINAL`, carries the report), `TERMINAL_RELEASE_FORCED` (carries
+`attested: true`), and the platform route's `TERMINAL_RELEASED`. Into the
+company that gains it: the existing adoption trail plus `TERMINAL_READY` when
+the readiness snapshot is acknowledged. Neither trail names the other company.
+
 ---
 
 ## 18. Public API v1

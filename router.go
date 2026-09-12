@@ -160,6 +160,12 @@ func NewRouter() *gin.Engine {
 	r.POST("/api/v1/devices/announce", announceLimit, handlers.AnnounceTerminal)
 	r.GET("/api/v1/devices/announce", announceLimit, handlers.AnnouncementStatus)
 
+	// The release order by serial (032). Unauthenticated because the caller
+	// is a terminal whose credential has just been refused, on the announce
+	// limiter because it is the same class of caller. See
+	// handlers.GetReleaseOrderBySerial for what it discloses, which is little.
+	r.GET("/api/v1/devices/release-order", announceLimit, handlers.GetReleaseOrderBySerial)
+
 	// Operator authentication, /api/v1/auth/*.
 	//
 	// A SEPARATE group from the v1 tree below, which authenticates with the site
@@ -352,6 +358,8 @@ func NewRouter() *gin.Engine {
 				middleware.RequireTerminalGrant("serial"),
 				handlers.ConsoleGetCommand)
 
+			read.GET("/terminals/:serial/release", middleware.RequireTerminalGrant("serial"),
+				handlers.ConsoleGetTerminalRelease)
 			read.GET("/terminals/:serial", middleware.RequireTerminalGrant("serial"),
 				handlers.ConsoleGetTerminal)
 
@@ -617,6 +625,15 @@ func NewRouter() *gin.Engine {
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRevokeTerminalCredential)
 			admin.DELETE("/terminals/:serial",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleRetireTerminal)
+			// Release for transfer (032). ADMIN, like the rest of the
+			// lifecycle, and for the strongest reason of any of them: it ends
+			// with the terminal belonging to somebody else.
+			admin.POST("/terminals/:serial/release",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleOrderTerminalRelease)
+			admin.DELETE("/terminals/:serial/release",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleCancelTerminalRelease)
+			admin.POST("/terminals/:serial/release/force",
+				middleware.RequireTerminalGrant("serial"), handlers.ConsoleForceTerminalRelease)
 			admin.PUT("/terminals/:serial/site",
 				middleware.RequireTerminalGrant("serial"), handlers.ConsoleMoveTerminal)
 
@@ -856,6 +873,11 @@ func NewRouter() *gin.Engine {
 	{
 		deviceAPI.POST("/heartbeat", handlers.DeviceHeartbeat)
 		deviceAPI.GET("/settings", handlers.GetDeviceSettings)
+
+		// The terminal's proof that it executed a release order (032). The
+		// last call this credential ever makes, because accepting it revokes
+		// the credential.
+		deviceAPI.POST("/release/confirm", handlers.ConfirmDeviceRelease)
 		deviceAPI.GET("/jobs", handlers.GetDeviceJobs)
 		deviceAPI.POST("/jobs/:id/complete", handlers.CompleteDeviceJob)
 

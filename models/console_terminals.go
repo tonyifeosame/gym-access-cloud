@@ -116,3 +116,58 @@ type ConsoleTerminalHealth struct {
 	OfflinePolicy       string `json:"offline_policy"`
 	OfflineGraceMinutes int    `json:"offline_grace_minutes"`
 }
+
+// ---------------------------------------------------------------------------
+// Release (032)
+// ---------------------------------------------------------------------------
+
+// ConsoleTerminalReleaseRequest orders a release. `reason` lands in the audit
+// trail and on the row.
+type ConsoleTerminalReleaseRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ConsoleTerminalForceReleaseRequest finalizes an outstanding order without
+// the terminal. `attest` must be true: the operator is stating that they
+// understand the unit will keep working for their own members under their own
+// offline policy until it is wiped or reconnects, and the console has made
+// them type it.
+type ConsoleTerminalForceReleaseRequest struct {
+	Attest bool   `json:"attest"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// ConsoleTerminalRelease is the release facts for a live terminal.
+type ConsoleTerminalRelease struct {
+	SerialNumber string `json:"serial_number"`
+
+	// State is "" when nothing is ordered, ORDERED while the terminal has an
+	// order to execute.
+	State          string     `json:"state"`
+	ReleaseID      string     `json:"release_id,omitempty"`
+	OrderedAt      *time.Time `json:"ordered_at,omitempty"`
+	OrderedByEmail string     `json:"ordered_by_email,omitempty"`
+	Reason         string     `json:"reason,omitempty"`
+
+	// TerminalCapable is whether this unit's firmware reported that it acts
+	// on release orders. False means the console must offer the physical
+	// procedure and the force path, never the automated one.
+	TerminalCapable bool `json:"terminal_capable"`
+
+	// OrderVerifiable is false when the row had no credential to key an
+	// order with. Such a unit cannot be told remotely; it can only be wiped
+	// at the unit.
+	OrderVerifiable bool `json:"order_verifiable"`
+
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+}
+
+// ConsoleTerminalReleasedResponse reports a finalized release.
+type ConsoleTerminalReleasedResponse struct {
+	SerialNumber         string `json:"serial_number"`
+	ReleaseID            string `json:"release_id"`
+	Released             bool   `json:"released"`
+	ConfirmedBy          string `json:"confirmed_by"`
+	PendingJobsCancelled int64  `json:"pending_jobs_cancelled"`
+	AnnouncementsVoided  int64  `json:"announcements_voided"`
+}

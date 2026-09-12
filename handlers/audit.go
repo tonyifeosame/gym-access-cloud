@@ -90,6 +90,24 @@ const (
 	// TERMINAL_ADOPTED record.
 	auditTerminalReleased = "TERMINAL_RELEASED"
 
+	// The first-class release (032), all written into the trail of the
+	// company that holds -- or held -- the terminal. ORDERED and CANCELLED are
+	// an operator's decisions; CONFIRMED is the terminal's own report of the
+	// wipe, attributed to the operator who ordered it because there is no
+	// human on that request; FORCED is an operator finalizing without the
+	// terminal, attestation and all. READY is the gaining company's record
+	// that the roster reached the unit.
+	auditTerminalReleaseOrdered   = "TERMINAL_RELEASE_ORDERED"
+	auditTerminalReleaseCancelled = "TERMINAL_RELEASE_CANCELLED"
+	auditTerminalReleaseConfirmed = "TERMINAL_RELEASE_CONFIRMED"
+	auditTerminalReleaseForced    = "TERMINAL_RELEASE_FORCED"
+	auditTerminalReady            = "TERMINAL_READY"
+
+	// A door event refused because it predates the row it was uploaded to --
+	// a previous owner's queued event arriving on a transferred unit whose
+	// firmware did not wipe its queue. Written once per refusal; counts only.
+	auditEventsRefusedPreRegistration = "EVENTS_REFUSED_PRE_REGISTRATION"
+
 	auditPersonCreated = "PERSON_CREATED"
 	auditPersonUpdated = "PERSON_UPDATED"
 	auditPersonDeleted = "PERSON_DELETED"

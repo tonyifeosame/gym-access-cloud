@@ -293,6 +293,31 @@ func LogDeviceAccess(c *gin.Context) {
 	siteID := c.GetInt64("site_id")
 	deviceID := c.GetInt64("device_id")
 
+	// THE ATTRIBUTION GUARD (032). A terminal transferred from another company
+	// on firmware that does not wipe its queue can upload the previous owner's
+	// last door events under this credential, and they would land in THIS
+	// company's trail. An event that claims to have happened before this row
+	// existed, on a serial that has a released predecessor, is refused --
+	// answered as recorded so the terminal drops it, counted for the audit
+	// trail, never stored. A clockless event cannot be judged and is kept.
+	if guard, guardErr := database.DeviceUploadGuard(deviceID); guardErr != nil {
+		logError(c, "device upload guard", guardErr)
+	} else if guard.EventPredatesRegistration(occurredAt) {
+		recordAudit(c, auditEventsRefusedPreRegistration, auditTargetTerminal, "",
+			c.GetString("device_serial"), gin.H{
+				"event_id":      req.EventID,
+				"occurred_at":   occurredAt,
+				"registered_at": guard.RegisteredAt,
+			})
+		c.JSON(http.StatusOK, gin.H{
+			"event_id":  req.EventID,
+			"recorded":  false,
+			"duplicate": false,
+			"refused":   "predates this terminal's registration",
+		})
+		return
+	}
+
 	created, err := database.CreateDeviceAccessLog(
 		companyID, siteID, deviceID,
 		req.EventID, memberID, req.Granted, req.Source, name, req.Message,
