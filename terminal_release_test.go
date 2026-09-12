@@ -322,6 +322,17 @@ func TestConfirmFinalizesAndTheNextOwnerIsGatedUntilReady(t *testing.T) {
 	f := newReleaseFixture(t, "AT-REL-XFER")
 	f.env.createMember(f.env.siteAKey, "A-001", "Old Member")
 
+	// A door event from the terminal's life in Company One, before the sale.
+	// The release soft-deletes the row; the history it wrote must not go
+	// with it.
+	logged := f.env.do(http.MethodPost, "/api/v1/devices/access/log", map[string]any{
+		"event_id": "9d2c8a4e-6b1f-4c7a-9e3d-2f5a8b1c4d7e", "member_id": "A-001",
+		"granted": true, "source": "FINGERPRINT", "occurred_at": "2026-09-01T09:15:00Z",
+	}, deviceAuth(f.key))
+	if logged.Code != http.StatusOK || logged.Body["recorded"] != true {
+		t.Fatalf("door event before release = %d: %s", logged.Code, logged.Raw)
+	}
+
 	if status, body := f.order(t, "sold"); status != http.StatusOK {
 		t.Fatalf("order = %d: %v", status, body)
 	}
@@ -438,6 +449,31 @@ func TestConfirmFinalizesAndTheNextOwnerIsGatedUntilReady(t *testing.T) {
 	                      WHERE d.serial_number = 'AT-REL-XFER' AND d.deleted_at IS NULL
 	                        AND j.entity_external_id = 'A-001'`); n != 0 {
 		t.Error("the previous owner's member was queued for the new owner")
+	}
+
+	// Company One still reads its own history through the released row: the
+	// event lists under the serial, attributed to the terminal as it was
+	// named there. Company Two, which now owns the serial, sees none of it.
+	status, page := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/events?serial="+f.serial, "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("Company One's events after release = %d: %v", status, page)
+	}
+	history := listOf(t, page, "events")
+	if len(history) != 1 {
+		t.Fatalf("Company One lists %d events for the released terminal, want 1", len(history))
+	}
+	if event, _ := history[0].(map[string]any); event["device_serial"] != f.serial ||
+		event["device_name"] != "Front Door" || event["subject_external_id"] != "A-001" {
+		t.Errorf("Company One's historical event lost its attribution: %v", history[0])
+	}
+	status, page = consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/events?serial="+f.serial, "", otherToken, otherCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("Company Two's events = %d: %v", status, page)
+	}
+	if leaked := listOf(t, page, "events"); len(leaked) != 0 {
+		t.Errorf("Company Two reads %d of the previous owner's events", len(leaked))
 	}
 }
 
