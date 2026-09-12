@@ -70,6 +70,10 @@ import type {
   TerminalMoveRequest,
   TerminalResyncResponse,
   Terminal,
+  TerminalForceReleaseRequest,
+  TerminalRelease,
+  TerminalReleaseRequest,
+  TerminalReleasedResponse,
   TerminalRetireRequest,
   TerminalRetiredResponse,
   TerminalRevokeRequest,
@@ -481,6 +485,47 @@ export function retireTerminal(
   return api.delete<TerminalRetiredResponse>(
     `/api/v1/console/terminals/${encodeURIComponent(serial)}`,
     { body },
+  )
+}
+
+/**
+ * Orders a release for transfer (032). Idempotent: a second order while one
+ * is outstanding answers with the existing one.
+ */
+export function orderTerminalRelease(
+  serial: string,
+  body: TerminalReleaseRequest = {},
+): Promise<TerminalRelease> {
+  return api.post<TerminalRelease>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/release`,
+    body,
+  )
+}
+
+export function fetchTerminalRelease(serial: string): Promise<TerminalRelease> {
+  return api.get<TerminalRelease>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/release`,
+  )
+}
+
+/** Withdraws an outstanding order. 409 when nothing is ordered. */
+export function cancelTerminalRelease(serial: string): Promise<TerminalRelease> {
+  return api.delete<TerminalRelease>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/release`,
+  )
+}
+
+/**
+ * Finalizes an outstanding order WITHOUT the terminal. Requires `attest: true`,
+ * which the console sets only after a typed confirmation.
+ */
+export function forceTerminalRelease(
+  serial: string,
+  body: TerminalForceReleaseRequest,
+): Promise<TerminalReleasedResponse> {
+  return api.post<TerminalReleasedResponse>(
+    `/api/v1/console/terminals/${encodeURIComponent(serial)}/release/force`,
+    body,
   )
 }
 

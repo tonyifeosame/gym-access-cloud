@@ -166,6 +166,7 @@ export function resetServerState(session: Session | null = null): void {
   outstandingClaims.clear()
   announceable.clear()
   wifiRecovery.clear()
+  releases.clear()
 }
 
 /** Seeds the tenant's data. Call after resetServerState. */
@@ -312,6 +313,32 @@ const DELIVERY_NOTICE =
  * that told an operator a terminal did not exist when in fact they were simply
  * not scoped to it.
  */
+// Outstanding release orders, by serial (032).
+const releases = new Map<
+  string,
+  { release_id: string; ordered_at: string; ordered_by_email: string; reason?: string }
+>()
+
+function releaseFor(serial: string) {
+  const terminal = state.terminals.find((entry) => entry.serial_number === serial)
+  const order = releases.get(serial)
+  return {
+    serial_number: serial,
+    state: order ? 'ORDERED' : '',
+    release_id: order?.release_id,
+    ordered_at: order?.ordered_at,
+    ordered_by_email: order?.ordered_by_email,
+    reason: order?.reason,
+    terminal_capable: terminal?.capabilities?.includes('terminal_release') ?? false,
+    order_verifiable: true,
+    last_seen_at: terminal?.last_seen_at,
+  }
+}
+
+export function resetReleases(): void {
+  releases.clear()
+}
+
 function guardTerminal(
   request: Request,
   serial: string,
@@ -1440,6 +1467,91 @@ export const handlers = [
       online: terminal.status === 'ONLINE',
       last_heartbeat_at: terminal.last_heartbeat_at,
     } satisfies WifiRecoveryStatus)
+  }),
+
+  // --- release for transfer (032) -----------------------------------------
+  //
+  // The order is kept in `releases` beside the terminal, and the terminal row
+  // carries the summary the list and detail show. A force removes the row,
+  // exactly as a retirement does.
+  http.get('*/api/v1/console/terminals/:serial/release', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'MANAGER')
+    if (refused) return refused
+    return json(releaseFor(String(params.serial)))
+  }),
+
+  http.post('*/api/v1/console/terminals/:serial/release', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+    const failure = takeFailure('terminal-release')
+    if (failure) return json({ error: 'Failed to order the release' }, failure)
+
+    const serial = String(params.serial)
+    const body = (await request.json().catch(() => ({}))) as { reason?: string }
+    if (!releases.has(serial)) {
+      releases.set(serial, {
+        release_id: `release-${serial}`,
+        ordered_at: '2026-09-12T10:00:00Z',
+        ordered_by_email: state.session?.operator.email ?? 'ops@example.com',
+        reason: body.reason,
+      })
+      state.terminals = state.terminals.map((entry) =>
+        entry.serial_number === serial
+          ? {
+              ...entry,
+              release: {
+                state: 'ORDERED',
+                ordered_at: '2026-09-12T10:00:00Z',
+                ordered_by_email: state.session?.operator.email ?? 'ops@example.com',
+                order_verifiable: true,
+              },
+            }
+          : entry,
+      )
+    }
+    return json(releaseFor(serial))
+  }),
+
+  http.delete('*/api/v1/console/terminals/:serial/release', ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+    const serial = String(params.serial)
+    if (!releases.has(serial)) {
+      return json({ error: 'no release is in progress for that terminal', code: 'RELEASE_NOT_ORDERED' }, 409)
+    }
+    releases.delete(serial)
+    state.terminals = state.terminals.map((entry) =>
+      entry.serial_number === serial ? { ...entry, release: undefined } : entry,
+    )
+    return json(releaseFor(serial))
+  }),
+
+  http.post('*/api/v1/console/terminals/:serial/release/force', async ({ request, params }) => {
+    record(request)
+    const refused = guardTerminal(request, String(params.serial), 'ADMIN')
+    if (refused) return refused
+    const serial = String(params.serial)
+    const body = (await request.json().catch(() => ({}))) as { attest?: boolean }
+    if (!body.attest) {
+      return json({ error: 'attest must be true', code: 'ATTESTATION_REQUIRED' }, 400)
+    }
+    const order = releases.get(serial)
+    if (!order) {
+      return json({ error: 'no release is in progress for that terminal', code: 'RELEASE_NOT_ORDERED' }, 409)
+    }
+    releases.delete(serial)
+    state.terminals = state.terminals.filter((entry) => entry.serial_number !== serial)
+    return json({
+      serial_number: serial,
+      release_id: order.release_id,
+      released: true,
+      confirmed_by: 'OPERATOR',
+      pending_jobs_cancelled: 2,
+      announcements_voided: 0,
+    })
   }),
 
   http.delete('*/api/v1/console/terminals/:serial', ({ request, params }) => {

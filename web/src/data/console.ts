@@ -76,6 +76,10 @@ import type {
   TerminalMoveRequest,
   TerminalResyncResponse,
   TerminalRetireRequest,
+  TerminalForceReleaseRequest,
+  TerminalRelease,
+  TerminalReleaseRequest,
+  TerminalReleasedResponse,
   TerminalRetiredResponse,
   TerminalRevokeRequest,
   TerminalStateRequest,
@@ -493,6 +497,81 @@ export function useRetireTerminal(
  * and the SESSION is not — grants are on sites, and moving a terminal between
  * two sites does not change which sites an operator reaches.
  */
+// ---------------------------------------------------------------------------
+// Release for transfer (032)
+// ---------------------------------------------------------------------------
+
+/**
+ * The release facts for one terminal. Polled while an order is outstanding, so
+ * the banner moves from "waiting for the terminal" to "released" on its own —
+ * the terminal confirms with no browser in the loop.
+ */
+export function useTerminalRelease(
+  serial: string | undefined,
+  options: { enabled?: boolean; poll?: boolean } = {},
+): UseQueryResult<TerminalRelease, Error> {
+  return useQuery({
+    queryKey: keys.terminals.release(serial ?? ''),
+    queryFn: () => endpoints.fetchTerminalRelease(serial ?? ''),
+    enabled: Boolean(serial) && (options.enabled ?? true),
+    refetchInterval: options.poll ? 10_000 : false,
+  })
+}
+
+function settleRelease(queryClient: QueryClient, serial: string): void {
+  void queryClient.invalidateQueries({ queryKey: keys.terminals.release(serial) })
+  void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
+  void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+  void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+}
+
+export function useOrderTerminalRelease(
+  serial: string,
+): UseMutationResult<TerminalRelease, Error, TerminalReleaseRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalReleaseRequest) => endpoints.orderTerminalRelease(serial, body),
+    onSuccess: (release) => {
+      queryClient.setQueryData(keys.terminals.release(serial), release)
+      settleRelease(queryClient, serial)
+    },
+  })
+}
+
+export function useCancelTerminalRelease(
+  serial: string,
+): UseMutationResult<TerminalRelease, Error, void> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => endpoints.cancelTerminalRelease(serial),
+    onSuccess: (release) => {
+      queryClient.setQueryData(keys.terminals.release(serial), release)
+      settleRelease(queryClient, serial)
+    },
+  })
+}
+
+/**
+ * The force. The row is gone afterwards — the detail page 404s — so the
+ * caller leaves, exactly as it does after a retirement.
+ */
+export function useForceTerminalRelease(
+  serial: string,
+): UseMutationResult<TerminalReleasedResponse, Error, TerminalForceReleaseRequest> {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TerminalForceReleaseRequest) =>
+      endpoints.forceTerminalRelease(serial, body),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
+      queryClient.removeQueries({ queryKey: keys.terminals.release(serial) })
+      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    },
+  })
+}
+
 export function useMoveTerminal(
   serial: string,
 ): UseMutationResult<TerminalLifecycleResponse, Error, TerminalMoveRequest> {

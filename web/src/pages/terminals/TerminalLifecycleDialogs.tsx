@@ -1,14 +1,18 @@
 import { useState } from 'react'
 
-import type { TerminalDetail } from '../../api/types'
+import type { TerminalDetail, TerminalRelease } from '../../api/types'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { Dialog } from '../../components/Dialog'
 import { FormActions, FormError, SelectField, TextField } from '../../components/Form'
 import { useNotifications } from '../../components/Notifications'
 import { InfoNote } from '../../components/states'
+import { Timestamp } from '../../components/Timestamp'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import {
+  useCancelTerminalRelease,
+  useForceTerminalRelease,
   useMoveTerminal,
+  useOrderTerminalRelease,
   useResyncTerminal,
   useRetireTerminal,
   useRevokeTerminalCredential,
@@ -454,5 +458,215 @@ function ReasonField({ value, onChange }: { value: string; onChange: (value: str
       placeholder="e.g. reported stolen from the east entrance"
       hint="Recorded in the audit trail and shown on the terminal. The next person to look at this will want to know why."
     />
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Release for transfer (032)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether this terminal's firmware acts on release orders.
+ *
+ * THE GATE FOR THE AUTOMATED WORKFLOW. A unit that has not reported
+ * `terminal_release` will ignore an order — it will keep working, keep its
+ * roster, and the operator would be waiting for a confirmation that can never
+ * come. Such a unit gets the physical procedure and the force path instead,
+ * and the dialog says so before anything is ordered. Absence of the whole
+ * capability list is treated the same way: nothing may be inferred from it.
+ */
+export function terminalCanRelease(terminal: TerminalDetail): boolean {
+  return terminal.capabilities?.includes('terminal_release') ?? false
+}
+
+/**
+ * The physical procedure, for a unit that will not execute an order.
+ * Written for the person holding the unit, not for the engineer.
+ */
+function PhysicalReleaseSteps() {
+  return (
+    <ol className="steps">
+      <li>
+        Connect a laptop to the terminal&apos;s USB port and open its console at 115200.
+      </li>
+      <li>
+        Type <code className="mono">release</code>, press Enter, then <code className="mono">y</code>.
+        The unit erases its members, fingerprints and Wi‑Fi and restarts into setup.
+      </li>
+      <li>
+        Then come back here and choose <strong>Release anyway</strong> so the serial is freed
+        for its next owner.
+      </li>
+    </ol>
+  )
+}
+
+export function ReleaseTerminalDialog({
+  open,
+  terminal,
+  onClose,
+}: {
+  open: boolean
+  terminal: TerminalDetail
+  onClose: () => void
+}) {
+  const order = useOrderTerminalRelease(terminal.serial_number)
+  const notifications = useNotifications()
+  const [reason, setReason] = useState('')
+  const capable = terminalCanRelease(terminal)
+  const name = terminal.device_name || terminal.serial_number
+
+  return (
+    <ConfirmDialog
+      open={open}
+      title={`Release ${name} for transfer?`}
+      consequence={
+        capable ? (
+          <>
+            The terminal <strong>stops letting anyone in now</strong>. It sends its last door
+            events here, then <strong>erases every member and fingerprint template</strong> it
+            holds, forgets your Wi‑Fi, and restarts showing a pairing code for its next owner.
+          </>
+        ) : (
+          <>
+            This terminal&apos;s firmware cannot carry out a release on its own, so the
+            erasing has to be done <strong>at the unit</strong>. Ordering the release here
+            stops new people being sent to it and records the decision; it will not free the
+            serial until you confirm the unit has been wiped.
+          </>
+        )
+      }
+      detail={
+        capable ? (
+          <>
+            Your history stays in this account. Nothing about this terminal, its members or
+            its events reaches the next owner. The serial is freed for them only once the
+            terminal has confirmed the wipe — you can cancel until then, and if the unit is
+            offline you can release it anyway from this page afterwards.
+          </>
+        ) : (
+          <PhysicalReleaseSteps />
+        )
+      }
+      confirmPhrase={terminal.serial_number}
+      confirmLabel={capable ? 'Release terminal' : 'Order the release'}
+      onConfirm={async () => {
+        const release = await order.mutateAsync({ reason: reason.trim() || undefined })
+        notifications.success(
+          release.terminal_capable
+            ? `${name} is being released. Waiting for the terminal to confirm.`
+            : `Release ordered for ${name}. Wipe it at the unit, then release it anyway from this page.`,
+        )
+        onClose()
+      }}
+      onClose={onClose}
+    >
+      <ReasonField value={reason} onChange={setReason} />
+    </ConfirmDialog>
+  )
+}
+
+export function CancelReleaseDialog({
+  open,
+  terminal,
+  onClose,
+}: {
+  open: boolean
+  terminal: TerminalDetail
+  onClose: () => void
+}) {
+  const cancel = useCancelTerminalRelease(terminal.serial_number)
+  const notifications = useNotifications()
+  const name = terminal.device_name || terminal.serial_number
+
+  return (
+    <ConfirmDialog
+      open={open}
+      title={`Keep ${name}?`}
+      consequence={
+        <>
+          The release is withdrawn and the terminal is told to rebuild its roster from this
+          account.
+        </>
+      }
+      detail={
+        <>
+          If the terminal has <strong>already started</strong> erasing itself it cannot be
+          un‑erased: it will restart into setup and need adding again with its pairing code.
+        </>
+      }
+      confirmLabel="Cancel the release"
+      cancelLabel="Back"
+      onConfirm={async () => {
+        await cancel.mutateAsync()
+        notifications.success(`${name} keeps its place in this account.`)
+        onClose()
+      }}
+      onClose={onClose}
+    />
+  )
+}
+
+/**
+ * THE ESCALATION. Finalizes without the terminal, on an attestation the
+ * operator types. The consequence is exactly what the platform records with
+ * the action, in the same words.
+ */
+export function ForceReleaseDialog({
+  open,
+  terminal,
+  release,
+  onClose,
+  onReleased,
+}: {
+  open: boolean
+  terminal: TerminalDetail
+  release: TerminalRelease
+  onClose: () => void
+  /** Called after success, so the caller can leave a page that now 404s. */
+  onReleased: () => void
+}) {
+  const force = useForceTerminalRelease(terminal.serial_number)
+  const notifications = useNotifications()
+  const [reason, setReason] = useState('')
+  const name = terminal.device_name || terminal.serial_number
+
+  return (
+    <ConfirmDialog
+      open={open}
+      title={`Release ${name} without waiting?`}
+      consequence={
+        <>
+          The serial is freed for its next owner <strong>now</strong>, and this terminal is
+          removed from your fleet. Until the unit reconnects or is wiped at the unit, it{' '}
+          <strong>keeps working for your members</strong> under your site&apos;s offline
+          policy. You are stating that you understand that.
+        </>
+      }
+      detail={
+        release.terminal_capable ? (
+          <>
+            The moment the unit reaches the platform again it will find the order and erase
+            itself. Last seen{' '}
+            <Timestamp value={release.last_seen_at} relative fallback="never" />.
+          </>
+        ) : (
+          <>
+            This terminal cannot erase itself on an order. If it has not been wiped at the
+            unit, it will keep recognising your members until it is.
+          </>
+        )
+      }
+      confirmPhrase="RELEASE"
+      confirmLabel="Release anyway"
+      onConfirm={async () => {
+        await force.mutateAsync({ attest: true, reason: reason.trim() || undefined })
+        notifications.success(`${name} released. The serial is free for its next owner.`)
+        onReleased()
+      }}
+      onClose={onClose}
+    >
+      <ReasonField value={reason} onChange={setReason} />
+    </ConfirmDialog>
   )
 }

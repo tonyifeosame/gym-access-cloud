@@ -425,6 +425,11 @@ export function ConfirmTerminalStep({
           screen. Nothing is displayed here for you to copy — the terminal fetches
           its own credential and it is never shown to anybody.
         </p>
+        <p>
+          It then loads the people it should recognise from this account and shows as{' '}
+          <strong>Setting up</strong> until that has finished. A terminal that came from
+          another AccessLink account arrives with nothing of theirs on it.
+        </p>
       </InfoNote>
 
       <FormError
