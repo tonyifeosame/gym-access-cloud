@@ -841,4 +841,3 @@ func TestFirstTimeAdoptionSeedsASnapshotAndReadsSettingUp(t *testing.T) {
 		t.Errorf("list row readiness = %v: %s", row["readiness"], truncate(string(raw), 300))
 	}
 }
-
