@@ -660,7 +660,14 @@ export function ForceReleaseDialog({
       confirmPhrase="RELEASE"
       confirmLabel="Release anyway"
       onConfirm={async () => {
-        await force.mutateAsync({ attest: true, reason: reason.trim() || undefined })
+        // The order this dialog described is the one attested to. Named on the
+        // request so the server refuses it if the order has changed underneath
+        // an open page.
+        await force.mutateAsync({
+          attest: true,
+          release_id: release.release_id,
+          reason: reason.trim() || undefined,
+        })
         notifications.success(`${name} released. The serial is free for its next owner.`)
         onReleased()
       }}

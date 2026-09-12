@@ -834,6 +834,12 @@ export interface TerminalReleaseRequest {
 export interface TerminalForceReleaseRequest {
   /** Must be true. The console sets it only after a typed confirmation. */
   attest: boolean
+  /**
+   * The order the attestation was typed against. The server refuses a force
+   * naming any other order (409 RELEASE_MISMATCH), so a page left open across
+   * a cancel-and-reorder cannot finalize an order its operator never read.
+   */
+  release_id?: string
   reason?: string
 }
 

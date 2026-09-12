@@ -1534,13 +1534,27 @@ export const handlers = [
     const refused = guardTerminal(request, String(params.serial), 'ADMIN')
     if (refused) return refused
     const serial = String(params.serial)
-    const body = (await request.json().catch(() => ({}))) as { attest?: boolean }
+    const body = (await request.json().catch(() => ({}))) as {
+      attest?: boolean
+      release_id?: string
+    }
     if (!body.attest) {
       return json({ error: 'attest must be true', code: 'ATTESTATION_REQUIRED' }, 400)
     }
     const order = releases.get(serial)
     if (!order) {
       return json({ error: 'no release is in progress for that terminal', code: 'RELEASE_NOT_ORDERED' }, 409)
+    }
+    // The server binds a force to the order it names (RELEASE_MISMATCH). The
+    // console always names the order it showed, so a force that names none,
+    // or another, is the console attesting to the wrong thing -- and this
+    // fixture is stricter than the server on purpose, so the test proves the
+    // id was sent rather than merely not contradicted.
+    if (body.release_id !== order.release_id) {
+      return json(
+        { error: 'that release is no longer the one outstanding', code: 'RELEASE_MISMATCH' },
+        409,
+      )
     }
     releases.delete(serial)
     state.terminals = state.terminals.filter((entry) => entry.serial_number !== serial)

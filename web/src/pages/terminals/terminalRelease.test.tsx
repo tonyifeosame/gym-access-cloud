@@ -222,7 +222,8 @@ describe('releasing anyway', () => {
     await user.click(confirm)
 
     // The attestation is what the server requires; the fixture 400s without
-    // it, so reaching the list below is the proof it was sent.
+    // it, and 409s unless the request names the very order the page showed,
+    // so reaching the list below is the proof that both were sent.
     await waitFor(() =>
       expect(state.requests.some((entry) => entry.url.endsWith('/release/force'))).toBe(true),
     )
