@@ -223,9 +223,26 @@ jobs:
         if: steps.firmware.outcome == 'success'
         run: pip install --upgrade platformio
 
+      # THE HOST HAS TO MODEL THE TARGET'S WORD SIZE. The firmware keeps time in
+      # `unsigned long`, which is 32 bits on the ESP32 (and on MinGW, where the
+      # suite was written) and 64 bits on an x86-64 Linux runner. Every millis()
+      # rollover test -- request deadlines, the Wi-Fi portal's trial, scan and
+      # grace windows, the work poll, the announce schedule -- proves that a
+      # difference wraps correctly at 2^32, and on an LP64 host it simply does
+      # not wrap, so six cases in four suites fail while the device is right.
+      # Compiling the native suite as ILP32 restores the width the code was
+      # written for. gcc-multilib provides the 32-bit runtime; PlatformIO
+      # appends PLATFORMIO_BUILD_FLAGS to every environment's build_flags, so
+      # nothing in the firmware tree changes to get it.
+      - name: 32-bit toolchain for the native suite
+        if: steps.firmware.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
+
       - name: Native unit tests
         if: steps.firmware.outcome == 'success'
         working-directory: firmware
+        env:
+          PLATFORMIO_BUILD_FLAGS: -m32
         run: pio test -e native
 
       # The production image, not just the tests. A firmware change that passes
