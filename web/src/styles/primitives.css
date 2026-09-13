@@ -142,6 +142,22 @@ summary:focus-visible,
   color: var(--on-danger);
 }
 
+/*
+  THE FILL IS RE-ASSERTED ON HOVER, and this is why. base.css declares
+  `.button:hover { background: var(--surface-raised) }` at (0,2,0), which
+  outranks `.button--danger` at (0,1,0) -- so on hover the danger fill dropped
+  to the page's raised surface underneath its white label: 1.07:1 in light,
+  1.15:1 in dark, measured. The primary button never had the problem because
+  `.button--primary:hover` sets its own background; this rule only set a
+  filter. The label of every destructive confirmation -- Release terminal,
+  Release anyway, Retire, Revoke -- vanished in the instant before the click.
+*/
+.button--danger:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-danger);
+}
+
 .button--danger:hover:not(:disabled) {
   filter: brightness(0.92);
 }
