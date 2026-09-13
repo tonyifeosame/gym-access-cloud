@@ -257,6 +257,73 @@ async function runAxe(page, context) {
  * invisible. Reporting them identically would have made the check either
  * useless or unpassable.
  */
+/**
+ * Contrast of one element AS IT IS NOW -- hovered, focused, whatever state the
+ * caller has put it in. axe measures the rendered colours, so a hover style
+ * that swapped the fill is what gets measured.
+ */
+async function contrastOf(page, locator) {
+  await page.evaluate(AXE_SOURCE)
+  return locator.evaluate(async (element) => {
+    const results = await window.axe.run(element, {
+      runOnly: { type: 'rule', values: ['color-contrast'] },
+      resultTypes: ['violations'],
+    })
+    const node = results.violations[0]?.nodes[0]
+    return node ? node.any[0]?.message ?? 'insufficient contrast' : null
+  })
+}
+
+/**
+ * The destructive buttons with the pointer over them, in both colour schemes.
+ *
+ * Walks the four that matter -- Revoke, Retire and Release on the terminal
+ * page, Release anyway on a terminal being released -- and, for the two that
+ * confirm through a typed phrase, the confirm button itself once the phrase is
+ * typed, because that is the button an operator is looking at when it matters.
+ * Each is hovered and measured; a label that cannot be read under the pointer
+ * is a failure, not a note.
+ */
+async function checkDangerHover(page, viewportName, baseUrl) {
+  for (const colorScheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme })
+    const label = `${viewportName}/${colorScheme}`
+
+    async function hoverAndMeasure(locator, what) {
+      if ((await locator.count()) === 0) {
+        failures.push(`${label}: ${what} is not on the page, so its hover state was not measured`)
+        return
+      }
+      await locator.first().scrollIntoViewIfNeeded()
+      await locator.first().hover()
+      const problem = await contrastOf(page, locator.first())
+      check(problem === null, `${label}: ${what} under the pointer -- ${problem}`)
+    }
+
+    await page.goto(`${baseUrl}/terminals/AT-0001`, { waitUntil: 'networkidle' })
+    for (const name of ['Revoke', 'Retire', 'Release']) {
+      await hoverAndMeasure(page.locator('.lifecycle button.button--danger', { hasText: new RegExp(`^${name}$`) }), `the ${name} button`)
+    }
+    await page.locator('.lifecycle button', { hasText: /^Release$/ }).first().click()
+    await page.waitForSelector('[role="dialog"]', { timeout: 5000 })
+    await page.getByLabel(/type .* to confirm/i).fill('AT-0001')
+    await hoverAndMeasure(page.locator('[role="dialog"] button.button--danger'), 'the Release terminal confirm button')
+    await page.keyboard.press('Escape')
+
+    await page.goto(`${baseUrl}/terminals/AT-0002`, { waitUntil: 'networkidle' })
+    const releaseAnyway = page.locator('.notice button.button--danger', { hasText: /release anyway/i })
+    await hoverAndMeasure(releaseAnyway, 'the Release anyway button on the release banner')
+    await releaseAnyway.first().click()
+    await page.waitForSelector('[role="dialog"]', { timeout: 5000 })
+    await page.getByLabel(/type .* to confirm/i).fill('RELEASE')
+    await hoverAndMeasure(page.locator('[role="dialog"] button.button--danger'), 'the Release anyway confirm button')
+    await page.keyboard.press('Escape')
+  }
+  // Back to the viewer's own scheme for whatever the caller measures next.
+  await page.emulateMedia({ colorScheme: null })
+  await page.mouse.move(0, 0)
+}
+
 async function checkTargetSize(page, context) {
   const measured = await page.evaluate(() => {
     const targets = []
@@ -473,6 +540,19 @@ async function main() {
 
         await page.keyboard.press('Escape')
       }
+
+      // --- the destructive buttons, UNDER THE POINTER ------------------------
+      //
+      // Every sweep above measures a page at rest, and at rest the danger
+      // buttons were fine. Under the pointer they were not: base.css's
+      // `.button:hover` outranked `.button--danger` and swapped the red fill
+      // for the raised surface beneath a white label -- 1.07:1, the label of
+      // Release, Release anyway, Retire and Revoke gone in the instant before
+      // the click. A pass that never hovers reported that clean for months.
+      // Phones have no pointer, so this is the desktop and tablet's check, and
+      // it runs in both colour schemes because the dark theme lightens the fill
+      // and darkens the label -- a different pair to get wrong.
+      if (!isPhone(viewport)) await checkDangerHover(page, viewport.name, site.url)
 
       // --- the one-time credential panel ------------------------------------
       //

@@ -567,6 +567,31 @@ export interface TerminalReleaseSummary {
 export interface TerminalDetail extends Terminal {
   application_mode: ApplicationCode | typeof MULTI_PURPOSE
   effective_applications: ApplicationCode[]
+  /**
+   * The health block the detail read has always carried and this type never
+   * declared. Optional because a console is not always deployed in lockstep
+   * with its API; a reader must cope with its absence.
+   */
+  health?: TerminalDetailHealth
+}
+
+/**
+ * `GET /console/terminals/{serial}` → `health`.
+ *
+ * `credential_active` is the ONE fact a browser is told about a terminal's
+ * credential: whether a key hash is present, which is what authentication
+ * checks. It is what decides whether a release order can ever reach the unit
+ * — a revoked terminal cannot be told anything remotely — and so whether the
+ * automated release flow may be offered at all (releasePath.ts).
+ */
+export interface TerminalDetailHealth {
+  pending_jobs: number
+  failed_jobs: number
+  last_apply_error?: string
+  last_apply_error_at?: string
+  credential_active: boolean
+  offline_policy: OfflinePolicy
+  offline_grace_minutes: number
 }
 
 /**

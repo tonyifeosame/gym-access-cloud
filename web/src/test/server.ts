@@ -167,6 +167,7 @@ export function resetServerState(session: Session | null = null): void {
   announceable.clear()
   wifiRecovery.clear()
   releases.clear()
+  revokedCredentials.clear()
 }
 
 /** Seeds the tenant's data. Call after resetServerState. */
@@ -319,6 +320,11 @@ const releases = new Map<
   { release_id: string; ordered_at: string; ordered_by_email: string; reason?: string }
 >()
 
+// Terminals whose credential has been revoked, by serial. The server derives
+// `health.credential_active` from the key hash and `order_verifiable` from the
+// MAC that hash keys, so one set answers both the way one column does.
+const revokedCredentials = new Set<string>()
+
 function releaseFor(serial: string) {
   const terminal = state.terminals.find((entry) => entry.serial_number === serial)
   const order = releases.get(serial)
@@ -330,13 +336,35 @@ function releaseFor(serial: string) {
     ordered_by_email: order?.ordered_by_email,
     reason: order?.reason,
     terminal_capable: terminal?.capabilities?.includes('terminal_release') ?? false,
-    order_verifiable: true,
+    // As the server computes it: a MAC exists only while an order does, and
+    // only when there was a credential to key it with.
+    order_verifiable: Boolean(order) && !revokedCredentials.has(serial),
     last_seen_at: terminal?.last_seen_at,
   }
 }
 
 export function resetReleases(): void {
   releases.clear()
+}
+
+/**
+ * A terminal without a credential, for the release path that cannot reach it.
+ * The detail read reports `credential_active: false` and any order placed for
+ * it is unverifiable, exactly as after a revoke on the real server.
+ */
+export function revokeCredentialOf(serial: string): void {
+  revokedCredentials.add(serial)
+}
+
+/**
+ * The terminal executed the order and sent its receipt: the row is gone, and
+ * every read of it -- detail, release, cancel, force -- answers 404 from now
+ * on. This is the state a browser reaches with no click of its own, which is
+ * why it is a fixture and not a route.
+ */
+export function completeRelease(serial: string): void {
+  releases.delete(serial)
+  state.terminals = state.terminals.filter((entry) => entry.serial_number !== serial)
 }
 
 function guardTerminal(
@@ -1505,7 +1533,7 @@ export const handlers = [
                 state: 'ORDERED',
                 ordered_at: '2026-09-12T10:00:00Z',
                 ordered_by_email: state.session?.operator.email ?? 'ops@example.com',
-                order_verifiable: true,
+                order_verifiable: !revokedCredentials.has(serial),
               },
             }
           : entry,
@@ -2968,6 +2996,13 @@ function terminalDetail(terminal: Terminal): TerminalDetail {
     ...terminal,
     application_mode: mode,
     effective_applications: enabled.filter((code) => mode === 'MULTI_PURPOSE' || code === mode),
+    health: {
+      pending_jobs: 0,
+      failed_jobs: 0,
+      credential_active: !revokedCredentials.has(terminal.serial_number),
+      offline_policy: 'DENY_ALL',
+      offline_grace_minutes: 0,
+    },
   }
 }
 

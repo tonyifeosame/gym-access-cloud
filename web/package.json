@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:browser": "npm run build && node browser/run.mjs"
+    "test:browser": "npm run build && node browser/run.mjs",
+    "test:browser:release": "npm run build && node browser/release.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",
