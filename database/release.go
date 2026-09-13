@@ -403,16 +403,25 @@ func orderReleaseTx(tx *sql.Tx, deviceID int64, serial, apiKeyHash, reason strin
 // A terminal that had ALREADY executed the order cannot be un-wiped: it will
 // find its receipt refused, announce afresh, and need setting up again -- which
 // the console says before the operator confirms.
-func CancelTerminalRelease(companyID int64, serial string) (*TerminalRelease, error) {
+// The cancelled order's id is returned alongside the restored row so the audit
+// line can name what was withdrawn. It is read INSIDE this transaction, under
+// the same FOR UPDATE that gates the cancel, rather than by the handler
+// beforehand: a read before the call could name an order that a concurrent
+// force or a second cancel had already replaced, and the audit would then
+// attest to the wrong one.
+func CancelTerminalRelease(companyID int64, serial string) (*TerminalRelease, string, error) {
 	tx, err := DB.Begin()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer tx.Rollback()
 
-	var deviceID int64
+	var (
+		deviceID  int64
+		releaseID sql.NullString
+	)
 	err = tx.QueryRow(`
-		SELECT d.id
+		SELECT d.id, d.release_id::text
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		 WHERE d.serial_number = $2
@@ -420,16 +429,16 @@ func CancelTerminalRelease(companyID int64, serial string) (*TerminalRelease, er
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL
 		   AND d.release_state = 'ORDERED'
-		 FOR UPDATE OF d`, companyID, serial).Scan(&deviceID)
+		 FOR UPDATE OF d`, companyID, serial).Scan(&deviceID, &releaseID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Not found, or found and not ordered: told apart for the operator.
 		if _, lookupErr := loadTerminalRelease(tx, companyID, serial); lookupErr != nil {
-			return nil, lookupErr
+			return nil, "", lookupErr
 		}
-		return nil, ErrReleaseNotOrdered
+		return nil, "", ErrReleaseNotOrdered
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	if _, err := tx.Exec(`
@@ -443,14 +452,14 @@ func CancelTerminalRelease(companyID int64, serial string) (*TerminalRelease, er
 		       release_order_mac = NULL,
 		       updated_at = CURRENT_TIMESTAMP
 		 WHERE id = $1`, deviceID); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	if _, err := tx.Exec(`
 		UPDATE credential_placements
 		   SET state = 'PLACED', last_error = NULL
 		 WHERE device_id = $1 AND state = 'REMOVING'`, deviceID); err != nil {
-		return nil, fmt.Errorf("restoring placements after cancelled release: %w", err)
+		return nil, "", fmt.Errorf("restoring placements after cancelled release: %w", err)
 	}
 
 	// Converge. The snapshot is exactly the instrument: a set difference the
@@ -461,14 +470,18 @@ func CancelTerminalRelease(companyID int64, serial string) (*TerminalRelease, er
 	if _, err := compactDeviceBacklogTx(tx, deviceID, "release cancelled"); err != nil {
 		var overflow *RosterCapacityError
 		if !errors.As(err, &overflow) {
-			return nil, err
+			return nil, "", err
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return loadTerminalRelease(DB, companyID, serial)
+	restored, err := loadTerminalRelease(DB, companyID, serial)
+	if err != nil {
+		return nil, "", err
+	}
+	return restored, releaseID.String, nil
 }
 
 // ---------------------------------------------------------------------------

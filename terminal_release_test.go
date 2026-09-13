@@ -681,6 +681,125 @@ func TestCancelRestoresTheTerminalAndQueuesASnapshot(t *testing.T) {
 	}
 }
 
+// The cancelled order is NAMED in its audit line.
+//
+// Found by the 2026-09-13 hardware acceptance (case 17a): CANCELLED was the one
+// release action that recorded no release_id, so on a serial that had been
+// through several cycles -- the bench had twelve rows for one serial -- a
+// cancellation could not be tied to the order it withdrew. ORDERED, FORCED and
+// CONFIRMED all named theirs.
+func TestCancelNamesTheOrderItWithdrewInTheAudit(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-CANAUD")
+	f.env.createMember(f.env.siteAKey, "A-210", "Kept")
+
+	status, ordered := f.order(t, "operator changed their mind")
+	if status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, ordered)
+	}
+	releaseID, _ := ordered["release_id"].(string)
+	if releaseID == "" {
+		t.Fatal("the order carried no release_id to compare against")
+	}
+
+	status, body := consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusOK || body["state"] != "" {
+		t.Fatalf("cancel = %d: %v", status, body)
+	}
+
+	// 1. THE ID. Exactly the order that was withdrawn, not merely some id.
+	got := queryString(t, `SELECT coalesce(changes->>'release_id', '') FROM audit_events
+	                        WHERE action = 'TERMINAL_RELEASE_CANCELLED'
+	                        ORDER BY id DESC LIMIT 1`)
+	if got != releaseID {
+		t.Errorf("cancelled audit release_id = %q, want %q", got, releaseID)
+	}
+
+	// 2. ATTRIBUTION UNCHANGED: still the acting operator, their company, and
+	//    the terminal as the target. The payload gained a field; nothing else
+	//    about the record moved.
+	var action, actorEmail, actorRole, targetType, targetLabel string
+	var companyID int64
+	mustScan(t, `SELECT a.action, a.actor_email, a.actor_role, a.target_type,
+	                    a.target_label, a.company_id
+	               FROM audit_events a
+	              WHERE a.action = 'TERMINAL_RELEASE_CANCELLED'
+	              ORDER BY a.id DESC LIMIT 1`,
+		&action, &actorEmail, &actorRole, &targetType, &targetLabel, &companyID)
+	// The session newAnnounceFixture opens, as an ADMIN of Company One.
+	const wantActor = "announce-admin@example.com"
+	if actorEmail != wantActor {
+		t.Errorf("actor_email = %q, want %q", actorEmail, wantActor)
+	}
+	if actorRole != string(models.RoleAdmin) {
+		t.Errorf("actor_role = %q, want %q", actorRole, models.RoleAdmin)
+	}
+	if targetLabel != f.serial {
+		t.Errorf("target_label = %q, want %q", targetLabel, f.serial)
+	}
+	if targetType != "TERMINAL" {
+		t.Errorf("target_type = %q, want TERMINAL", targetType)
+	}
+	if companyID != f.companyID {
+		t.Errorf("company_id = %d, want %d (the ordering company)", companyID, f.companyID)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CANCELLED"); n != 1 {
+		t.Errorf("CANCELLED audited %d times, want 1", n)
+	}
+
+	// 3. THE CANCEL ITSELF IS UNCHANGED: ORDERED cleared, every release column
+	//    with it, the row still live, and a second cancel still refused.
+	if state, _, deleted := releaseRow(t, f.serial); state != "" || deleted {
+		t.Errorf("row after cancel: state=%q deleted=%v, want cleared and live", state, deleted)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM devices
+	                      WHERE serial_number = '`+f.serial+`'
+	                        AND release_state IS NULL AND release_id IS NULL
+	                        AND release_order_mac IS NULL AND release_ordered_at IS NULL
+	                        AND release_ordered_by_email IS NULL AND release_reason IS NULL`); n != 1 {
+		t.Error("cancel left a release column set")
+	}
+	if beat := f.capableHeartbeat(t); beat["release_order"] != nil {
+		t.Errorf("heartbeat after cancel still carries %v", beat["release_order"])
+	}
+	status, body = consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusConflict || body["code"] != "RELEASE_NOT_ORDERED" {
+		t.Errorf("second cancel = %d %v, want 409 RELEASE_NOT_ORDERED", status, body)
+	}
+}
+
+// Two cycles on one serial: each cancellation names its OWN order, which is the
+// property the hardware finding was actually about.
+func TestEachCancellationNamesItsOwnOrder(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-CAN2X")
+
+	cancelledIDs := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		status, ordered := f.order(t, "cycle")
+		if status != http.StatusOK {
+			t.Fatalf("order %d = %d: %v", i, status, ordered)
+		}
+		id, _ := ordered["release_id"].(string)
+		if status, body := consoleCall(t, f.env.router, http.MethodDelete,
+			"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf); status != http.StatusOK {
+			t.Fatalf("cancel %d = %d: %v", i, status, body)
+		}
+		cancelledIDs = append(cancelledIDs, id)
+	}
+
+	if cancelledIDs[0] == cancelledIDs[1] {
+		t.Fatal("the two cycles reused one release_id; the test proves nothing")
+	}
+	for _, want := range cancelledIDs {
+		if n := queryInt(t, `SELECT count(*) FROM audit_events
+		                      WHERE action = 'TERMINAL_RELEASE_CANCELLED'
+		                        AND changes->>'release_id' = $1`, want); n != 1 {
+			t.Errorf("no CANCELLED audit names order %s", want)
+		}
+	}
+}
+
 func TestForceRequiresAnOrderAndAnAttestation(t *testing.T) {
 	f := newReleaseFixture(t, "AT-REL-FORCE")
 

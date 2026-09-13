@@ -94,7 +94,7 @@ func ConsoleCancelTerminalRelease(c *gin.Context) {
 	companyID := c.GetInt64("company_id")
 	serial := c.Param("serial")
 
-	release, err := database.CancelTerminalRelease(companyID, serial)
+	release, cancelledReleaseID, err := database.CancelTerminalRelease(companyID, serial)
 	switch {
 	case errors.Is(err, models.ErrDeviceNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Terminal not found"})
@@ -108,7 +108,14 @@ func ConsoleCancelTerminalRelease(c *gin.Context) {
 		return
 	}
 
-	recordAudit(c, auditTerminalReleaseCancelled, auditTargetTerminal, "", serial, nil)
+	// NAMES THE ORDER IT WITHDREW. Without the id a CANCELLED line cannot be
+	// tied to anything -- a serial that has been through several release cycles
+	// collects indistinguishable cancellations -- and it was the one action of
+	// the four that did not record it. The id comes back from the cancel itself,
+	// read under its FOR UPDATE, so it is the order that was actually cleared.
+	recordAudit(c, auditTerminalReleaseCancelled, auditTargetTerminal, "", serial, gin.H{
+		"release_id": cancelledReleaseID,
+	})
 
 	c.JSON(http.StatusOK, projectTerminalRelease(*release))
 }
