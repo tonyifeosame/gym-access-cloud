@@ -231,18 +231,27 @@ jobs:
       # difference wraps correctly at 2^32, and on an LP64 host it simply does
       # not wrap, so six cases in four suites fail while the device is right.
       # Compiling the native suite as ILP32 restores the width the code was
-      # written for. gcc-multilib provides the 32-bit runtime; PlatformIO
-      # appends PLATFORMIO_BUILD_FLAGS to every environment's build_flags, so
-      # nothing in the firmware tree changes to get it.
+      # written for. gcc-multilib provides the 32-bit runtime. The flag has
+      # to reach the LINKER as well as the compiler -- PLATFORMIO_BUILD_FLAGS
+      # alone left 32-bit objects linking against 64-bit libgcc, which is 71
+      # suites of `undefined reference to __udivdi3` -- so it goes in through
+      # an extra script handed to PlatformIO from the runner. The native
+      # environment declares no extra_scripts of its own, so nothing is
+      # displaced, and nothing in the firmware tree changes.
       - name: 32-bit toolchain for the native suite
         if: steps.firmware.outcome == 'success'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
+          cat > "$RUNNER_TEMP/pio_ilp32.py" <<'PY'
+          Import("env")
+          env.Append(CCFLAGS=["-m32"], CXXFLAGS=["-m32"], LINKFLAGS=["-m32"])
+          PY
 
       - name: Native unit tests
         if: steps.firmware.outcome == 'success'
         working-directory: firmware
         env:
-          PLATFORMIO_BUILD_FLAGS: -m32
+          PLATFORMIO_EXTRA_SCRIPTS: ${{ runner.temp }}/pio_ilp32.py
         run: pio test -e native
 
       # The production image, not just the tests. A firmware change that passes
