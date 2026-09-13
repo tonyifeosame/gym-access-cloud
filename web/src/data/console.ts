@@ -8,6 +8,7 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 
+import { ApiError } from '../api/client'
 import * as endpoints from '../api/endpoints'
 import type {
   APICredential,
@@ -502,9 +503,15 @@ export function useRetireTerminal(
 // ---------------------------------------------------------------------------
 
 /**
- * The release facts for one terminal. Polled while an order is outstanding, so
- * the banner moves from "waiting for the terminal" to "released" on its own —
- * the terminal confirms with no browser in the loop.
+ * The release facts for one terminal. Polled while an order is outstanding,
+ * because the terminal confirms with no browser in the loop and the page has
+ * to notice on its own.
+ *
+ * THE END OF THE RELEASE IS A 404. Confirming soft-deletes the row, so the
+ * read that was answering ORDERED starts answering "not found" — that, and
+ * nothing else, is how a page learns the terminal finished. The poll stops
+ * there rather than asking a deleted row every ten seconds for ever; the page
+ * reads the error and treats it as completion (TerminalDetailPage).
  */
 export function useTerminalRelease(
   serial: string | undefined,
@@ -514,7 +521,12 @@ export function useTerminalRelease(
     queryKey: keys.terminals.release(serial ?? ''),
     queryFn: () => endpoints.fetchTerminalRelease(serial ?? ''),
     enabled: Boolean(serial) && (options.enabled ?? true),
-    refetchInterval: options.poll ? 10_000 : false,
+    refetchInterval: (query) => {
+      if (!options.poll) return false
+      const error = query.state.error
+      if (error instanceof ApiError && error.isNotFound) return false
+      return 10_000
+    },
   })
 }
 
@@ -552,6 +564,21 @@ export function useCancelTerminalRelease(
 }
 
 /**
+ * What the cache does once a release is complete, however it completed: by
+ * the operator's force, or by the terminal's own receipt noticed from the
+ * poll. The row is gone, so its detail and release reads are dropped rather
+ * than invalidated — a refetch would only 404 — and every list that counted
+ * it is refreshed.
+ */
+export function forgetReleasedTerminal(queryClient: QueryClient, serial: string): void {
+  queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
+  queryClient.removeQueries({ queryKey: keys.terminals.release(serial) })
+  void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+  void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+  void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+}
+
+/**
  * The force. The row is gone afterwards — the detail page 404s — so the
  * caller leaves, exactly as it does after a retirement.
  */
@@ -562,13 +589,7 @@ export function useForceTerminalRelease(
   return useMutation({
     mutationFn: (body: TerminalForceReleaseRequest) =>
       endpoints.forceTerminalRelease(serial, body),
-    onSuccess: () => {
-      queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
-      queryClient.removeQueries({ queryKey: keys.terminals.release(serial) })
-      void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
-      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
-    },
+    onSuccess: () => forgetReleasedTerminal(queryClient, serial),
   })
 }
 

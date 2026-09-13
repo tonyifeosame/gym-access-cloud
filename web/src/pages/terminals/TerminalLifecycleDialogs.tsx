@@ -1,6 +1,9 @@
 import { useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 
-import type { TerminalDetail, TerminalRelease } from '../../api/types'
+import { ApiError } from '../../api/client'
+import type { TerminalDetail, TerminalRelease, TerminalReleasedResponse } from '../../api/types'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { Dialog } from '../../components/Dialog'
 import { FormActions, FormError, SelectField, TextField } from '../../components/Form'
@@ -9,6 +12,7 @@ import { InfoNote } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import {
+  forgetReleasedTerminal,
   useCancelTerminalRelease,
   useForceTerminalRelease,
   useMoveTerminal,
@@ -19,6 +23,10 @@ import {
   useSetTerminalState,
   useSites,
 } from '../../data/console'
+import { readHealth } from './health'
+import { releasePathFor } from './releasePath'
+
+export { terminalCanRelease } from './releasePath'
 
 /**
  * The terminal lifecycle operations.
@@ -461,101 +469,190 @@ function ReasonField({ value, onChange }: { value: string; onChange: (value: str
   )
 }
 
+
 // ---------------------------------------------------------------------------
 // Release for transfer (032)
 // ---------------------------------------------------------------------------
 
 /**
- * Whether this terminal's firmware acts on release orders.
- *
- * THE GATE FOR THE AUTOMATED WORKFLOW. A unit that has not reported
- * `terminal_release` will ignore an order — it will keep working, keep its
- * roster, and the operator would be waiting for a confirmation that can never
- * come. Such a unit gets the physical procedure and the force path instead,
- * and the dialog says so before anything is ordered. Absence of the whole
- * capability list is treated the same way: nothing may be inferred from it.
+ * THE PATH DECIDES THE DIALOG. See releasePath.ts for the four answers and why.
+ * Every sentence below that names what the unit will do is conditioned on the
+ * path, because the previous version of this dialog told the holder of an
+ * old-firmware unit to type a console command that firmware does not have, and
+ * told the holder of an offline unit that it "stops letting anyone in now".
  */
-export function terminalCanRelease(terminal: TerminalDetail): boolean {
-  return terminal.capabilities?.includes('terminal_release') ?? false
+
+/** Where the operator goes to move a unit onto a build that can act on an order. */
+function FirmwareLink() {
+  return <Link to="/settings/firmware">Firmware</Link>
 }
 
 /**
- * The physical procedure, for a unit that will not execute an order.
- * Written for the person holding the unit, not for the engineer.
+ * The one sentence every non-automated path has to carry, because "Release
+ * anyway" is on the same banner as the instructions and reads like the
+ * shortcut. It is not: it frees the serial and leaves the roster on the unit.
  */
-function PhysicalReleaseSteps() {
+function ForceIsNotASubstitute() {
+  return (
+    <>
+      <strong>Release anyway is not a substitute</strong>: it frees the serial for the next
+      owner while this unit goes on recognising your members.
+    </>
+  )
+}
+
+/** The console procedure, for a unit whose firmware has the command but no credential. */
+function WipeAtUnitSteps({ serial }: { serial: string }) {
   return (
     <ol className="steps">
+      <li>Connect a laptop to the terminal&apos;s USB port and open its console at 115200.</li>
       <li>
-        Connect a laptop to the terminal&apos;s USB port and open its console at 115200.
+        Type <code className="mono">release</code>, press Enter, then <code className="mono">y</code>{' '}
+        and Enter. The unit erases its members, fingerprints and Wi‑Fi and restarts into setup.
       </li>
       <li>
-        Type <code className="mono">release</code>, press Enter, then <code className="mono">y</code>.
-        The unit erases its members, fingerprints and Wi‑Fi and restarts into setup.
-      </li>
-      <li>
-        Then come back here and choose <strong>Release anyway</strong> so the serial is freed
-        for its next owner.
+        Then come back here and choose <strong>Release anyway</strong> so{' '}
+        <code className="mono">{serial}</code> is freed for its next owner.
       </li>
     </ol>
+  )
+}
+
+/**
+ * What updating the firmware means for THIS unit. A unit already on the current
+ * build for its channel cannot be updated into capability; a build that has it
+ * needs publishing first, and saying "update it" to that operator would send
+ * them looking for a control that offers nothing.
+ */
+function UpdateFirmwareAdvice({ terminal }: { terminal: TerminalDetail }) {
+  return terminal.firmware_outdated ? (
+    <>
+      Update its firmware first — a newer build is available for its channel under{' '}
+      <FirmwareLink />.
+    </>
+  ) : (
+    <>
+      It is already on the current build for its channel, so a build that supports release
+      has to be published under <FirmwareLink /> before it can be updated.
+    </>
   )
 }
 
 export function ReleaseTerminalDialog({
   open,
   terminal,
+  release,
   onClose,
 }: {
   open: boolean
   terminal: TerminalDetail
+  /** The release facts, when they have loaded. Absent reads as "not yet known". */
+  release: TerminalRelease | undefined
   onClose: () => void
 }) {
   const order = useOrderTerminalRelease(terminal.serial_number)
   const notifications = useNotifications()
   const [reason, setReason] = useState('')
-  const capable = terminalCanRelease(terminal)
+  const path = releasePathFor(terminal, release)
+  const reachable = readHealth(terminal).reachable
   const name = terminal.device_name || terminal.serial_number
+
+  const consequence = {
+    automated: reachable ? (
+      <>
+        The terminal <strong>stops letting anyone in the moment it receives the release
+        order</strong>, on its next check‑in. It sends its last door events here, then{' '}
+        <strong>erases every member and fingerprint template</strong> it holds, forgets your
+        Wi‑Fi, and restarts showing a pairing code for its next owner.
+      </>
+    ) : (
+      <>
+        This terminal is <strong>offline</strong>, so nothing changes at the door yet: it keeps
+        working under its site&apos;s offline policy until it next reaches the platform. The
+        moment it receives the release order it stops letting anyone in, sends its last door
+        events here, then <strong>erases every member and fingerprint template</strong> it
+        holds, forgets your Wi‑Fi, and restarts showing a pairing code for its next owner.
+      </>
+    ),
+    'update-firmware': (
+      <>
+        This terminal&apos;s firmware <strong>cannot carry out a release</strong>, so nothing is
+        erased until it is updated. Ordering the release now stops new people being sent to
+        it and holds the order for it: the first time it checks in on a build that can, it
+        stops letting anyone in and erases itself.
+      </>
+    ),
+    'wipe-at-unit': (
+      <>
+        This terminal has <strong>no credential</strong> — it was revoked — so a release order
+        cannot reach it. The erasing has to be done <strong>at the unit</strong>. Ordering the
+        release records the decision and stops new people being sent to it; the serial is
+        freed only once you confirm the unit has been wiped.
+      </>
+    ),
+    'no-remote-path': (
+      <>
+        This terminal has <strong>no credential</strong> — it was revoked — and its firmware{' '}
+        <strong>cannot carry out a release</strong>, so it can be neither told to wipe nor
+        updated from here.
+      </>
+    ),
+  }[path]
+
+  const detail = {
+    automated: (
+      <>
+        Your history stays in this account. Nothing about this terminal, its members or its
+        events reaches the next owner. The serial is freed for them only once the terminal has
+        confirmed the wipe — you can cancel until then. If the unit never reconnects you can
+        release it anyway from this page, but that frees the serial without wiping the unit.
+      </>
+    ),
+    'update-firmware': (
+      <>
+        <UpdateFirmwareAdvice terminal={terminal} /> Your history stays in this account either
+        way. <ForceIsNotASubstitute />
+      </>
+    ),
+    'wipe-at-unit': <WipeAtUnitSteps serial={terminal.serial_number} />,
+    'no-remote-path': (
+      <>
+        Re‑register it with a <strong>claim code</strong> for{' '}
+        <code className="mono">{terminal.serial_number}</code> from{' '}
+        <strong>{terminal.site_name}</strong>, update its firmware, then release it from here.
+        If the hardware is gone, retire it instead. <ForceIsNotASubstitute />
+      </>
+    ),
+  }[path]
 
   return (
     <ConfirmDialog
       open={open}
       title={`Release ${name} for transfer?`}
-      consequence={
-        capable ? (
-          <>
-            The terminal <strong>stops letting anyone in now</strong>. It sends its last door
-            events here, then <strong>erases every member and fingerprint template</strong> it
-            holds, forgets your Wi‑Fi, and restarts showing a pairing code for its next owner.
-          </>
-        ) : (
-          <>
-            This terminal&apos;s firmware cannot carry out a release on its own, so the
-            erasing has to be done <strong>at the unit</strong>. Ordering the release here
-            stops new people being sent to it and records the decision; it will not free the
-            serial until you confirm the unit has been wiped.
-          </>
-        )
-      }
-      detail={
-        capable ? (
-          <>
-            Your history stays in this account. Nothing about this terminal, its members or
-            its events reaches the next owner. The serial is freed for them only once the
-            terminal has confirmed the wipe — you can cancel until then, and if the unit is
-            offline you can release it anyway from this page afterwards.
-          </>
-        ) : (
-          <PhysicalReleaseSteps />
-        )
+      consequence={consequence}
+      detail={detail}
+      // Refused rather than ordered: an order this unit can neither receive
+      // nor be updated into receiving only invites "Release anyway", which is
+      // the outcome the whole feature exists to prevent.
+      blocked={
+        path === 'no-remote-path' ? (
+          <>Nothing can be ordered for this terminal until it has a credential again.</>
+        ) : undefined
       }
       confirmPhrase={terminal.serial_number}
-      confirmLabel={capable ? 'Release terminal' : 'Order the release'}
+      confirmLabel={path === 'automated' ? 'Release terminal' : 'Order the release'}
       onConfirm={async () => {
-        const release = await order.mutateAsync({ reason: reason.trim() || undefined })
+        const ordered = await order.mutateAsync({ reason: reason.trim() || undefined })
+        const orderedPath = releasePathFor(terminal, ordered)
         notifications.success(
-          release.terminal_capable
-            ? `${name} is being released. Waiting for the terminal to confirm.`
-            : `Release ordered for ${name}. Wipe it at the unit, then release it anyway from this page.`,
+          {
+            automated: reachable
+              ? `${name} is being released. Waiting for the terminal to confirm.`
+              : `Release ordered for ${name}. It is offline; it will erase itself when it next checks in.`,
+            'update-firmware': `Release ordered for ${name}. Update its firmware; it erases itself on its first check-in on a build that can.`,
+            'wipe-at-unit': `Release ordered for ${name}. Wipe it at the unit, then release it anyway from this page.`,
+            'no-remote-path': `Release ordered for ${name}.`,
+          }[orderedPath],
         )
         onClose()
       }}
@@ -566,16 +663,29 @@ export function ReleaseTerminalDialog({
   )
 }
 
+/**
+ * The one way a cancel or force can be "already done": the terminal confirmed
+ * the wipe first, the row is gone, and the server answers 404 exactly as it
+ * would for a retirement. Named so the two dialogs below say the same thing.
+ */
+function releaseAlreadyCompleted(error: unknown): boolean {
+  return error instanceof ApiError && error.isNotFound
+}
+
 export function CancelReleaseDialog({
   open,
   terminal,
   onClose,
+  onReleased,
 }: {
   open: boolean
   terminal: TerminalDetail
   onClose: () => void
+  /** The terminal finished the release before the cancel reached it; the page now 404s. */
+  onReleased: () => void
 }) {
   const cancel = useCancelTerminalRelease(terminal.serial_number)
+  const queryClient = useQueryClient()
   const notifications = useNotifications()
   const name = terminal.device_name || terminal.serial_number
 
@@ -591,14 +701,26 @@ export function CancelReleaseDialog({
       }
       detail={
         <>
-          If the terminal has <strong>already started</strong> erasing itself it cannot be
-          un‑erased: it will restart into setup and need adding again with its pairing code.
+          This works only while the terminal has <strong>not yet acted</strong> on the order.
+          If it has already started erasing itself it cannot be un‑erased: it will restart into
+          setup and need adding again with its pairing code.
         </>
       }
       confirmLabel="Cancel the release"
       cancelLabel="Back"
       onConfirm={async () => {
-        await cancel.mutateAsync()
+        try {
+          await cancel.mutateAsync()
+        } catch (error) {
+          if (!releaseAlreadyCompleted(error)) throw error
+          forgetReleasedTerminal(queryClient, terminal.serial_number)
+          notifications.notify({
+            tone: 'info',
+            message: `${name} had already been released — the terminal confirmed the wipe before the cancellation reached it. The serial is free for its next owner.`,
+          })
+          onReleased()
+          return
+        }
         notifications.success(`${name} keeps its place in this account.`)
         onClose()
       }}
@@ -610,7 +732,9 @@ export function CancelReleaseDialog({
 /**
  * THE ESCALATION. Finalizes without the terminal, on an attestation the
  * operator types. The consequence is exactly what the platform records with
- * the action, in the same words.
+ * the action, in the same words — plus the two things it does not say and the
+ * operator would not guess: door events still on the unit are never uploaded,
+ * and for a unit that cannot act on the order this is not a way of wiping it.
  */
 export function ForceReleaseDialog({
   open,
@@ -627,9 +751,11 @@ export function ForceReleaseDialog({
   onReleased: () => void
 }) {
   const force = useForceTerminalRelease(terminal.serial_number)
+  const queryClient = useQueryClient()
   const notifications = useNotifications()
   const [reason, setReason] = useState('')
   const name = terminal.device_name || terminal.serial_number
+  const path = releasePathFor(terminal, release)
 
   return (
     <ConfirmDialog
@@ -637,38 +763,77 @@ export function ForceReleaseDialog({
       title={`Release ${name} without waiting?`}
       consequence={
         <>
-          The serial is freed for its next owner <strong>now</strong>, and this terminal is
-          removed from your fleet. Until the unit reconnects or is wiped at the unit, it{' '}
+          The serial <code className="mono">{terminal.serial_number}</code> is freed for its
+          next owner <strong>now</strong>, and this terminal is removed from your fleet. Until
+          the unit reconnects or is wiped at the unit, it{' '}
           <strong>keeps working for your members</strong> under your site&apos;s offline
-          policy. You are stating that you understand that.
+          policy, and any door events still on it are never uploaded. You are stating that you
+          understand that.
         </>
       }
       detail={
-        release.terminal_capable ? (
-          <>
-            The moment the unit reaches the platform again it will find the order and erase
-            itself. Last seen{' '}
-            <Timestamp value={release.last_seen_at} relative fallback="never" />.
-          </>
-        ) : (
-          <>
-            This terminal cannot erase itself on an order. If it has not been wiped at the
-            unit, it will keep recognising your members until it is.
-          </>
-        )
+        {
+          automated: (
+            <>
+              The moment the unit reaches the platform again it will find the order and erase
+              itself. Last seen{' '}
+              <Timestamp value={release.last_seen_at} relative fallback="never" />.
+            </>
+          ),
+          'update-firmware': (
+            <>
+              This terminal&apos;s firmware cannot act on the order, so this{' '}
+              <strong>does not wipe it</strong>: it keeps recognising your members until it is
+              wiped at the unit or set up again by its next owner. Updating its firmware first
+              lets it erase itself instead.
+            </>
+          ),
+          'wipe-at-unit': (
+            <>
+              This terminal cannot receive the order. If it has <strong>not been wiped at the
+              unit</strong>, it will keep recognising your members until it is.
+            </>
+          ),
+          'no-remote-path': (
+            <>
+              This terminal can neither receive the order nor be updated. It{' '}
+              <strong>keeps recognising your members</strong> until it is set up again by its
+              next owner.
+            </>
+          ),
+        }[path]
       }
       confirmPhrase="RELEASE"
       confirmLabel="Release anyway"
       onConfirm={async () => {
-        // The order this dialog described is the one attested to. Named on the
-        // request so the server refuses it if the order has changed underneath
-        // an open page.
-        await force.mutateAsync({
-          attest: true,
-          release_id: release.release_id,
-          reason: reason.trim() || undefined,
-        })
-        notifications.success(`${name} released. The serial is free for its next owner.`)
+        let result: TerminalReleasedResponse
+        try {
+          // The order this dialog described is the one attested to. Named on
+          // the request so the server refuses it if the order has changed
+          // underneath an open page.
+          result = await force.mutateAsync({
+            attest: true,
+            release_id: release.release_id,
+            reason: reason.trim() || undefined,
+          })
+        } catch (error) {
+          if (!releaseAlreadyCompleted(error)) throw error
+          forgetReleasedTerminal(queryClient, terminal.serial_number)
+          notifications.notify({
+            tone: 'info',
+            message: `${name} had already been released — the terminal confirmed the wipe first. The serial is free for its next owner.`,
+          })
+          onReleased()
+          return
+        }
+        const cancelled = result.pending_jobs_cancelled ?? 0
+        notifications.success(
+          `${name} released. The serial is free for its next owner.${
+            cancelled > 0
+              ? ` ${cancelled} queued change${cancelled === 1 ? '' : 's'} cancelled.`
+              : ''
+          }`,
+        )
         onReleased()
       }}
       onClose={onClose}

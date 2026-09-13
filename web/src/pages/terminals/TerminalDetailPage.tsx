@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
@@ -6,9 +7,15 @@ import { MULTI_PURPOSE, type ProvisioningSource } from '../../api/types'
 import { describeApplication } from '../../applications/registry'
 import { can } from '../../auth/permissions'
 import { Badge, TerminalStatusBadge, humaniseCode } from '../../components/Badge'
+import { useNotifications } from '../../components/Notifications'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
-import { useSite, useTerminal, useTerminalRelease } from '../../data/console'
+import {
+  forgetReleasedTerminal,
+  useSite,
+  useTerminal,
+  useTerminalRelease,
+} from '../../data/console'
 import {
   describeGrace,
   offlinePolicyDefinition,
@@ -27,9 +34,9 @@ import {
   RetireTerminalDialog,
   RevokeTerminalDialog,
   TerminalStateDialog,
-  terminalCanRelease,
 } from './TerminalLifecycleDialogs'
 import { readHealth } from './health'
+import { releasePathFor } from './releasePath'
 
 /**
  * One terminal.
@@ -61,9 +68,40 @@ export function TerminalDetailPage() {
     enabled: Boolean(query.data),
     poll: Boolean(query.data?.release),
   })
+  const queryClient = useQueryClient()
+  const notifications = useNotifications()
   const [configuring, setConfiguring] = useState(false)
   const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
   const [changingWifi, setChangingWifi] = useState(false)
+
+  /*
+    THE RELEASE IS OVER WHEN THE ROW IS GONE. The terminal's receipt
+    soft-deletes it, and the poll that was answering ORDERED starts answering
+    404. Before this, that 404 was silently retained as "still waiting": the
+    banner promised a confirmation that had already arrived, the Release anyway
+    button opened nothing, and a reload said "Terminal not found" — the one
+    outcome the operator was watching for was the one the page could not show.
+
+    An order was outstanding (the cached detail or the last good release read
+    says so) and the release read now 404s: that is completion, and it is
+    treated exactly as a force is — say so, drop the dead row from the cache,
+    leave the page that now describes nothing.
+  */
+  const hadOrder =
+    query.data?.release?.state === 'ORDERED' || releaseQuery.data?.state === 'ORDERED'
+  const releaseGone = releaseQuery.error instanceof ApiError && releaseQuery.error.isNotFound
+  const completed = hadOrder && releaseGone
+  const completedName = query.data?.device_name || query.data?.serial_number || serial || ''
+  const completionHandled = useRef(false)
+  useEffect(() => {
+    if (!completed || !serial || completionHandled.current) return
+    completionHandled.current = true
+    notifications.success(
+      `${completedName} has been released. The terminal confirmed the wipe, and the serial is free for its next owner.`,
+    )
+    forgetReleasedTerminal(queryClient, serial)
+    navigate('/terminals', { replace: true })
+  }, [completed, completedName, navigate, notifications, queryClient, serial])
 
   const mayConfigure = can(session, 'configureTerminals')
   // ADMIN, matching the server's route group: revoking a credential stops a door
@@ -88,7 +126,8 @@ export function TerminalDetailPage() {
           <PageHeader title="Terminal not found" breadcrumb={<Link to="/terminals">Terminals</Link>} />
           <InfoNote title="Nothing here">
             No terminal with that serial is registered to your company. It may have
-            been registered elsewhere, or its site may have been retired.
+            been released to another owner, registered elsewhere, or its site may have
+            been retired. <Link to="/activity">Activity</Link> keeps the record either way.
           </InfoNote>
         </div>
       )
@@ -116,7 +155,10 @@ export function TerminalDetailPage() {
   const terminal = query.data
   const health = readHealth(terminal)
   const release = releaseQuery.data
-  const releasing = terminal.release?.state === 'ORDERED' || release?.state === 'ORDERED'
+  // Outstanding, and not yet noticed as finished: the effect above handles the
+  // finished case and the page is on its way out when it fires.
+  const releasing = hadOrder && !completed
+  const releasePath = releasePathFor(terminal, release)
 
   /*
     WHAT THIS TERMINAL SERVES, AND THE DISTINCTION THAT USED TO BE MISSING.
@@ -185,32 +227,80 @@ export function TerminalDetailPage() {
 
       {releasing ? (
         <InfoNote tone="warning" title="This terminal is being released for transfer">
+          {/*
+            WHAT THE ORDER WILL DO DEPENDS ON THE PATH (releasePath.ts), and the
+            banner says which. The previous copy told the holder of an
+            old-firmware unit to type a console command that firmware does not
+            have; the answer for that unit is a firmware update, and the order is
+            held for it until then.
+          */}
           <p>
             Ordered{' '}
             {release?.ordered_by_email ? <>by {release.ordered_by_email} </> : null}
             <Timestamp value={release?.ordered_at ?? terminal.release?.ordered_at} relative />.{' '}
-            {release?.terminal_capable ?? terminalCanRelease(terminal) ? (
-              <>
-                Waiting for the terminal to confirm it has erased itself — it stops letting
-                anyone in the moment it sees the order. Last seen{' '}
-                <Timestamp value={terminal.last_seen_at} relative fallback="never" />.
-              </>
-            ) : (
-              <>
-                This terminal cannot erase itself on an order: wipe it at the unit
-                (<code className="mono">release</code> on its console), then release it
-                anyway below.
-              </>
-            )}
+            {
+              {
+                automated: (
+                  <>
+                    Waiting for the terminal to confirm it has erased itself — it stops letting
+                    anyone in the moment it receives the order.{' '}
+                    {health.reachable ? null : (
+                      <>
+                        It is offline right now, so until it next checks in it is still working
+                        under its site&apos;s offline policy.{' '}
+                      </>
+                    )}
+                    Last seen <Timestamp value={terminal.last_seen_at} relative fallback="never" />.
+                  </>
+                ),
+                'update-firmware': (
+                  <>
+                    This terminal&apos;s firmware cannot carry out the release yet, so the order
+                    is being held for it.{' '}
+                    {terminal.firmware_outdated ? (
+                      <>
+                        Update its firmware from <Link to="/settings/firmware">Firmware</Link>;
+                      </>
+                    ) : (
+                      <>
+                        Publish a build that supports release under{' '}
+                        <Link to="/settings/firmware">Firmware</Link> and update it;
+                      </>
+                    )}{' '}
+                    the first time it checks in on a build that can, it erases itself.{' '}
+                    <strong>Release anyway does not wipe the unit.</strong>
+                  </>
+                ),
+                'wipe-at-unit': (
+                  <>
+                    This terminal has no credential, so the order cannot reach it. Wipe it at
+                    the unit — type <code className="mono">release</code> at its USB console,
+                    then <code className="mono">y</code> — and then choose Release anyway below
+                    to free the serial.
+                  </>
+                ),
+                'no-remote-path': (
+                  <>
+                    This terminal has no credential and its firmware cannot carry out a release,
+                    so the order cannot reach it and it cannot be updated. Re‑register it with a
+                    claim code, update its firmware, and it will act on the order.{' '}
+                    <strong>Release anyway does not wipe the unit.</strong>
+                  </>
+                ),
+              }[releasePath]
+            }
           </p>
           {mayAdminister ? (
             <p className="badge-group">
               <button type="button" className="button" onClick={() => setLifecycle('cancel-release')}>
                 Cancel release
               </button>
+              {/* Inert until the order's facts are here: the force attests to a
+                  named order and cannot be typed against one it has not read. */}
               <button
                 type="button"
                 className="button button--danger"
+                disabled={!release}
                 onClick={() => setLifecycle('force-release')}
               >
                 Release anyway…
@@ -747,10 +837,27 @@ export function TerminalDetailPage() {
                 For a unit going to <strong>another AccessLink account</strong>. The
                 terminal stops working, erases every member and every enrolled finger it holds,
                 forgets your Wi‑Fi and restarts showing a pairing code for its next
-                owner. Your history stays here.
-                {terminalCanRelease(terminal)
-                  ? ''
-                  : ' This terminal\u2019s firmware cannot do the erasing on its own, so it has to be wiped at the unit.'}
+                owner. Your history stays here.{' '}
+                {
+                  {
+                    automated: null,
+                    'update-firmware': (
+                      <>
+                        This terminal&apos;s firmware cannot do the erasing yet — it needs a
+                        firmware update first, and the order waits for it.
+                      </>
+                    ),
+                    'wipe-at-unit': (
+                      <>This terminal has no credential, so it has to be wiped at the unit.</>
+                    ),
+                    'no-remote-path': (
+                      <>
+                        This terminal has no credential and its firmware cannot do the erasing;
+                        re‑register it and update it first.
+                      </>
+                    ),
+                  }[releasePath]
+                }
               </p>
             </div>
             <button
@@ -905,10 +1012,20 @@ export function TerminalDetailPage() {
         />
       ) : null}
       {lifecycle === 'release' ? (
-        <ReleaseTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+        <ReleaseTerminalDialog
+          open
+          terminal={terminal}
+          release={release}
+          onClose={() => setLifecycle(null)}
+        />
       ) : null}
       {lifecycle === 'cancel-release' ? (
-        <CancelReleaseDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+        <CancelReleaseDialog
+          open
+          terminal={terminal}
+          onClose={() => setLifecycle(null)}
+          onReleased={() => navigate('/terminals', { replace: true })}
+        />
       ) : null}
       {lifecycle === 'force-release' && release ? (
         <ForceReleaseDialog
