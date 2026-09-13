@@ -50,7 +50,18 @@ const deviceInventoryColumns = `
 	-- "none" -- a brand-new unit that has not heartbeat yet and a build that
 	-- predates capability reporting are both NULL here and deserve different
 	-- answers.
-	d.capabilities`
+	d.capabilities,
+
+	-- Release (032): NULL or ORDERED on a live row. A RELEASED row is deleted
+	-- and never listed.
+	d.release_state, d.release_ordered_at, d.release_ordered_by_email,
+	d.release_order_mac IS NOT NULL AS release_verifiable,
+
+	-- Readiness (032): whether the gate was armed at collection, the snapshot
+	-- this terminal was last seeded with, and where that job stands.
+	d.readiness_armed_at IS NOT NULL AS readiness_armed,
+	d.readiness_job_id,
+	(SELECT j.status FROM sync_jobs j WHERE j.id = d.readiness_job_id) AS readiness_job_status`
 
 // The firmware join carries company_id as well as type and channel: "current"
 // is a per-tenant target, so a device must only ever be measured against its own
@@ -103,6 +114,15 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 	for rows.Next() {
 		var d models.DeviceInventory
 		var capabilities []byte
+		var (
+			releaseState      sql.NullString
+			releaseOrderedAt  sql.NullTime
+			releaseOrderedBy  sql.NullString
+			releaseVerifiable bool
+			readinessArmed    bool
+			readinessJobID    sql.NullInt64
+			readinessStatus   sql.NullString
+		)
 		err := rows.Scan(
 			&d.ID, &d.PublicID, &d.SiteID, &d.SitePublicID,
 			&d.SiteName, &d.SerialNumber, &d.DeviceName,
@@ -112,10 +132,26 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 			&d.CurrentFirmwareVersion, &d.FirmwareOutdated,
 			&d.MemberCapacity, &d.RosterOverflowAt, &d.RosterOverflowCount,
 			&d.ProvisionedVia, &capabilities,
+			&releaseState, &releaseOrderedAt, &releaseOrderedBy, &releaseVerifiable,
+			&readinessArmed, &readinessJobID, &readinessStatus,
 		)
 		if err != nil {
 			return nil, err
 		}
+
+		if releaseState.Valid && releaseState.String != "" {
+			summary := &models.TerminalReleaseSummary{
+				State:           releaseState.String,
+				OrderedByEmail:  releaseOrderedBy.String,
+				OrderVerifiable: releaseVerifiable,
+			}
+			if releaseOrderedAt.Valid {
+				t := releaseOrderedAt.Time
+				summary.OrderedAt = &t
+			}
+			d.Release = summary
+		}
+		d.Readiness = readinessFor(readinessArmed, readinessJobID, readinessStatus)
 
 		// A malformed list is dropped rather than failing the read. This column
 		// is filled by devices; one terminal that wrote nonsense into it must
@@ -127,6 +163,35 @@ func scanDeviceInventory(rows *sql.Rows) ([]models.DeviceInventory, error) {
 		devices = append(devices, d)
 	}
 	return devices, rows.Err()
+}
+
+// readinessFor derives the console's readiness answer from the gate columns.
+//
+// READY when the snapshot the terminal was given has been acknowledged, or
+// when nothing has ever gated it -- a row from before the gate existed.
+// SETTING_UP for every other state of that job -- PENDING, DELIVERED, FAILED
+// -- and for CANCELLED too, which recordReadinessSnapshotTx prevents from
+// persisting but which must not read as ready if it ever did.
+//
+// An ARMED row with NO job is SETTING_UP, not READY. That is the collection
+// whose snapshot was refused for capacity: the unit has been handed a
+// credential and has never been told what to hold, and on a transferred unit
+// it may still hold the previous owner's roster. READY there would be the
+// exact false statement the gate exists to prevent.
+func readinessFor(armed bool, jobID sql.NullInt64, status sql.NullString) models.TerminalReadiness {
+	out := models.TerminalReadiness{State: models.ReadinessReady}
+	if !jobID.Valid {
+		if armed {
+			out.State = models.ReadinessSettingUp
+		}
+		return out
+	}
+	id := jobID.Int64
+	out.JobID = &id
+	if !status.Valid || status.String != "COMPLETED" {
+		out.State = models.ReadinessSettingUp
+	}
+	return out
 }
 
 // siteScopeClause narrows a device read to a set of sites.

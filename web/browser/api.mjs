@@ -102,6 +102,11 @@ function terminal(index, overrides = {}) {
     last_heartbeat_at: '2026-08-15T09:00:00Z',
     current_firmware_version: '1.2.0',
     firmware_outdated: false,
+    // Release and readiness (032). The default row is a ready terminal on
+    // firmware that can release itself, so the detail page draws the
+    // automated Release option.
+    capabilities: ['wifi_provisioning', 'wifi_recovery', 'terminal_announce', 'terminal_release'],
+    readiness: { state: 'READY' },
     ...overrides,
   }
 }
@@ -109,8 +114,25 @@ function terminal(index, overrides = {}) {
 // Every status the badge knows how to draw, so the contrast check sees them all.
 const TERMINALS = [
   terminal(1, { device_name: 'North Gate (staff and contractor entrance)' }),
-  terminal(2, { status: 'OFFLINE', device_name: 'Loading Bay' }),
-  terminal(3, { status: 'ERROR', device_name: 'Reception', firmware_outdated: true, firmware_version: '1.1.0' }),
+  // The two transient states beside liveness (032), so their badges and the
+  // detail banner are in the contrast check too.
+  terminal(2, {
+    status: 'OFFLINE',
+    device_name: 'Loading Bay',
+    release: {
+      state: 'ORDERED',
+      ordered_at: '2026-08-15T08:00:00Z',
+      ordered_by_email: 'ops@example.com',
+      order_verifiable: true,
+    },
+  }),
+  terminal(3, {
+    status: 'ERROR',
+    device_name: 'Reception',
+    firmware_outdated: true,
+    firmware_version: '1.1.0',
+    readiness: { state: 'SETTING_UP', job_id: 12 },
+  }),
   terminal(4, {
     status: 'DISABLED',
     active: false,
@@ -508,6 +530,20 @@ const ROUTES = [
     provisioning: 0,
     firmware_outdated: 1,
   })],
+  // The release facts (032), read by the detail page beside the terminal.
+  [/\/api\/v1\/console\/terminals\/[^/]+\/release$/, (url) => {
+    const serial = url.pathname.split('/').slice(-2)[0]
+    const found = TERMINALS.find((entry) => entry.serial_number === serial) ?? TERMINALS[0]
+    return {
+      serial_number: found.serial_number,
+      state: found.release ? 'ORDERED' : '',
+      ordered_at: found.release?.ordered_at,
+      ordered_by_email: found.release?.ordered_by_email,
+      terminal_capable: (found.capabilities ?? []).includes('terminal_release'),
+      order_verifiable: true,
+      last_seen_at: found.last_seen_at,
+    }
+  }],
   [/\/api\/v1\/console\/terminals\/[^/]+$/, (url) => {
     const serial = url.pathname.split('/').pop()
     const found = TERMINALS.find((entry) => entry.serial_number === serial) ?? TERMINALS[0]

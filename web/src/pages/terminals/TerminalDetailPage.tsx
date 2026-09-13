@@ -8,7 +8,7 @@ import { can } from '../../auth/permissions'
 import { Badge, TerminalStatusBadge, humaniseCode } from '../../components/Badge'
 import { ErrorState, InfoNote, LoadingState, PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
-import { useSite, useTerminal } from '../../data/console'
+import { useSite, useTerminal, useTerminalRelease } from '../../data/console'
 import {
   describeGrace,
   offlinePolicyDefinition,
@@ -19,11 +19,15 @@ import { ApplicationModeDialog } from './ApplicationModeDialog'
 import { ChangeWifiDialog } from './ChangeWifiDialog'
 import { EvaluateAccessDialog } from './EvaluateAccessDialog'
 import {
+  CancelReleaseDialog,
+  ForceReleaseDialog,
   MoveTerminalDialog,
+  ReleaseTerminalDialog,
   ResyncTerminalDialog,
   RetireTerminalDialog,
   RevokeTerminalDialog,
   TerminalStateDialog,
+  terminalCanRelease,
 } from './TerminalLifecycleDialogs'
 import { readHealth } from './health'
 
@@ -50,6 +54,13 @@ export function TerminalDetailPage() {
   // the terminal read has produced a site id, so a 404 on the terminal does not
   // also fire a second doomed request.
   const site = useSite(query.data?.site_public_id)
+  // The release facts (032). Read once the terminal has loaded; polled while
+  // an order is outstanding, because the terminal confirms with no browser in
+  // the loop and the banner has to move on its own.
+  const releaseQuery = useTerminalRelease(serial, {
+    enabled: Boolean(query.data),
+    poll: Boolean(query.data?.release),
+  })
   const [configuring, setConfiguring] = useState(false)
   const [lifecycle, setLifecycle] = useState<LifecycleAction | null>(null)
   const [changingWifi, setChangingWifi] = useState(false)
@@ -104,6 +115,8 @@ export function TerminalDetailPage() {
 
   const terminal = query.data
   const health = readHealth(terminal)
+  const release = releaseQuery.data
+  const releasing = terminal.release?.state === 'ORDERED' || release?.state === 'ORDERED'
 
   /*
     WHAT THIS TERMINAL SERVES, AND THE DISTINCTION THAT USED TO BE MISSING.
@@ -167,6 +180,52 @@ export function TerminalDetailPage() {
           title="Health"
         >
           {health.note}
+        </InfoNote>
+      ) : null}
+
+      {releasing ? (
+        <InfoNote tone="warning" title="This terminal is being released for transfer">
+          <p>
+            Ordered{' '}
+            {release?.ordered_by_email ? <>by {release.ordered_by_email} </> : null}
+            <Timestamp value={release?.ordered_at ?? terminal.release?.ordered_at} relative />.{' '}
+            {release?.terminal_capable ?? terminalCanRelease(terminal) ? (
+              <>
+                Waiting for the terminal to confirm it has erased itself — it stops letting
+                anyone in the moment it sees the order. Last seen{' '}
+                <Timestamp value={terminal.last_seen_at} relative fallback="never" />.
+              </>
+            ) : (
+              <>
+                This terminal cannot erase itself on an order: wipe it at the unit
+                (<code className="mono">release</code> on its console), then release it
+                anyway below.
+              </>
+            )}
+          </p>
+          {mayAdminister ? (
+            <p className="badge-group">
+              <button type="button" className="button" onClick={() => setLifecycle('cancel-release')}>
+                Cancel release
+              </button>
+              <button
+                type="button"
+                className="button button--danger"
+                onClick={() => setLifecycle('force-release')}
+              >
+                Release anyway…
+              </button>
+            </p>
+          ) : null}
+        </InfoNote>
+      ) : null}
+
+      {terminal.readiness.state === 'SETTING_UP' && !releasing ? (
+        <InfoNote title="Setting up">
+          This terminal is loading its roster from this account. It shows as{' '}
+          <strong>Ready</strong> once it has confirmed the people it should recognise —
+          on a transferred unit, that is also the moment the previous owner&apos;s roster
+          is gone.
         </InfoNote>
       ) : null}
 
@@ -683,6 +742,29 @@ export function TerminalDetailPage() {
 
           <li className="lifecycle__option">
             <div className="lifecycle__text">
+              <h3 className="lifecycle__title">Release for transfer</h3>
+              <p className="lifecycle__detail">
+                For a unit going to <strong>another AccessLink account</strong>. The
+                terminal stops working, erases every member and every enrolled finger it holds,
+                forgets your Wi‑Fi and restarts showing a pairing code for its next
+                owner. Your history stays here.
+                {terminalCanRelease(terminal)
+                  ? ''
+                  : ' This terminal\u2019s firmware cannot do the erasing on its own, so it has to be wiped at the unit.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button button--danger"
+              disabled={!mayAdminister || releasing}
+              onClick={() => setLifecycle('release')}
+            >
+              {releasing ? 'Releasing…' : 'Release'}
+            </button>
+          </li>
+
+          <li className="lifecycle__option">
+            <div className="lifecycle__text">
               <h3 className="lifecycle__title">Move to another site</h3>
               <p className="lifecycle__detail">
                 Reassigns which people this terminal knows about. It erases what it
@@ -822,6 +904,21 @@ export function TerminalDetailPage() {
           onRetired={() => navigate('/terminals', { replace: true })}
         />
       ) : null}
+      {lifecycle === 'release' ? (
+        <ReleaseTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
+      {lifecycle === 'cancel-release' ? (
+        <CancelReleaseDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
+      ) : null}
+      {lifecycle === 'force-release' && release ? (
+        <ForceReleaseDialog
+          open
+          terminal={terminal}
+          release={release}
+          onClose={() => setLifecycle(null)}
+          onReleased={() => navigate('/terminals', { replace: true })}
+        />
+      ) : null}
       {lifecycle === 'move' ? (
         <MoveTerminalDialog open terminal={terminal} onClose={() => setLifecycle(null)} />
       ) : null}
@@ -835,7 +932,16 @@ export function TerminalDetailPage() {
   )
 }
 
-type LifecycleAction = 'state' | 'revoke' | 'retire' | 'move' | 'resync' | 'evaluate'
+type LifecycleAction =
+  | 'state'
+  | 'revoke'
+  | 'retire'
+  | 'release'
+  | 'cancel-release'
+  | 'force-release'
+  | 'move'
+  | 'resync'
+  | 'evaluate'
 
 /**
  * How this terminal's CURRENT credential was issued.

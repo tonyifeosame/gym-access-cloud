@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/hex"
 	"errors"
 	"log"
 	"net/http"
@@ -77,6 +78,21 @@ func AnnounceTerminal(c *gin.Context) {
 		return
 	}
 
+	// The release receipt (032), if the unit carries one. Malformed hex is
+	// treated as no receipt at all rather than as a 400: the announce is the
+	// thing that must succeed, and the receipt is a courtesy the platform can
+	// answer UNKNOWN to.
+	var (
+		receiptID string
+		receipt   []byte
+	)
+	if req.ReleaseReceipt != nil {
+		receiptID = req.ReleaseReceipt.ReleaseID
+		if decoded, err := hex.DecodeString(req.ReleaseReceipt.Receipt); err == nil {
+			receipt = decoded
+		}
+	}
+
 	result, err := database.Announce(database.AnnounceRequest{
 		SerialNumber:     req.SerialNumber,
 		FirmwareVersion:  req.FirmwareVersion,
@@ -84,6 +100,8 @@ func AnnounceTerminal(c *gin.Context) {
 		Capabilities:     req.Capabilities,
 		IPAddress:        c.ClientIP(),
 		PresentedToken:   c.GetHeader(AnnounceTerminalHeader),
+		ReleaseReceiptID: receiptID,
+		ReleaseReceipt:   receipt,
 	})
 	switch {
 	case errors.Is(err, database.ErrAnnouncementSerialRequired),
@@ -101,6 +119,13 @@ func AnnounceTerminal(c *gin.Context) {
 	// able to adopt it themselves.
 	logAnnounce(c, result)
 
+	// A receipt that finalized a release is audited into the company that lost
+	// the terminal -- the same record the authenticated confirm route writes,
+	// because it is the same fact arriving by the other channel.
+	if result.ReleaseFinalized != nil {
+		auditReleaseConfirmed(c, result.ReleaseFinalized, nil)
+	}
+
 	status := http.StatusCreated
 	if result.Existing {
 		// 200 rather than 201: nothing was created. A terminal re-announcing on a
@@ -116,6 +141,7 @@ func AnnounceTerminal(c *gin.Context) {
 		AnnounceToken:    result.AnnounceToken,
 		ExpiresAt:        result.ExpiresAt,
 		PollAfterSeconds: database.AnnouncePollSeconds,
+		ReceiptStatus:    result.ReceiptStatus,
 	})
 }
 
@@ -277,6 +303,13 @@ func ConsoleAdoptAnnouncement(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error": err.Error(),
 			"code":  "TERMINAL_DISABLED",
+		})
+		return
+
+	case errors.Is(err, database.ErrReleaseInProgress):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": err.Error(),
+			"code":  "RELEASE_IN_PROGRESS",
 		})
 		return
 

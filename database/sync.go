@@ -743,7 +743,13 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 	}
 
 	// The authoritative roster: IDs only, so this stays small.
-	_, err = tx.Exec(`
+	//
+	// The snapshot's id is RETURNED, because it is also the readiness gate
+	// (032): a terminal is SETTING_UP until it has acknowledged the snapshot
+	// it was last given. A quarantined terminal gets no snapshot and the
+	// insert returns no row, which leaves whatever readiness it had.
+	var snapshotID sql.NullInt64
+	err = tx.QueryRow(`
 		INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type,
 		                       payload, protocol_version, status)
 		SELECT d.site_id, d.id, 'FULL_SYNC', 'ROSTER',
@@ -772,10 +778,16 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 		   -- destructive job there is: the terminal treats it as authoritative
 		   -- and erases the template of anybody the roster omits. See migration
 		   -- 029 and deviceIsSyncable in roster.go.
-		   AND d.sync_paused_at IS NULL`,
-		deviceID, models.SyncProtocolVersion)
-	if err != nil {
+		   AND d.sync_paused_at IS NULL
+		RETURNING id`,
+		deviceID, models.SyncProtocolVersion).Scan(&snapshotID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("enqueueing roster snapshot: %w", err)
+	}
+	if snapshotID.Valid {
+		if err := recordReadinessSnapshotTx(tx, deviceID, snapshotID.Int64); err != nil {
+			return 0, err
+		}
 	}
 
 	// Then the full records, so the device can fill in anything it is missing.
@@ -817,6 +829,68 @@ func compactDeviceBacklogTx(tx *sql.Tx, deviceID int64, reason string) (int, err
 	}
 
 	return int(superseded), nil
+}
+
+// recordReadinessSnapshotTx points a device's readiness gate at a snapshot.
+//
+// ONLY WHEN THE PREVIOUS GATE HAS NOT BEEN PASSED. A terminal that is READY
+// stays ready across an ordinary compaction -- a resync is maintenance, not a
+// return to setting-up -- but one still SETTING_UP whose snapshot was just
+// superseded must follow the replacement, or it would wait on a CANCELLED job
+// for ever.
+func recordReadinessSnapshotTx(tx *sql.Tx, deviceID, snapshotID int64) error {
+	_, err := tx.Exec(`
+		UPDATE devices d
+		   SET readiness_job_id = $2
+		 WHERE d.id = $1
+		   AND (d.readiness_job_id IS NULL
+		        OR NOT EXISTS (SELECT 1 FROM sync_jobs j
+		                        WHERE j.id = d.readiness_job_id
+		                          AND j.status = 'COMPLETED'))`,
+		deviceID, snapshotID)
+	return err
+}
+
+// seedCollectedDeviceTx replaces the CREATE bootstrap of a freshly collected
+// terminal with a FULL_SYNC snapshot, and arms its readiness gate (032).
+//
+// Called from announcement collection, inside the transaction that minted the
+// credential, AFTER registerDeviceTx has queued the CREATE bootstrap. The
+// compaction cancels that bootstrap and re-queues the same people behind a
+// snapshot, so the terminal receives "hold exactly these" before the records.
+//
+// A capacity refusal is NOT an error here: the CREATE seeding stays, the
+// overflow is recorded on the row exactly as the heartbeat's review would
+// record it, and the claim succeeds. Refusing a customer's setup because their
+// roster is larger than the unit would be the wrong moment to say so.
+//
+// The gate is ARMED here -- readiness_armed_at -- and readiness_job_id is set
+// to NULL first, so the gate follows THIS snapshot even when the row is a
+// re-provisioned one whose earlier snapshot had completed. Arming is separate
+// from recording the snapshot because the snapshot may be refused below: an
+// armed row with no job reads SETTING_UP (readinessFor), which is the truth
+// about a unit that has never been told what to hold.
+func seedCollectedDeviceTx(tx *sql.Tx, deviceID int64) error {
+	if _, err := tx.Exec(`
+		UPDATE devices
+		   SET readiness_armed_at = CURRENT_TIMESTAMP,
+		       readiness_job_id = NULL
+		 WHERE id = $1`, deviceID); err != nil {
+		return err
+	}
+	if _, err := compactDeviceBacklogTx(tx, deviceID, "superseded by the collection snapshot"); err != nil {
+		var overflow *RosterCapacityError
+		if errors.As(err, &overflow) {
+			_, recordErr := tx.Exec(`
+				UPDATE devices
+				   SET roster_overflow_at = CURRENT_TIMESTAMP,
+				       roster_overflow_count = $2
+				 WHERE id = $1`, deviceID, overflow.RosterSize)
+			return recordErr
+		}
+		return err
+	}
+	return nil
 }
 
 // FetchDeviceWork returns a device's due jobs, compacting its backlog first if

@@ -41,6 +41,18 @@ type AnnounceRequest struct {
 	// and gates nothing: the gate reads devices.capabilities, which only an
 	// authenticated heartbeat writes.
 	Capabilities []string `json:"capabilities,omitempty"`
+
+	// ReleaseReceipt is carried by a unit that has just wiped itself under a
+	// release order (032), until the platform tells it to stop. It is the
+	// proof of the wipe, keyed with the credential the unit no longer holds;
+	// see database/release.go. Optional, and never echoed back.
+	ReleaseReceipt *AnnounceReleaseReceipt `json:"release_receipt,omitempty"`
+}
+
+// AnnounceReleaseReceipt names the order that was executed and proves it.
+type AnnounceReleaseReceipt struct {
+	ReleaseID string `json:"release_id"`
+	Receipt   string `json:"receipt"` // 64 hex characters
 }
 
 // AnnounceResponse is what the terminal gets back.
@@ -59,6 +71,12 @@ type AnnounceResponse struct {
 
 	ExpiresAt        time.Time `json:"expires_at"`
 	PollAfterSeconds int       `json:"poll_after_seconds"`
+
+	// ReceiptStatus tells a unit carrying a release receipt what became of it:
+	// CONSUMED (this or an earlier announce finalized the release -- stop
+	// presenting it), UNKNOWN (no order matches -- stop presenting it), or
+	// ABSENT (nothing was presented). Older firmware ignores the key.
+	ReceiptStatus string `json:"receipt_status,omitempty"`
 }
 
 // AnnounceStatusResponse is the answer to the terminal's poll.

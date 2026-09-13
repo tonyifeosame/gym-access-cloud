@@ -506,6 +506,11 @@ export interface Terminal {
    * exactly why this field exists.
    */
   capabilities?: TerminalCapability[]
+
+  /** Present only while a release is ORDERED (032). */
+  release?: TerminalReleaseSummary
+  /** Always present (032). */
+  readiness: TerminalReadiness
 }
 
 /**
@@ -520,6 +525,32 @@ export type TerminalCapability =
   | 'wifi_provisioning'
   | 'wifi_recovery'
   | 'terminal_announce'
+  /** The firmware verifies and executes release orders (032). */
+  | 'terminal_release'
+
+/**
+ * Whether the terminal has acknowledged the roster snapshot it was last
+ * seeded with (032). A transferred unit is SETTING_UP from collection until
+ * its FULL_SYNC is acknowledged — the moment the previous owner's roster is
+ * provably gone — and a new unit reads the same way, honestly.
+ */
+export type TerminalReadinessState = 'READY' | 'SETTING_UP'
+
+export interface TerminalReadiness {
+  state: TerminalReadinessState
+  job_id?: number
+}
+
+/**
+ * Present on a terminal while a release of it is ORDERED (032). Absent on
+ * every other live row. The full record is on the release endpoint.
+ */
+export interface TerminalReleaseSummary {
+  state: 'ORDERED'
+  ordered_at?: string
+  ordered_by_email?: string
+  order_verifiable: boolean
+}
 
 /**
  * One terminal in full.
@@ -772,6 +803,68 @@ export interface TerminalLifecycleResponse {
   moved?: boolean
   /** The server's own words on how to bring a revoked terminal back. */
   recovery?: string
+}
+
+// ---------------------------------------------------------------------------
+// Release for transfer (032)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE FOURTH LIFECYCLE OPERATION, and the one that ends with the terminal
+ * belonging to somebody else.
+ *
+ *   RELEASE   Two steps. ORDER puts a signed release order in front of the
+ *             terminal; the terminal stops opening, uploads its last door
+ *             events to THIS company, erases every member and fingerprint
+ *             template it holds, forgets the Wi-Fi, clears its credential and
+ *             restarts into setup showing a pairing code. The serial is freed
+ *             for the next owner only when the terminal proves the wipe with
+ *             a receipt — or when an administrator FORCES it, attesting that
+ *             the unit will keep working for this company's members until it
+ *             reconnects or is wiped at the unit.
+ *
+ * Offered as an automated workflow only to a terminal that reported the
+ * `terminal_release` capability. Older firmware gets the physical procedure
+ * and the force path.
+ */
+export interface TerminalReleaseRequest {
+  reason?: string
+}
+
+export interface TerminalForceReleaseRequest {
+  /** Must be true. The console sets it only after a typed confirmation. */
+  attest: boolean
+  /**
+   * The order the attestation was typed against. The server refuses a force
+   * naming any other order (409 RELEASE_MISMATCH), so a page left open across
+   * a cancel-and-reorder cannot finalize an order its operator never read.
+   */
+  release_id?: string
+  reason?: string
+}
+
+export interface TerminalRelease {
+  serial_number: string
+  /** `''` when nothing is ordered, `ORDERED` while the terminal has an order. */
+  state: '' | 'ORDERED'
+  release_id?: string
+  ordered_at?: string
+  ordered_by_email?: string
+  reason?: string
+  /** The firmware reported `terminal_release`: the automated flow applies. */
+  terminal_capable: boolean
+  /** The row had a credential to key the order with. False means the unit can only be wiped at the unit. */
+  order_verifiable: boolean
+  last_seen_at?: string
+}
+
+export interface TerminalReleasedResponse {
+  serial_number: string
+  release_id: string
+  released: boolean
+  confirmed_by: 'TERMINAL' | 'OPERATOR' | 'PLATFORM'
+  pending_jobs_cancelled: number
+  announcements_voided: number
 }
 
 export interface TerminalRetiredResponse {

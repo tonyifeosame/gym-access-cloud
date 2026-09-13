@@ -71,6 +71,9 @@ export const keys = {
      * command that can no longer be delivered.
      */
     wifiRecovery: (serial: string) => [ROOT, 'terminals', 'wifi-recovery', serial] as const,
+
+    /** The release facts for one terminal (032). Under `terminals` for the same reason. */
+    release: (serial: string) => [ROOT, 'terminals', 'release', serial] as const,
   },
 
   /**

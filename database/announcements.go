@@ -295,6 +295,14 @@ type AnnounceRequest struct {
 	// unit still holds one. Optional, and the difference it makes is in
 	// AnnouncedTerminal's comment.
 	PresentedToken string
+
+	// ReleaseReceiptID and ReleaseReceipt are what a unit that has just wiped
+	// itself under a release order (032) carries until the platform tells it
+	// to stop. Optional. A receipt that verifies finalizes the release in the
+	// same transaction that creates the announcement; one that does not is
+	// ignored and the announce proceeds as an ordinary one.
+	ReleaseReceiptID string
+	ReleaseReceipt   []byte
 }
 
 // AnnouncedTerminal is the result of announcing.
@@ -320,6 +328,14 @@ type AnnouncedTerminal struct {
 	// Existing reports that this call resolved to an announcement that was
 	// already live rather than creating one.
 	Existing bool
+
+	// ReceiptStatus is one of the ReceiptStatus* constants (release.go).
+	ReceiptStatus string
+
+	// ReleaseFinalized is set when this announce's receipt finalized a
+	// release, so the handler can audit it into the company that lost the
+	// terminal. Nil otherwise.
+	ReleaseFinalized *ReleaseFinalization
 }
 
 // Announce creates or refreshes a terminal's request to be set up.
@@ -354,6 +370,17 @@ func Announce(req AnnounceRequest) (*AnnouncedTerminal, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	// THE RELEASE RECEIPT, FIRST (032). A unit that has just executed a release
+	// order announces with the receipt that proves it; consuming it here
+	// finalizes the previous owner's row -- soft-deleting it and voiding any
+	// announcement in flight for the serial -- BEFORE the announcement this
+	// call is about to create exists, so the new row is never among the voided.
+	receiptStatus, finalized, err := consumeReleaseReceiptTx(tx, serial,
+		req.ReleaseReceiptID, req.ReleaseReceipt)
+	if err != nil {
+		return nil, err
+	}
 
 	// Time out anything for this serial that has run out before touching the
 	// unique index it occupies. The background sweep does this fleet-wide on an
@@ -410,11 +437,13 @@ func Announce(req AnnounceRequest) (*AnnouncedTerminal, error) {
 				return nil, err
 			}
 			return &AnnouncedTerminal{
-				PublicID:     livePub,
-				State:        liveState,
-				SerialNumber: serial,
-				ExpiresAt:    liveExp,
-				Existing:     true,
+				PublicID:         livePub,
+				State:            liveState,
+				SerialNumber:     serial,
+				ExpiresAt:        liveExp,
+				Existing:         true,
+				ReceiptStatus:    receiptStatus,
+				ReleaseFinalized: finalizedIfNew(finalized),
 			}, nil
 		}
 
@@ -469,13 +498,24 @@ func Announce(req AnnounceRequest) (*AnnouncedTerminal, error) {
 	}
 
 	return &AnnouncedTerminal{
-		PublicID:      publicID,
-		State:         AnnouncementPending,
-		PairingCode:   code,
-		AnnounceToken: token,
-		SerialNumber:  serial,
-		ExpiresAt:     expiresAt,
+		PublicID:         publicID,
+		State:            AnnouncementPending,
+		PairingCode:      code,
+		AnnounceToken:    token,
+		SerialNumber:     serial,
+		ExpiresAt:        expiresAt,
+		ReceiptStatus:    receiptStatus,
+		ReleaseFinalized: finalizedIfNew(finalized),
 	}, nil
+}
+
+// finalizedIfNew keeps only a finalization this call performed. A receipt for
+// an already-released row is answered CONSUMED but audited by nobody twice.
+func finalizedIfNew(f *ReleaseFinalization) *ReleaseFinalization {
+	if f == nil || f.AlreadyReleased {
+		return nil
+	}
+	return f
 }
 
 // expireStaleForSerialTx times out this serial's own overdue rows.
@@ -731,6 +771,26 @@ func AnnouncementStatus(token, ip string) (*AnnouncementStatusResult, error) {
 		return nil, err
 	}
 
+	// THE SNAPSHOT, AND THE READINESS GATE (032).
+	//
+	// registerDeviceTx seeded the row with bare CREATE jobs, which is what a
+	// blank unit needs and NOT what a transferred one needs: a CREATE is an
+	// upsert and says nothing about people the terminal already holds. A
+	// FULL_SYNC snapshot is a set difference -- "hold exactly these" -- so it
+	// removes a previous owner's members and erases their templates on
+	// firmware that did not wipe itself, and is a no-op on one that did. The
+	// snapshot's id is recorded so the console can hold the terminal at
+	// SETTING_UP until the terminal acknowledges it.
+	//
+	// Applied to EVERY collection rather than only post-release ones, because
+	// the platform cannot tell a transferred unit from a new one at this point
+	// with certainty, and "setting up until the roster is on the unit" is the
+	// honest state for both. A capacity refusal keeps the CREATE seeding and
+	// records the overflow rather than failing the claim.
+	if err := seedCollectedDeviceTx(tx, device.ID); err != nil {
+		return nil, err
+	}
+
 	// The company's sealing key, minted on the first collection for that company
 	// and handed to every terminal after it (026).
 	//
@@ -892,6 +952,10 @@ type terminalOwnership struct {
 	siteName  string
 	status    string
 	active    bool
+
+	// releaseState is the row's release_state (032): "" or ORDERED for a live
+	// row. A RELEASED row is soft-deleted and is never found here.
+	releaseState string
 }
 
 // lookupTerminalOwnership finds a live device row for a serial ACROSS ALL
@@ -903,15 +967,17 @@ type terminalOwnership struct {
 // owner into a fixed refusal that names no company, no site and no operator.
 func lookupTerminalOwnership(q rowQuerier, serial string) (terminalOwnership, error) {
 	var own terminalOwnership
+	var releaseState sql.NullString
 	err := q.QueryRow(`
 		SELECT s.company_id, COALESCE(d.device_name, ''), s.site_name,
-		       d.status, d.active
+		       d.status, d.active, d.release_state
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
 		 WHERE d.serial_number = $1
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL`, serial).
-		Scan(&own.companyID, &own.name, &own.siteName, &own.status, &own.active)
+		Scan(&own.companyID, &own.name, &own.siteName, &own.status, &own.active,
+			&releaseState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return own, nil
 	}
@@ -919,16 +985,27 @@ func lookupTerminalOwnership(q rowQuerier, serial string) (terminalOwnership, er
 		return own, err
 	}
 	own.found = true
+	own.releaseState = releaseState.String
 	return own, nil
 }
 
 // verdictFor applies the ownership rule for one company.
+//
+// THE RELEASE GATE (032) sits between the two ownership answers on purpose. A
+// serial in ANOTHER company is refused with the uniform anti-hijack answer
+// whether or not that company is releasing it -- the fact that a release is
+// under way is theirs, not the caller's. A serial in the CALLER'S company with
+// a release outstanding is refused with the remedy, because re-adopting it now
+// would put a credential back on a unit that is about to wipe itself, or that
+// has already wiped and is presenting a receipt this adoption would race.
 func verdictFor(own terminalOwnership, companyID int64) (string, error) {
 	switch {
 	case !own.found:
 		return VerdictNew, nil
 	case own.companyID != companyID:
 		return "", ErrTerminalOwnedElsewhere
+	case own.releaseState == ReleaseStateOrdered:
+		return "", ErrReleaseInProgress
 	case own.status == models.DeviceDisabled || !own.active:
 		return "", ErrTerminalDisabledLocally
 	default:
@@ -1181,6 +1258,14 @@ func attachVerdict(item *Announcement, companyID int64) error {
 	switch {
 	case errors.Is(verdictErr, ErrTerminalOwnedElsewhere):
 		item.Verdict = "REFUSED_OTHER_COMPANY"
+	case errors.Is(verdictErr, ErrReleaseInProgress):
+		item.Verdict = "REFUSED_RELEASE_IN_PROGRESS"
+		item.ExistingTerminal = &ExistingTerminal{
+			SerialNumber: item.SerialNumber,
+			DeviceName:   own.name,
+			SiteName:     own.siteName,
+			Status:       own.status,
+		}
 	case errors.Is(verdictErr, ErrTerminalDisabledLocally):
 		item.Verdict = "REFUSED_DISABLED"
 		item.ExistingTerminal = &ExistingTerminal{
@@ -1363,10 +1448,13 @@ type ReleasedTerminal struct {
 // direction: the losing company cannot be made to give a unit up by the company
 // that wants it, and the gaining company cannot help itself to one.
 //
-// What it does: revokes the credential, soft-deletes the device row, cancels its
-// queued work, and voids any announcement in flight for that serial. After it
-// the serial has no live device row, so an announcement for it verdicts as NEW
-// and any company may adopt it.
+// SINCE 032 THIS IS ORDER-THEN-FORCE. If nothing is ordered for the row, an
+// order is minted first -- so the row carries a MAC the terminal can verify
+// when it next contacts the platform and wipes itself -- and the release is
+// then finalized as PLATFORM without waiting for the terminal. What that does
+// to the row is exactly what it always did: revoke the credential, soft-delete,
+// cancel queued work, void announcements in flight. After it the serial has no
+// live device row, so an announcement for it verdicts as NEW.
 func ReleaseTerminalSerial(serial, reason string) (*ReleasedTerminal, error) {
 	serial = strings.TrimSpace(serial)
 	if serial == "" {
@@ -1381,20 +1469,17 @@ func ReleaseTerminalSerial(serial, reason string) (*ReleasedTerminal, error) {
 
 	var (
 		deviceID int64
-		out      ReleasedTerminal
+		state    sql.NullString
+		hash     sql.NullString
 	)
 	err = tx.QueryRow(`
-		SELECT d.id, d.serial_number, COALESCE(d.device_name, ''),
-		       s.company_id, c.name, s.site_name
+		SELECT d.id, d.release_state, d.api_key_hash
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
-		  JOIN companies c ON c.id = s.company_id
 		 WHERE d.serial_number = $1
 		   AND d.deleted_at IS NULL
 		   AND s.deleted_at IS NULL
-		 FOR UPDATE OF d`, serial).
-		Scan(&deviceID, &out.SerialNumber, &out.DeviceName,
-			&out.CompanyID, &out.CompanyName, &out.SiteName)
+		 FOR UPDATE OF d`, serial).Scan(&deviceID, &state, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrDeviceNotFound
 	}
@@ -1402,55 +1487,37 @@ func ReleaseTerminalSerial(serial, reason string) (*ReleasedTerminal, error) {
 		return nil, err
 	}
 
-	// The credential is cleared as well as the row being deleted, on the same
-	// reasoning RetireTerminal follows: a soft-deleted row is invisible to every
-	// console query while its key would go on authenticating.
-	if _, err := tx.Exec(`
-		UPDATE devices
-		   SET deleted_at = CURRENT_TIMESTAMP,
-		       api_key_hash = NULL,
-		       api_key_prefix = NULL,
-		       credential_revoked_at = CURRENT_TIMESTAMP,
-		       credential_revoked_reason = COALESCE(NULLIF($2, ''),
-		           'released from this account by a platform administrator'),
-		       status = 'DISABLED',
-		       active = FALSE,
-		       updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1`, deviceID, reason); err != nil {
-		return nil, err
+	if state.String != ReleaseStateOrdered {
+		if _, err := orderReleaseTx(tx, deviceID, serial, hash.String, reason, 0, ""); err != nil {
+			return nil, err
+		}
 	}
 
-	cancelled, err := cancelQueuedWork(tx, deviceID, "terminal released from this account")
+	fin, err := finalizeReleaseTx(tx, deviceID, ReleaseConfirmedByPlatform,
+		coalesceReason(reason, "released from this account by a platform administrator"), nil)
 	if err != nil {
 		return nil, err
-	}
-	out.PendingJobsCancelled = cancelled
-
-	// Anything in flight for this serial is void. A PENDING row has no company
-	// and expires; an adopted or approved one belongs to the company losing the
-	// hardware and is rejected with the reason, so their operator sees why it
-	// stopped rather than watching it time out.
-	voided, err := tx.Exec(`
-		UPDATE terminal_announcements
-		   SET state = CASE WHEN company_id IS NULL THEN 'EXPIRED' ELSE 'REJECTED' END,
-		       rejected_at = CASE WHEN company_id IS NULL
-		                          THEN NULL ELSE CURRENT_TIMESTAMP END,
-		       rejected_reason = CASE WHEN company_id IS NULL THEN NULL
-		           ELSE 'the terminal was released from this account by a platform administrator'
-		       END
-		 WHERE serial_number = $1
-		   AND state IN ('PENDING', 'ADOPTED', 'APPROVED')`, serial)
-	if err != nil {
-		return nil, err
-	}
-	if n, err := voided.RowsAffected(); err == nil {
-		out.AnnouncementsVoided = n
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return &ReleasedTerminal{
+		SerialNumber:         fin.SerialNumber,
+		CompanyID:            fin.CompanyID,
+		CompanyName:          fin.CompanyName,
+		SiteName:             fin.SiteName,
+		DeviceName:           fin.DeviceName,
+		PendingJobsCancelled: fin.PendingJobsCancelled,
+		AnnouncementsVoided:  fin.AnnouncementsVoided,
+	}, nil
+}
+
+func coalesceReason(reason, fallback string) string {
+	if strings.TrimSpace(reason) == "" {
+		return fallback
+	}
+	return reason
 }
 
 // ---------------------------------------------------------------------------

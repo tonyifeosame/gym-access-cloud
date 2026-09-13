@@ -555,6 +555,38 @@ type DeviceInventory struct {
 	// SITE_KEY would be probably-true and occasionally false, and a console
 	// cannot un-say "site key".
 	ProvisionedVia string `json:"provisioned_via,omitempty"`
+
+	// Release is present while a release of this terminal is ORDERED (032),
+	// and absent on every other live row.
+	Release *TerminalReleaseSummary `json:"release,omitempty"`
+
+	// Readiness is whether this terminal has acknowledged the roster snapshot
+	// it was last seeded with (032). Always present.
+	Readiness TerminalReadiness `json:"readiness"`
+}
+
+// Readiness states (032).
+const (
+	ReadinessReady     = "READY"
+	ReadinessSettingUp = "SETTING_UP"
+)
+
+// TerminalReadiness is the console's answer to "has this terminal loaded the
+// roster it was given". A transferred unit is SETTING_UP from collection until
+// its FULL_SYNC snapshot is acknowledged -- the moment the previous owner's
+// roster is provably gone -- and a new unit reads the same way, honestly.
+type TerminalReadiness struct {
+	State string `json:"state"`
+	JobID *int64 `json:"job_id,omitempty"`
+}
+
+// TerminalReleaseSummary is what a fleet list and a detail row say about an
+// outstanding release. The full record is on GET /console/terminals/:serial/release.
+type TerminalReleaseSummary struct {
+	State           string     `json:"state"`
+	OrderedAt       *time.Time `json:"ordered_at,omitempty"`
+	OrderedByEmail  string     `json:"ordered_by_email,omitempty"`
+	OrderVerifiable bool       `json:"order_verifiable"`
 }
 
 // FleetSummary is the device-count rollup a dashboard header shows
@@ -638,6 +670,39 @@ type DeviceHeartbeatResponse struct {
 	// existed. Older firmware ignores an unknown key; newer firmware treats an
 	// absent one as "nothing to do".
 	FirmwareUpdate *FirmwareUpdateOffer `json:"firmware_update,omitempty"`
+
+	// ReleaseOrder is present while a release of this terminal is ORDERED
+	// (032). Sent on every heartbeat until the terminal confirms, because the
+	// heartbeat is at-least-once delivery and the terminal dedupes on
+	// release_id. Older firmware ignores an unknown key.
+	ReleaseOrder *DeviceReleaseOrder `json:"release_order,omitempty"`
+}
+
+// DeviceReleaseOrder is the signed instruction a terminal wipes itself on.
+//
+// The MAC is HMAC-SHA256 over "accesslink-release-v1|serial|release_id|ordered_at"
+// keyed with the raw bytes of sha256(device key); the terminal derives the
+// same key from the credential it holds and verifies before acting. See
+// database/release.go.
+type DeviceReleaseOrder struct {
+	SerialNumber string `json:"serial_number"`
+	ReleaseID    string `json:"release_id"`
+	OrderedAt    int64  `json:"ordered_at"`
+	MAC          string `json:"mac"`
+}
+
+// DeviceReleaseConfirmRequest is the terminal's authenticated confirmation.
+type DeviceReleaseConfirmRequest struct {
+	ReleaseID string          `json:"release_id" binding:"required"`
+	Receipt   string          `json:"receipt" binding:"required"`
+	Report    json.RawMessage `json:"report,omitempty"`
+}
+
+// DeviceReleaseConfirmResponse says the release is finalized.
+type DeviceReleaseConfirmResponse struct {
+	SerialNumber string `json:"serial_number"`
+	ReleaseID    string `json:"release_id"`
+	Released     bool   `json:"released"`
 }
 
 // SyncJob is one unit of change a device must apply. CREATE and UPDATE are both

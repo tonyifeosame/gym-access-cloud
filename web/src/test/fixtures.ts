@@ -110,7 +110,12 @@ export function makeTerminal(overrides: Partial<Terminal> = {}): Terminal {
     // and OMITTING the field entirely is the whole fleet in the field today --
     // one that has never said. Both are refused, and a test that wants either
     // has to ask for it.
-    capabilities: ['wifi_provisioning', 'wifi_recovery', 'terminal_announce'],
+    capabilities: ['wifi_provisioning', 'wifi_recovery', 'terminal_announce', 'terminal_release'],
+
+    // READY BY DEFAULT (032): the ordinary fixture is a terminal that has
+    // loaded its roster. `readiness: { state: 'SETTING_UP' }` is the row that
+    // has not, and a test about it asks for it.
+    readiness: { state: 'READY' },
     ...overrides,
   }
 }

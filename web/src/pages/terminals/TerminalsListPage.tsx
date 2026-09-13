@@ -116,7 +116,19 @@ export function TerminalsListPage() {
     {
       id: 'status',
       header: 'Status',
-      render: (terminal) => <TerminalStatusBadge status={terminal.status} />,
+      // The two transient states a terminal can be in beside its liveness
+      // (032): being released for transfer, or still loading its roster.
+      // Both are drawn as words, not colours, next to the status.
+      render: (terminal) => (
+        <span className="badge-group">
+          <TerminalStatusBadge status={terminal.status} />
+          {terminal.release?.state === 'ORDERED' ? (
+            <span className="badge badge--warning">Releasing</span>
+          ) : terminal.readiness?.state === 'SETTING_UP' ? (
+            <span className="badge badge--info">Setting up</span>
+          ) : null}
+        </span>
+      ),
     },
     {
       id: 'heartbeat',

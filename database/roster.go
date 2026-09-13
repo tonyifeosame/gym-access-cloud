@@ -121,12 +121,18 @@ const rosterMembershipPredicate = `
 // sync_paused_at is NOT `disabled_at` and NOT `active = FALSE`: a quarantined
 // terminal still admits people, still heartbeats and still uploads its access
 // log. Only roster membership changes stop. See migration 029.
+//
+// A TERMINAL WITH A RELEASE ORDERED IS EXCLUDED AS WELL (032). It is about to
+// erase everything a roster job would be applied to, and it must not be handed
+// anybody new in the meantime -- least of all by the reconciler re-adding the
+// people whose jobs the order cancelled.
 const deviceIsSyncable = `
 	d.active = TRUE
 	AND d.deleted_at IS NULL
 	AND d.status <> 'DISABLED'
 	AND d.api_key_hash IS NOT NULL
-	AND d.sync_paused_at IS NULL`
+	AND d.sync_paused_at IS NULL
+	AND d.release_state IS NULL`
 
 // ReconcileDeviceRoster brings one terminal's queued roster back in line with
 // what its permissions currently say, and returns what it changed.

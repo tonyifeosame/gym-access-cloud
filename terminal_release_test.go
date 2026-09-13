@@ -1,0 +1,1205 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
+)
+
+// Terminal release (032).
+//
+// The property under test is the one the design was written for: THERE IS NO
+// STATE IN WHICH THE NEXT OWNER HAS THE HARDWARE WHILE THE PREVIOUS OWNER'S
+// DATA IS USABLE ON IT. Every test here is one edge of that argument:
+//
+//   - an order keeps the row live and authenticating (the terminal must be
+//     able to fetch it, flush events, and confirm), and is idempotent
+//   - the serial is not freed until the terminal proves the wipe with a
+//     receipt, or an operator forces it with an attestation
+//   - adoption is refused while any live row exists, ORDERED or not
+//   - a wiped terminal announcing with its receipt finalizes the release in
+//     the same transaction that creates its fresh announcement
+//   - the next owner's row is seeded with a snapshot and is SETTING_UP until
+//     the terminal acknowledges it
+//   - a queued event from before this row existed is refused, not attributed
+//   - the HMAC vectors match the firmware's copy byte for byte
+
+// ---------------------------------------------------------------------------
+// Shared vectors
+// ---------------------------------------------------------------------------
+
+// The same values live in the firmware's test_release_order suite. A change to
+// either side's message layout fails one of the two fixtures rather than
+// producing a platform and a fleet that quietly disagree.
+const (
+	vectorDeviceKey = "vector-device-key"
+	vectorSerial    = "AT-VECTOR01"
+	vectorReleaseID = "0f5b1e7c-9a2d-4c3e-8f10-5a6b7c8d9e0f"
+	vectorOrderedAt = int64(1757700000)
+	vectorMAC       = "129b952d0316ed140cefee3b205c55999039f5d9626daf504b1786e2cc54da9f"
+	vectorReceipt   = "11a15d44d186e926a522fd4654ede97efb4ab3df5a97a3ba29f38d58e3723be1"
+)
+
+func TestReleaseVectorsMatchTheFirmware(t *testing.T) {
+	sum := sha256.Sum256([]byte(vectorDeviceKey))
+	hash := hex.EncodeToString(sum[:])
+
+	mac, err := database.ComputeReleaseOrderMAC(hash, vectorSerial, vectorReleaseID,
+		time.Unix(vectorOrderedAt, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(mac); got != vectorMAC {
+		t.Errorf("order MAC = %s, want %s", got, vectorMAC)
+	}
+
+	receipt, err := database.ComputeReleaseReceipt(hash, vectorSerial, vectorReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hex.EncodeToString(receipt); got != vectorReceipt {
+		t.Errorf("receipt = %s, want %s", got, vectorReceipt)
+	}
+
+	// A hash that is not a digest is refused rather than used as a short key.
+	if _, err := database.ComputeReleaseReceipt("not-hex", vectorSerial, vectorReleaseID); err == nil {
+		t.Error("a malformed hash keyed a receipt")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fixture
+// ---------------------------------------------------------------------------
+
+type releaseFixture struct {
+	*announceFixture
+	serial string
+	key    string
+}
+
+// newReleaseFixture sets a terminal up in Company One through the announce
+// flow, so it has a credential issued the way a customer's would be.
+func newReleaseFixture(t *testing.T, serial string) *releaseFixture {
+	t.Helper()
+	f := newAnnounceFixture(t)
+	key := f.setUp(t, serial, "Site A", "Front Door")
+	return &releaseFixture{announceFixture: f, serial: serial, key: key}
+}
+
+func (f *releaseFixture) order(t *testing.T, reason string) (int, map[string]any) {
+	t.Helper()
+	return consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminals/"+f.serial+"/release",
+		`{"reason":"`+reason+`"}`, f.token, f.csrf)
+}
+
+func (f *releaseFixture) readRelease(t *testing.T) map[string]any {
+	t.Helper()
+	status, body := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("reading release = %d: %v", status, body)
+	}
+	return body
+}
+
+func (f *releaseFixture) heartbeat(t *testing.T, capabilities []string) map[string]any {
+	t.Helper()
+	body := map[string]any{"firmware_version": "1.5.0", "status": "ONLINE"}
+	if capabilities != nil {
+		body["capabilities"] = capabilities
+	}
+	res := f.env.do(http.MethodPost, "/api/v1/devices/heartbeat", body, deviceAuth(f.key))
+	if res.Code != http.StatusOK {
+		t.Fatalf("heartbeat = %d: %s", res.Code, res.Raw)
+	}
+	return res.Body
+}
+
+// capableHeartbeat is a heartbeat from firmware that acts on release orders.
+// The order rides the heartbeat only once the terminal has reported the
+// capability (ReleaseOrderForDevice), so every test that expects one asks
+// this way.
+func (f *releaseFixture) capableHeartbeat(t *testing.T) map[string]any {
+	t.Helper()
+	return f.heartbeat(t, []string{"terminal_announce", database.CapabilityTerminalRelease})
+}
+
+// orderFromHeartbeat is what the terminal reads off its heartbeat.
+func orderFromHeartbeat(t *testing.T, beat map[string]any) (releaseID, mac string, orderedAt int64) {
+	t.Helper()
+	raw, ok := beat["release_order"].(map[string]any)
+	if !ok {
+		t.Fatalf("heartbeat carries no release_order: %v", beat)
+	}
+	releaseID, _ = raw["release_id"].(string)
+	mac, _ = raw["mac"].(string)
+	at, _ := raw["ordered_at"].(float64)
+	return releaseID, mac, int64(at)
+}
+
+// receiptFor computes what the terminal would, from the key it holds.
+func receiptFor(t *testing.T, key, serial, releaseID string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(key))
+	receipt, err := database.ComputeReleaseReceipt(hex.EncodeToString(sum[:]), serial, releaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(receipt)
+}
+
+func (f *releaseFixture) confirm(t *testing.T, releaseID, receipt string, report any) response {
+	t.Helper()
+	body := map[string]any{"release_id": releaseID, "receipt": receipt}
+	if report != nil {
+		body["report"] = report
+	}
+	return f.env.do(http.MethodPost, "/api/v1/devices/release/confirm", body, deviceAuth(f.key))
+}
+
+func releaseRow(t *testing.T, serial string) (state, confirmedBy string, deleted bool) {
+	t.Helper()
+	var s, by *string
+	var del *time.Time
+	mustScan(t, `SELECT release_state, release_confirmed_by, deleted_at FROM devices
+	              WHERE serial_number = '`+serial+`' ORDER BY id LIMIT 1`, &s, &by, &del)
+	if s != nil {
+		state = *s
+	}
+	if by != nil {
+		confirmedBy = *by
+	}
+	return state, confirmedBy, del != nil
+}
+
+func releaseAuditCount(t *testing.T, slug, action string) int {
+	t.Helper()
+	return queryInt(t, `SELECT count(*) FROM audit_events a
+	                     JOIN companies c ON c.id = a.company_id
+	                    WHERE a.action = '`+action+`' AND c.slug = '`+slug+`'`)
+}
+
+// ---------------------------------------------------------------------------
+// Ordering
+// ---------------------------------------------------------------------------
+
+func TestReleaseOrderIsIdempotentAndKeepsTheRowLive(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-ORDER")
+
+	status, first := f.order(t, "moving to the new branch")
+	if status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, first)
+	}
+	if first["state"] != database.ReleaseStateOrdered {
+		t.Errorf("state = %v, want ORDERED", first["state"])
+	}
+	if first["order_verifiable"] != true {
+		t.Error("an order on a credentialed row is not verifiable")
+	}
+	// No capabilities have been reported yet, so the console must not offer
+	// the automated flow.
+	if first["terminal_capable"] != false {
+		t.Errorf("terminal_capable = %v before any capability was reported", first["terminal_capable"])
+	}
+
+	// A retry returns the SAME order and audits nothing new.
+	status, second := f.order(t, "retried")
+	if status != http.StatusOK || second["release_id"] != first["release_id"] {
+		t.Errorf("a second order minted a new release: %d %v vs %v", status, second, first)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_ORDERED"); n != 1 {
+		t.Errorf("ORDERED audited %d times, want 1", n)
+	}
+
+	// The row is live and the credential still authenticates -- the terminal
+	// has to be able to fetch the order.
+	if state, _, deleted := releaseRow(t, f.serial); state != "ORDERED" || deleted {
+		t.Errorf("row after order: state=%s deleted=%v", state, deleted)
+	}
+	beat := f.heartbeat(t, []string{"terminal_announce", database.CapabilityTerminalRelease})
+	if _, mac, _ := orderFromHeartbeat(t, beat); len(mac) != 64 {
+		t.Errorf("heartbeat mac = %q, want 64 hex", mac)
+	}
+
+	// And now the console can see the terminal is capable.
+	if got := f.readRelease(t); got["terminal_capable"] != true {
+		t.Errorf("terminal_capable after a capable heartbeat = %v", got["terminal_capable"])
+	}
+
+	// The fleet list and the detail carry the summary.
+	status, detail := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals/"+f.serial, "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("detail = %d: %v", status, detail)
+	}
+	release, _ := detail["release"].(map[string]any)
+	if release["state"] != database.ReleaseStateOrdered {
+		t.Errorf("detail.release = %v, want ORDERED", detail["release"])
+	}
+}
+
+// The order waits for firmware that can act on it. Old firmware parses the
+// heartbeat into a document sized for what it knows, and an object it cannot
+// use could crowd out the firmware offer -- the one thing that would make it
+// capable. So the heartbeat carries the order only after the terminal has
+// reported terminal_release, and on that very heartbeat.
+func TestReleaseOrderWaitsForACapableTerminal(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-OLDFW")
+	if status, body := f.order(t, "sold"); status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, body)
+	}
+
+	// Firmware from before the capability existed: no capabilities at all,
+	// and then a list without the token. Neither is handed the order.
+	if beat := f.heartbeat(t, nil); beat["release_order"] != nil {
+		t.Errorf("a heartbeat with no capabilities carried the order: %v", beat["release_order"])
+	}
+	if beat := f.heartbeat(t, []string{"terminal_announce", "cmd_reboot"}); beat["release_order"] != nil {
+		t.Errorf("a heartbeat without terminal_release carried the order: %v", beat["release_order"])
+	}
+	if got := f.readRelease(t); got["state"] != database.ReleaseStateOrdered || got["terminal_capable"] != false {
+		t.Errorf("release facts while incapable = %v", got)
+	}
+
+	// The row is still ORDERED, still live, and still gets no roster work --
+	// the gate delays delivery, it does not weaken the state.
+	if state, _, deleted := releaseRow(t, f.serial); state != "ORDERED" || deleted {
+		t.Errorf("row while waiting for capability: state=%s deleted=%v", state, deleted)
+	}
+
+	// The first heartbeat that reports the capability is answered with the
+	// order -- there is no extra round trip.
+	releaseID, mac, _ := orderFromHeartbeat(t, f.capableHeartbeat(t))
+	if releaseID == "" || len(mac) != 64 {
+		t.Errorf("capable heartbeat: id=%q mac=%q", releaseID, mac)
+	}
+
+	// The by-serial fetch is not gated: only capable firmware calls it, and a
+	// forced row has no heartbeat left to carry a capability on.
+	res := f.env.do(http.MethodGet, "/api/v1/devices/release-order?serial="+f.serial, nil, nil)
+	if res.Code != http.StatusOK {
+		t.Errorf("by-serial order = %d, want 200", res.Code)
+	}
+}
+
+func TestReleaseRequiresAnAdministrator(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-ROLE")
+	_, mgrToken, mgrCSRF := consoleOperatorSession(t, f.env.router, f.companyID,
+		"rel-manager@example.com", models.RoleManager)
+
+	status, _ := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminals/"+f.serial+"/release", "{}", mgrToken, mgrCSRF)
+	if status != http.StatusForbidden {
+		t.Errorf("MANAGER ordering a release = %d, want 403", status)
+	}
+	if state, _, _ := releaseRow(t, f.serial); state != "" {
+		t.Error("a refused order changed the row")
+	}
+
+	// Another company's administrator cannot reach it at all.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-other@example.com", models.RoleAdmin)
+	status, _ = consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminals/"+f.serial+"/release", "{}", otherToken, otherCSRF)
+	if status != http.StatusNotFound {
+		t.Errorf("another company ordering a release = %d, want 404", status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The terminal executes the order
+// ---------------------------------------------------------------------------
+
+func TestConfirmFinalizesAndTheNextOwnerIsGatedUntilReady(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-XFER")
+	f.env.createMember(f.env.siteAKey, "A-001", "Old Member")
+
+	// A door event from the terminal's life in Company One, before the sale.
+	// The release soft-deletes the row; the history it wrote must not go
+	// with it.
+	logged := f.env.do(http.MethodPost, "/api/v1/devices/access/log", map[string]any{
+		"event_id": "9d2c8a4e-6b1f-4c7a-9e3d-2f5a8b1c4d7e", "member_id": "A-001",
+		"granted": true, "source": "FINGERPRINT", "occurred_at": "2026-09-01T09:15:00Z",
+	}, deviceAuth(f.key))
+	if logged.Code != http.StatusOK || logged.Body["recorded"] != true {
+		t.Fatalf("door event before release = %d: %s", logged.Code, logged.Raw)
+	}
+
+	if status, body := f.order(t, "sold"); status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, body)
+	}
+	releaseID, _, _ := orderFromHeartbeat(t, f.capableHeartbeat(t))
+
+	// The terminal wipes and confirms, with its report.
+	report := map[string]any{"members": 1, "templates_sensor": 1, "events_flushed": 0}
+	res := f.confirm(t, releaseID, receiptFor(t, f.key, f.serial, releaseID), report)
+	if res.Code != http.StatusOK || res.Body["released"] != true {
+		t.Fatalf("confirm = %d: %s", res.Code, res.Raw)
+	}
+
+	// Finalized: deleted, TERMINAL, credential dead, audited into Company One
+	// with the report, work cancelled.
+	if state, by, deleted := releaseRow(t, f.serial); state != "RELEASED" || by != "TERMINAL" || !deleted {
+		t.Errorf("row after confirm: state=%s by=%s deleted=%v", state, by, deleted)
+	}
+	if again := f.env.do(http.MethodPost, "/api/v1/devices/heartbeat", nil, deviceAuth(f.key)); again.Code != http.StatusUnauthorized {
+		t.Errorf("the old credential still authenticates: %d", again.Code)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CONFIRMED"); n != 1 {
+		t.Errorf("CONFIRMED audited %d times in Company One, want 1", n)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM audit_events
+	                      WHERE action = 'TERMINAL_RELEASE_CONFIRMED'
+	                        AND changes->'report'->>'members' = '1'`); n != 1 {
+		t.Error("the wipe report did not reach the audit line")
+	}
+	if n := queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+	                      WHERE d.serial_number = 'AT-REL-XFER' AND j.status IN ('PENDING','FAILED')`); n != 0 {
+		t.Errorf("%d jobs still queued for a released row", n)
+	}
+
+	// A confirm that arrives again -- lost response -- is a 401 now, which the
+	// terminal reads as "already released". Nothing else could be said: the
+	// credential no longer resolves.
+	if res := f.confirm(t, releaseID, receiptFor(t, f.key, f.serial, releaseID), nil); res.Code != http.StatusUnauthorized {
+		t.Errorf("a repeated confirm = %d, want 401", res.Code)
+	}
+
+	// Company Two adopts, and the serial is NEW to it.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-two@example.com", models.RoleAdmin)
+	code, token := f.announce(t, f.serial)
+	status, adopted := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/adopt",
+		`{"pairing_code":"`+code+`"}`, otherToken, otherCSRF)
+	if status != http.StatusOK || adopted["verdict"] != database.VerdictNew {
+		t.Fatalf("adoption after release = %d %v", status, adopted)
+	}
+	id, _ := adopted["id"].(string)
+	if status, body := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/"+id+"/approve",
+		`{"site_id":"`+sitePublicIDByName(t, "Site C")+`","device_name":"New Door"}`,
+		otherToken, otherCSRF); status != http.StatusOK {
+		t.Fatalf("approve = %d: %v", status, body)
+	}
+	collected := f.poll(t, token)
+	newKey, _ := collected.Body["api_key"].(string)
+	if newKey == "" {
+		t.Fatalf("collection: %s", collected.Raw)
+	}
+
+	// The new row is a NEW row, seeded with a snapshot, and SETTING_UP.
+	if n := queryInt(t, `SELECT count(*) FROM devices WHERE serial_number = 'AT-REL-XFER'`); n != 2 {
+		t.Errorf("%d rows for the serial, want 2 (released + new)", n)
+	}
+	status, detail := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals/"+f.serial, "", otherToken, otherCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("detail in Company Two = %d: %v", status, detail)
+	}
+	readiness, _ := detail["readiness"].(map[string]any)
+	if readiness["state"] != models.ReadinessSettingUp {
+		t.Errorf("readiness after collection = %v, want SETTING_UP", detail["readiness"])
+	}
+	if detail["release"] != nil {
+		t.Errorf("the new row carries a release summary: %v", detail["release"])
+	}
+
+	jobs := f.env.jobs(newKey)
+	snapshots := jobsOfType(jobs, "FULL_SYNC")
+	if len(snapshots) != 1 {
+		t.Fatalf("new row seeded with %v, want exactly one FULL_SYNC", jobTypes(jobs))
+	}
+	// The snapshot names Company Two's roster, not Company One's member.
+	payload, _ := snapshots[0]["payload"].(map[string]any)
+	if ids, _ := payload["member_ids"].([]any); len(ids) != 0 {
+		t.Errorf("snapshot for Company Two carries members %v", ids)
+	}
+
+	// Acknowledging the snapshot is what makes it READY, and is audited.
+	ack := f.env.do(http.MethodPost, "/api/v1/devices/jobs/"+itoa(jobID(t, snapshots[0]))+"/complete",
+		map[string]any{"status": "COMPLETED"}, deviceAuth(newKey))
+	if ack.Code != http.StatusOK {
+		t.Fatalf("ack = %d: %s", ack.Code, ack.Raw)
+	}
+	_, detail = consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals/"+f.serial, "", otherToken, otherCSRF)
+	readiness, _ = detail["readiness"].(map[string]any)
+	if readiness["state"] != models.ReadinessReady {
+		t.Errorf("readiness after the snapshot ack = %v, want READY", detail["readiness"])
+	}
+	if n := releaseAuditCount(t, "two", "TERMINAL_READY"); n != 1 {
+		t.Errorf("READY audited %d times in Company Two, want 1", n)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_READY"); n != 0 {
+		t.Error("Company One's trail carries the new owner's readiness")
+	}
+
+	// Company One's member never reached the new owner.
+	if n := queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+	                      WHERE d.serial_number = 'AT-REL-XFER' AND d.deleted_at IS NULL
+	                        AND j.entity_external_id = 'A-001'`); n != 0 {
+		t.Error("the previous owner's member was queued for the new owner")
+	}
+
+	// Company One still reads its own history through the released row: the
+	// event lists under the serial, attributed to the terminal as it was
+	// named there. Company Two, which now owns the serial, sees none of it.
+	status, page := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/events?serial="+f.serial, "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("Company One's events after release = %d: %v", status, page)
+	}
+	history := listOf(t, page, "events")
+	if len(history) != 1 {
+		t.Fatalf("Company One lists %d events for the released terminal, want 1", len(history))
+	}
+	if event, _ := history[0].(map[string]any); event["device_serial"] != f.serial ||
+		event["device_name"] != "Front Door" || event["subject_external_id"] != "A-001" {
+		t.Errorf("Company One's historical event lost its attribution: %v", history[0])
+	}
+	status, page = consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/events?serial="+f.serial, "", otherToken, otherCSRF)
+	if status != http.StatusOK {
+		t.Fatalf("Company Two's events = %d: %v", status, page)
+	}
+	if leaked := listOf(t, page, "events"); len(leaked) != 0 {
+		t.Errorf("Company Two reads %d of the previous owner's events", len(leaked))
+	}
+}
+
+func TestConfirmWithABadReceiptChangesNothing(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-BAD")
+	f.order(t, "")
+	releaseID, _, _ := orderFromHeartbeat(t, f.capableHeartbeat(t))
+
+	wrong := receiptFor(t, "some-other-key", f.serial, releaseID)
+	if res := f.confirm(t, releaseID, wrong, nil); res.Code != http.StatusConflict {
+		t.Errorf("wrong receipt = %d, want 409: %s", res.Code, res.Raw)
+	}
+	if res := f.confirm(t, "0f5b1e7c-9a2d-4c3e-8f10-5a6b7c8d9e0f",
+		receiptFor(t, f.key, f.serial, "0f5b1e7c-9a2d-4c3e-8f10-5a6b7c8d9e0f"), nil); res.Code != http.StatusNotFound {
+		t.Errorf("receipt for a different order = %d, want 404: %s", res.Code, res.Raw)
+	}
+	if res := f.confirm(t, releaseID, "zz", nil); res.Code != http.StatusBadRequest {
+		t.Errorf("non-hex receipt = %d, want 400", res.Code)
+	}
+
+	if state, _, deleted := releaseRow(t, f.serial); state != "ORDERED" || deleted {
+		t.Errorf("row after refused confirms: state=%s deleted=%v", state, deleted)
+	}
+	// Still authenticating: the terminal can try again.
+	f.heartbeat(t, nil)
+}
+
+func TestAnnounceWithAReceiptFinalizesBeforeItAnnounces(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-ANN")
+	f.order(t, "")
+	releaseID, _, _ := orderFromHeartbeat(t, f.capableHeartbeat(t))
+	receipt := receiptFor(t, f.key, f.serial, releaseID)
+
+	// The terminal wiped, cleared its key, rebooted, and announces carrying
+	// the receipt -- the path a unit takes when its confirm never got through.
+	res := f.env.do(http.MethodPost, "/api/v1/devices/announce", map[string]any{
+		"serial_number":   f.serial,
+		"release_receipt": map[string]any{"release_id": releaseID, "receipt": receipt},
+	}, nil)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("announce with receipt = %d: %s", res.Code, res.Raw)
+	}
+	if res.Body["receipt_status"] != database.ReceiptStatusConsumed {
+		t.Errorf("receipt_status = %v, want CONSUMED", res.Body["receipt_status"])
+	}
+	code, _ := res.Body["pairing_code"].(string)
+	if code == "" {
+		t.Fatal("the announce that finalized the release produced no pairing code")
+	}
+	if state, by, deleted := releaseRow(t, f.serial); state != "RELEASED" || by != "TERMINAL" || !deleted {
+		t.Errorf("row after announce receipt: state=%s by=%s deleted=%v", state, by, deleted)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CONFIRMED"); n != 1 {
+		t.Errorf("CONFIRMED audited %d times, want 1", n)
+	}
+	// The announcement this call created survived the voiding of in-flight
+	// rows: it is PENDING and adoptable.
+	if n := queryInt(t, `SELECT count(*) FROM terminal_announcements
+	                      WHERE serial_number = 'AT-REL-ANN' AND state = 'PENDING'`); n != 1 {
+		t.Error("the fresh announcement was voided by its own receipt")
+	}
+
+	// Re-announcing with the same receipt (response lost) is CONSUMED again,
+	// audits nothing new, and keeps the code.
+	token, _ := res.Body["announce_token"].(string)
+	again := f.env.do(http.MethodPost, "/api/v1/devices/announce", map[string]any{
+		"serial_number":   f.serial,
+		"release_receipt": map[string]any{"release_id": releaseID, "receipt": receipt},
+	}, announceHeader(token))
+	if again.Code != http.StatusOK || again.Body["receipt_status"] != database.ReceiptStatusConsumed {
+		t.Errorf("repeated receipt = %d %v", again.Code, again.Body["receipt_status"])
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CONFIRMED"); n != 1 {
+		t.Errorf("a repeated receipt audited again: %d", n)
+	}
+
+	// A garbage receipt is UNKNOWN and the announce still works.
+	garbage := f.env.do(http.MethodPost, "/api/v1/devices/announce", map[string]any{
+		"serial_number":   "AT-REL-NOISE",
+		"release_receipt": map[string]any{"release_id": releaseID, "receipt": receipt},
+	}, nil)
+	if garbage.Code != http.StatusCreated || garbage.Body["receipt_status"] != database.ReceiptStatusUnknown {
+		t.Errorf("announce with a receipt for another serial = %d %v", garbage.Code, garbage.Body["receipt_status"])
+	}
+
+	// And Company Two adopts it.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-ann-two@example.com", models.RoleAdmin)
+	status, adopted := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/adopt",
+		`{"pairing_code":"`+code+`"}`, otherToken, otherCSRF)
+	if status != http.StatusOK || adopted["verdict"] != database.VerdictNew {
+		t.Errorf("adoption after an announce receipt = %d %v", status, adopted)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gating
+// ---------------------------------------------------------------------------
+
+func TestAdoptionIsRefusedWhileAReleaseIsOrdered(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-GATE")
+	f.order(t, "")
+
+	// The terminal has NOT wiped (no receipt), but somebody typed `clear key`
+	// and it announces. Nobody may adopt it yet.
+	code, _ := f.announce(t, f.serial)
+
+	// Not its own company: the remedy is theirs.
+	status, body := f.adopt(t, code)
+	if status != http.StatusConflict || body["code"] != "RELEASE_IN_PROGRESS" {
+		t.Errorf("own-company adoption during a release = %d %v, want 409 RELEASE_IN_PROGRESS", status, body)
+	}
+
+	// Not another company: and they learn only the uniform refusal.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-gate-two@example.com", models.RoleAdmin)
+	status, body = consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/adopt",
+		`{"pairing_code":"`+code+`"}`, otherToken, otherCSRF)
+	if status != http.StatusConflict || body["code"] != "TERMINAL_OWNED_ELSEWHERE" {
+		t.Errorf("other-company adoption during a release = %d %v, want 409 TERMINAL_OWNED_ELSEWHERE", status, body)
+	}
+
+	// Nothing was written for either attempt.
+	if n := queryInt(t, `SELECT count(*) FROM terminal_announcements
+	                      WHERE serial_number = 'AT-REL-GATE' AND state = 'ADOPTED'`); n != 0 {
+		t.Error("a refused adoption left the announcement adopted")
+	}
+}
+
+func TestOrderedTerminalReceivesNoRosterWork(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-SYNC")
+	f.env.createMember(f.env.siteAKey, "A-100", "Before")
+	if n := queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+	                      WHERE d.serial_number = 'AT-REL-SYNC' AND j.status = 'PENDING'`); n == 0 {
+		t.Fatal("fixture: no work queued before the order")
+	}
+
+	f.order(t, "")
+
+	// The backlog was cancelled by the order.
+	if n := queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+	                      WHERE d.serial_number = 'AT-REL-SYNC' AND j.status = 'PENDING'`); n != 0 {
+		t.Errorf("%d jobs still pending after the order", n)
+	}
+
+	// Neither a new person nor the reconciler queues anything for it.
+	f.env.createMember(f.env.siteAKey, "A-101", "After")
+	var deviceID int64
+	mustScan(t, `SELECT id FROM devices WHERE serial_number = 'AT-REL-SYNC' AND deleted_at IS NULL`, &deviceID)
+	added, removed, err := database.ReconcileDeviceRoster(deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 0 || removed != 0 {
+		t.Errorf("reconciler queued %d/%d for an ordered terminal", added, removed)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+	                      WHERE d.serial_number = 'AT-REL-SYNC' AND j.status = 'PENDING'`); n != 0 {
+		t.Errorf("%d jobs queued for an ordered terminal", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cancel and force
+// ---------------------------------------------------------------------------
+
+func TestCancelRestoresTheTerminalAndQueuesASnapshot(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-CANCEL")
+	f.env.createMember(f.env.siteAKey, "A-200", "Kept")
+	f.order(t, "")
+
+	status, body := consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusOK || body["state"] != "" {
+		t.Fatalf("cancel = %d: %v", status, body)
+	}
+	if state, _, deleted := releaseRow(t, f.serial); state != "" || deleted {
+		t.Errorf("row after cancel: state=%q deleted=%v", state, deleted)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CANCELLED"); n != 1 {
+		t.Errorf("CANCELLED audited %d times", n)
+	}
+
+	// The terminal converges: a snapshot naming the company's roster.
+	jobs := f.env.jobs(f.key)
+	if len(jobsOfType(jobs, "FULL_SYNC")) != 1 {
+		t.Errorf("jobs after cancel = %v, want a FULL_SYNC", jobTypes(jobs))
+	}
+	if !contains(jobTypes(jobs), "CREATE") {
+		t.Errorf("jobs after cancel = %v, want the roster records", jobTypes(jobs))
+	}
+
+	// The heartbeat no longer carries an order, and a second cancel is 409.
+	if beat := f.capableHeartbeat(t); beat["release_order"] != nil {
+		t.Errorf("heartbeat after cancel still carries %v", beat["release_order"])
+	}
+	status, body = consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusConflict || body["code"] != "RELEASE_NOT_ORDERED" {
+		t.Errorf("second cancel = %d %v, want 409 RELEASE_NOT_ORDERED", status, body)
+	}
+}
+
+// The cancelled order is NAMED in its audit line.
+//
+// Found by the 2026-09-13 hardware acceptance (case 17a): CANCELLED was the one
+// release action that recorded no release_id, so on a serial that had been
+// through several cycles -- the bench had twelve rows for one serial -- a
+// cancellation could not be tied to the order it withdrew. ORDERED, FORCED and
+// CONFIRMED all named theirs.
+func TestCancelNamesTheOrderItWithdrewInTheAudit(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-CANAUD")
+	f.env.createMember(f.env.siteAKey, "A-210", "Kept")
+
+	status, ordered := f.order(t, "operator changed their mind")
+	if status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, ordered)
+	}
+	releaseID, _ := ordered["release_id"].(string)
+	if releaseID == "" {
+		t.Fatal("the order carried no release_id to compare against")
+	}
+
+	status, body := consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusOK || body["state"] != "" {
+		t.Fatalf("cancel = %d: %v", status, body)
+	}
+
+	// 1. THE ID. Exactly the order that was withdrawn, not merely some id.
+	got := queryString(t, `SELECT coalesce(changes->>'release_id', '') FROM audit_events
+	                        WHERE action = 'TERMINAL_RELEASE_CANCELLED'
+	                        ORDER BY id DESC LIMIT 1`)
+	if got != releaseID {
+		t.Errorf("cancelled audit release_id = %q, want %q", got, releaseID)
+	}
+
+	// 2. ATTRIBUTION UNCHANGED: still the acting operator, their company, and
+	//    the terminal as the target. The payload gained a field; nothing else
+	//    about the record moved.
+	var action, actorEmail, actorRole, targetType, targetLabel string
+	var companyID int64
+	mustScan(t, `SELECT a.action, a.actor_email, a.actor_role, a.target_type,
+	                    a.target_label, a.company_id
+	               FROM audit_events a
+	              WHERE a.action = 'TERMINAL_RELEASE_CANCELLED'
+	              ORDER BY a.id DESC LIMIT 1`,
+		&action, &actorEmail, &actorRole, &targetType, &targetLabel, &companyID)
+	// The session newAnnounceFixture opens, as an ADMIN of Company One.
+	const wantActor = "announce-admin@example.com"
+	if actorEmail != wantActor {
+		t.Errorf("actor_email = %q, want %q", actorEmail, wantActor)
+	}
+	if actorRole != string(models.RoleAdmin) {
+		t.Errorf("actor_role = %q, want %q", actorRole, models.RoleAdmin)
+	}
+	if targetLabel != f.serial {
+		t.Errorf("target_label = %q, want %q", targetLabel, f.serial)
+	}
+	if targetType != "TERMINAL" {
+		t.Errorf("target_type = %q, want TERMINAL", targetType)
+	}
+	if companyID != f.companyID {
+		t.Errorf("company_id = %d, want %d (the ordering company)", companyID, f.companyID)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_CANCELLED"); n != 1 {
+		t.Errorf("CANCELLED audited %d times, want 1", n)
+	}
+
+	// 3. THE CANCEL ITSELF IS UNCHANGED: ORDERED cleared, every release column
+	//    with it, the row still live, and a second cancel still refused.
+	if state, _, deleted := releaseRow(t, f.serial); state != "" || deleted {
+		t.Errorf("row after cancel: state=%q deleted=%v, want cleared and live", state, deleted)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM devices
+	                      WHERE serial_number = '`+f.serial+`'
+	                        AND release_state IS NULL AND release_id IS NULL
+	                        AND release_order_mac IS NULL AND release_ordered_at IS NULL
+	                        AND release_ordered_by_email IS NULL AND release_reason IS NULL`); n != 1 {
+		t.Error("cancel left a release column set")
+	}
+	if beat := f.capableHeartbeat(t); beat["release_order"] != nil {
+		t.Errorf("heartbeat after cancel still carries %v", beat["release_order"])
+	}
+	status, body = consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf)
+	if status != http.StatusConflict || body["code"] != "RELEASE_NOT_ORDERED" {
+		t.Errorf("second cancel = %d %v, want 409 RELEASE_NOT_ORDERED", status, body)
+	}
+}
+
+// Two cycles on one serial: each cancellation names its OWN order, which is the
+// property the hardware finding was actually about.
+func TestEachCancellationNamesItsOwnOrder(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-CAN2X")
+
+	cancelledIDs := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		status, ordered := f.order(t, "cycle")
+		if status != http.StatusOK {
+			t.Fatalf("order %d = %d: %v", i, status, ordered)
+		}
+		id, _ := ordered["release_id"].(string)
+		if status, body := consoleCall(t, f.env.router, http.MethodDelete,
+			"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf); status != http.StatusOK {
+			t.Fatalf("cancel %d = %d: %v", i, status, body)
+		}
+		cancelledIDs = append(cancelledIDs, id)
+	}
+
+	if cancelledIDs[0] == cancelledIDs[1] {
+		t.Fatal("the two cycles reused one release_id; the test proves nothing")
+	}
+	for _, want := range cancelledIDs {
+		if n := queryInt(t, `SELECT count(*) FROM audit_events
+		                      WHERE action = 'TERMINAL_RELEASE_CANCELLED'
+		                        AND changes->>'release_id' = $1`, want); n != 1 {
+			t.Errorf("no CANCELLED audit names order %s", want)
+		}
+	}
+}
+
+func TestForceRequiresAnOrderAndAnAttestation(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-FORCE")
+
+	force := func(body string) (int, map[string]any) {
+		return consoleCall(t, f.env.router, http.MethodPost,
+			"/api/v1/console/terminals/"+f.serial+"/release/force", body, f.token, f.csrf)
+	}
+
+	if status, body := force(`{"attest":true}`); status != http.StatusConflict || body["code"] != "RELEASE_NOT_ORDERED" {
+		t.Errorf("force with nothing ordered = %d %v, want 409", status, body)
+	}
+
+	f.order(t, "unit is in a box")
+
+	if status, body := force(`{"attest":false,"reason":"x"}`); status != http.StatusBadRequest || body["code"] != "ATTESTATION_REQUIRED" {
+		t.Errorf("force without attestation = %d %v, want 400", status, body)
+	}
+	if state, _, deleted := releaseRow(t, f.serial); state != "ORDERED" || deleted {
+		t.Error("a refused force changed the row")
+	}
+
+	status, body := force(`{"attest":true,"reason":"unit is in a box"}`)
+	if status != http.StatusOK || body["released"] != true || body["confirmed_by"] != "OPERATOR" {
+		t.Fatalf("force = %d: %v", status, body)
+	}
+	if state, by, deleted := releaseRow(t, f.serial); state != "RELEASED" || by != "OPERATOR" || !deleted {
+		t.Errorf("row after force: state=%s by=%s deleted=%v", state, by, deleted)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_FORCED"); n != 1 {
+		t.Errorf("FORCED audited %d times", n)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM audit_events
+	                      WHERE action = 'TERMINAL_RELEASE_FORCED' AND (changes->>'attested')::boolean`); n != 1 {
+		t.Error("the attestation was not recorded with the force")
+	}
+
+	// The old credential is dead...
+	if res := f.env.do(http.MethodPost, "/api/v1/devices/heartbeat", nil, deviceAuth(f.key)); res.Code != http.StatusUnauthorized {
+		t.Errorf("credential after force = %d, want 401", res.Code)
+	}
+
+	// ...and the terminal, when it reconnects and sees that 401, can fetch the
+	// order by serial and verify it with the key it still holds.
+	res := f.env.do(http.MethodGet, "/api/v1/devices/release-order?serial="+f.serial, nil, nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("release order by serial after force = %d: %s", res.Code, res.Raw)
+	}
+	order, _ := res.Body["release_order"].(map[string]any)
+	if order["serial_number"] != f.serial || order["release_id"] != body["release_id"] {
+		t.Errorf("by-serial order = %v, want the forced release", order)
+	}
+	mac, _ := order["mac"].(string)
+	at, _ := order["ordered_at"].(float64)
+	sum := sha256.Sum256([]byte(f.key))
+	expected, err := database.ComputeReleaseOrderMAC(hex.EncodeToString(sum[:]), f.serial,
+		order["release_id"].(string), time.Unix(int64(at), 0))
+	if err != nil || hex.EncodeToString(expected) != mac {
+		t.Errorf("the by-serial order does not verify with the terminal's key: %v", err)
+	}
+
+	// The serial is free.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-force-two@example.com", models.RoleAdmin)
+	code, _ := f.announce(t, f.serial)
+	status, adopted := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/adopt",
+		`{"pairing_code":"`+code+`"}`, otherToken, otherCSRF)
+	if status != http.StatusOK || adopted["verdict"] != database.VerdictNew {
+		t.Errorf("adoption after force = %d %v", status, adopted)
+	}
+}
+
+// The force is bound to the release_id it names: any other order is refused,
+// and a retry after success finds the row gone, exactly as a retried
+// retirement does.
+func TestForceIsBoundToTheOrderItNames(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-FIDEM")
+
+	force := func(body string) (int, map[string]any) {
+		return consoleCall(t, f.env.router, http.MethodPost,
+			"/api/v1/console/terminals/"+f.serial+"/release/force", body, f.token, f.csrf)
+	}
+
+	// Order, cancel, order again: the first id is stale.
+	_, first := f.order(t, "first")
+	staleID, _ := first["release_id"].(string)
+	if status, body := consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+f.serial+"/release", "", f.token, f.csrf); status != http.StatusOK {
+		t.Fatalf("cancel = %d: %v", status, body)
+	}
+	_, second := f.order(t, "second")
+	currentID, _ := second["release_id"].(string)
+	if staleID == "" || currentID == "" || staleID == currentID {
+		t.Fatalf("ids: stale=%q current=%q", staleID, currentID)
+	}
+
+	// A stale page attesting to the first order is refused, and the current
+	// order is untouched.
+	if status, body := force(`{"attest":true,"release_id":"` + staleID + `"}`); status != http.StatusConflict || body["code"] != "RELEASE_MISMATCH" {
+		t.Errorf("force naming a stale order = %d %v, want 409 RELEASE_MISMATCH", status, body)
+	}
+	if status, body := force(`{"attest":true,"release_id":"not-a-uuid"}`); status != http.StatusConflict || body["code"] != "RELEASE_MISMATCH" {
+		t.Errorf("force naming a malformed order = %d %v, want 409 RELEASE_MISMATCH", status, body)
+	}
+	if state, _, deleted := releaseRow(t, f.serial); state != "ORDERED" || deleted {
+		t.Errorf("row after refused forces: state=%s deleted=%v", state, deleted)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_FORCED"); n != 0 {
+		t.Errorf("a refused force was audited %d times", n)
+	}
+
+	// Naming the current order finalizes it, once.
+	status, body := force(`{"attest":true,"release_id":"` + currentID + `","reason":"boxed"}`)
+	if status != http.StatusOK || body["released"] != true || body["release_id"] != currentID {
+		t.Fatalf("force = %d: %v", status, body)
+	}
+	if state, by, deleted := releaseRow(t, f.serial); state != "RELEASED" || by != "OPERATOR" || !deleted {
+		t.Errorf("row after force: state=%s by=%s deleted=%v", state, by, deleted)
+	}
+
+	// The same request again -- the response was lost -- finds no live row.
+	// 404 at the grant, as a retried retirement is; it changes nothing, and
+	// the one release is audited once.
+	for _, id := range []string{currentID, staleID} {
+		if status, _ := force(`{"attest":true,"release_id":"` + id + `"}`); status != http.StatusNotFound {
+			t.Errorf("force retried after release naming %s = %d, want 404", id, status)
+		}
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASE_FORCED"); n != 1 {
+		t.Errorf("FORCED audited %d times after retries, want 1", n)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM devices WHERE serial_number = '`+f.serial+`'`); n != 1 {
+		t.Errorf("%d rows for the serial after retries, want 1", n)
+	}
+}
+
+func TestReleaseOrderBySerialDisclosesLittle(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-FETCH")
+
+	get := func(query string) response {
+		return f.env.do(http.MethodGet, "/api/v1/devices/release-order"+query, nil, nil)
+	}
+	if res := get(""); res.Code != http.StatusBadRequest {
+		t.Errorf("no serial = %d, want 400", res.Code)
+	}
+	if res := get("?serial=" + f.serial); res.Code != http.StatusNoContent {
+		t.Errorf("no order = %d, want 204", res.Code)
+	}
+	if res := get("?serial=AT-NOBODY"); res.Code != http.StatusNoContent {
+		t.Errorf("unknown serial = %d, want 204 (same as no order)", res.Code)
+	}
+
+	_, ordered := f.order(t, "")
+	res := get("?serial=" + f.serial)
+	if res.Code != http.StatusOK {
+		t.Fatalf("ordered = %d: %s", res.Code, res.Raw)
+	}
+	order, _ := res.Body["release_order"].(map[string]any)
+	if order["release_id"] != ordered["release_id"] {
+		t.Errorf("by-serial order = %v, want %v", order["release_id"], ordered["release_id"])
+	}
+	for _, forbidden := range []string{"api_key", "api_key_hash", "company", "site"} {
+		if _, present := order[forbidden]; present {
+			t.Errorf("by-serial order discloses %s", forbidden)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Platform route keeps its shape, now order-then-force
+// ---------------------------------------------------------------------------
+
+func TestPlatformReleaseIsOrderThenForce(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-PLAT")
+	mustCreatePlatformAdmin(t, "rel-platform@example.com")
+	pToken, pCSRF := platformLogin(t, f.env.router, "rel-platform@example.com", testPlatformPassword)
+
+	status, released := platformCall(t, f.env.router, http.MethodPost,
+		"/api/v1/platform/terminals/"+f.serial+"/release", `{"reason":"resold"}`, pToken, pCSRF)
+	if status != http.StatusOK || released["released"] != true {
+		t.Fatalf("platform release = %d: %v", status, released)
+	}
+	if state, by, deleted := releaseRow(t, f.serial); state != "RELEASED" || by != "PLATFORM" || !deleted {
+		t.Errorf("row after platform release: state=%s by=%s deleted=%v", state, by, deleted)
+	}
+	// An order was minted on the way, so the unit can still verify a release
+	// by serial when it next connects.
+	if n := queryInt(t, `SELECT count(*) FROM devices WHERE serial_number = 'AT-REL-PLAT'
+	                        AND release_order_mac IS NOT NULL`); n != 1 {
+		t.Error("the platform release left no verifiable order behind")
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_RELEASED"); n != 1 {
+		t.Errorf("TERMINAL_RELEASED audited %d times", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Event attribution
+// ---------------------------------------------------------------------------
+
+func TestQueuedEventsFromThePreviousOwnerAreRefused(t *testing.T) {
+	f := newReleaseFixture(t, "AT-REL-EVT")
+	f.order(t, "")
+	releaseID, _, _ := orderFromHeartbeat(t, f.capableHeartbeat(t))
+	if res := f.confirm(t, releaseID, receiptFor(t, f.key, f.serial, releaseID), nil); res.Code != http.StatusOK {
+		t.Fatalf("confirm = %d", res.Code)
+	}
+
+	// Company Two takes it.
+	other := companyIDBySlug(t, "two")
+	_, otherToken, otherCSRF := consoleOperatorSession(t, f.env.router, other,
+		"rel-evt-two@example.com", models.RoleAdmin)
+	code, token := f.announce(t, f.serial)
+	_, adopted := consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/adopt",
+		`{"pairing_code":"`+code+`"}`, otherToken, otherCSRF)
+	id, _ := adopted["id"].(string)
+	consoleCall(t, f.env.router, http.MethodPost,
+		"/api/v1/console/terminal-announcements/"+id+"/approve",
+		`{"site_id":"`+sitePublicIDByName(t, "Site C")+`","device_name":"Door"}`, otherToken, otherCSRF)
+	newKey, _ := f.poll(t, token).Body["api_key"].(string)
+	if newKey == "" {
+		t.Fatal("no key collected")
+	}
+
+	upload := func(eventID string, occurredAt string) response {
+		body := map[string]any{"event_id": eventID, "member_id": "A-OLD", "granted": true,
+			"source": "FINGERPRINT"}
+		if occurredAt != "" {
+			body["occurred_at"] = occurredAt
+		}
+		return f.env.do(http.MethodPost, "/api/v1/devices/access/log", body, deviceAuth(newKey))
+	}
+
+	// An event from an hour before the new row existed: refused, not stored.
+	stale := upload("11111111-1111-1111-1111-111111111111",
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
+	if stale.Code != http.StatusOK || stale.Body["recorded"] != false || stale.Body["refused"] == nil {
+		t.Errorf("stale event = %d %s", stale.Code, stale.Raw)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM access_logs WHERE public_id = '11111111-1111-1111-1111-111111111111'`); n != 0 {
+		t.Error("a pre-registration event was stored for the new owner")
+	}
+	if n := releaseAuditCount(t, "two", "EVENTS_REFUSED_PRE_REGISTRATION"); n != 1 {
+		t.Errorf("refusal audited %d times in Company Two", n)
+	}
+
+	// A current event, and a clockless one, are recorded.
+	fresh := upload("22222222-2222-2222-2222-222222222222", time.Now().UTC().Format(time.RFC3339))
+	if fresh.Code != http.StatusOK || fresh.Body["recorded"] != true {
+		t.Errorf("current event = %d %s", fresh.Code, fresh.Raw)
+	}
+	clockless := upload("33333333-3333-3333-3333-333333333333", "")
+	if clockless.Code != http.StatusOK || clockless.Body["recorded"] != true {
+		t.Errorf("clockless event = %d %s", clockless.Code, clockless.Raw)
+	}
+
+	// Company One's trail is untouched by any of it.
+	if n := queryInt(t, `SELECT count(*) FROM access_logs al JOIN companies c ON c.id = al.company_id
+	                      WHERE c.slug = 'one' AND al.public_id::text IN
+	                        ('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222')`); n != 0 {
+		t.Error("an event uploaded under Company Two's credential reached Company One")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// First-time adoption is unchanged in shape, plus readiness
+// ---------------------------------------------------------------------------
+
+func TestFirstTimeAdoptionSeedsASnapshotAndReadsSettingUp(t *testing.T) {
+	f := newAnnounceFixture(t)
+	f.env.createMember(f.env.siteAKey, "F-001", "First")
+	key := f.setUp(t, "AT-FIRST-READY", "Site A", "Lobby")
+
+	jobs := f.env.jobs(key)
+	types := jobTypes(jobs)
+	if len(jobsOfType(jobs, "FULL_SYNC")) != 1 || !contains(types, "CREATE") || !contains(types, "SETTINGS") {
+		t.Errorf("first-time seeding = %v, want FULL_SYNC + CREATE + SETTINGS", types)
+	}
+	// The snapshot arrives BEFORE the records, so a unit applies "hold
+	// exactly these" first.
+	if jobs[0]["job_type"] != "FULL_SYNC" {
+		t.Errorf("first job = %v, want FULL_SYNC", jobs[0]["job_type"])
+	}
+
+	status, detail := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals/AT-FIRST-READY", "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("detail = %d: %v", status, detail)
+	}
+	readiness, _ := detail["readiness"].(map[string]any)
+	if readiness["state"] != models.ReadinessSettingUp {
+		t.Errorf("readiness = %v, want SETTING_UP", detail["readiness"])
+	}
+
+	// The list read carries readiness too.
+	status, list := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminals", "", f.token, f.csrf)
+	if status != http.StatusOK {
+		t.Fatalf("list = %d", status)
+	}
+	terminals, _ := list["terminals"].([]any)
+	if len(terminals) != 1 {
+		t.Fatalf("list = %v", list)
+	}
+	row, _ := terminals[0].(map[string]any)
+	rowReadiness, _ := row["readiness"].(map[string]any)
+	if rowReadiness["state"] != models.ReadinessSettingUp {
+		raw, _ := json.Marshal(row)
+		t.Errorf("list row readiness = %v: %s", row["readiness"], truncate(string(raw), 300))
+	}
+}
+
+// A collection whose snapshot is refused for capacity has armed the gate with
+// no job to pass it. That row is SETTING_UP -- it has never been told what to
+// hold -- and becomes READY only once a snapshot is queued and acknowledged.
+// READY by the accident of a NULL job would be the one false statement the
+// gate exists to prevent.
+func TestReadinessIsNotReadyWhenTheSnapshotWasRefusedForCapacity(t *testing.T) {
+	f := newAnnounceFixture(t)
+	serial := "AT-REL-OVERFLOW"
+	key := f.setUp(t, serial, "Site A", "Small Door")
+
+	// The unit says it holds one person; the site has two.
+	res := f.env.do(http.MethodPost, "/api/v1/devices/heartbeat",
+		map[string]any{"status": "ONLINE", "member_capacity": 1}, deviceAuth(key))
+	if res.Code != http.StatusOK {
+		t.Fatalf("heartbeat = %d: %s", res.Code, res.Raw)
+	}
+	f.env.createMember(f.env.siteAKey, "O-001", "One")
+	f.env.createMember(f.env.siteAKey, "O-002", "Two")
+
+	snapshotsQueued := func() int {
+		return queryInt(t, `SELECT count(*) FROM sync_jobs j JOIN devices d ON d.id = j.device_id
+		                     WHERE d.serial_number = '`+serial+`' AND d.deleted_at IS NULL
+		                       AND j.job_type = 'FULL_SYNC' AND j.status IN ('PENDING','FAILED')`)
+	}
+	before := snapshotsQueued()
+
+	// Re-provisioned through the announce flow: the collection tries to seed
+	// a snapshot and is refused. The refusal leaves the queue as it was --
+	// the first collection's snapshot is still there -- and queues nothing.
+	newKey := f.setUp(t, serial, "Site A", "Small Door")
+	if newKey == key {
+		t.Fatal("re-provisioning minted the same credential")
+	}
+	if after := snapshotsQueued(); after != before {
+		t.Errorf("the refused collection changed the queued snapshots from %d to %d", before, after)
+	}
+
+	readiness := func() map[string]any {
+		status, detail := consoleCall(t, f.env.router, http.MethodGet,
+			"/api/v1/console/terminals/"+serial, "", f.token, f.csrf)
+		if status != http.StatusOK {
+			t.Fatalf("detail = %d: %v", status, detail)
+		}
+		r, _ := detail["readiness"].(map[string]any)
+		return r
+	}
+
+	if r := readiness(); r["state"] != models.ReadinessSettingUp || r["job_id"] != nil {
+		t.Errorf("readiness after a refused snapshot = %v, want SETTING_UP with no job", r)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM devices
+	                      WHERE serial_number = '`+serial+`' AND deleted_at IS NULL
+	                        AND readiness_armed_at IS NOT NULL AND readiness_job_id IS NULL
+	                        AND roster_overflow_at IS NOT NULL`); n != 1 {
+		t.Error("the refused snapshot did not leave an armed gate and a recorded overflow")
+	}
+
+	// The roster shrinks to fit, and a snapshot is queued by the next thing
+	// that compacts the terminal -- here, a release cancelled. The gate
+	// follows it and passes when it is acknowledged.
+	if res := f.env.do(http.MethodDelete, "/api/v1/members/O-002", nil,
+		siteAuth(f.env.siteAKey)); res.Code != http.StatusOK && res.Code != http.StatusNoContent {
+		t.Fatalf("removing a member = %d: %s", res.Code, res.Raw)
+	}
+	rf := &releaseFixture{announceFixture: f, serial: serial, key: newKey}
+	if status, body := rf.order(t, "to compact"); status != http.StatusOK {
+		t.Fatalf("order = %d: %v", status, body)
+	}
+	if status, body := consoleCall(t, f.env.router, http.MethodDelete,
+		"/api/v1/console/terminals/"+serial+"/release", "", f.token, f.csrf); status != http.StatusOK {
+		t.Fatalf("cancel = %d: %v", status, body)
+	}
+	r := readiness()
+	if r["state"] != models.ReadinessSettingUp || r["job_id"] == nil {
+		t.Fatalf("readiness once a snapshot fits = %v, want SETTING_UP with a job", r)
+	}
+	id, _ := r["job_id"].(float64)
+	ack := f.env.do(http.MethodPost, "/api/v1/devices/jobs/"+itoa(int64(id))+"/complete",
+		map[string]any{"status": "COMPLETED"}, deviceAuth(newKey))
+	if ack.Code != http.StatusOK {
+		t.Fatalf("ack = %d: %s", ack.Code, ack.Raw)
+	}
+	if r := readiness(); r["state"] != models.ReadinessReady {
+		t.Errorf("readiness after the snapshot ack = %v, want READY", r)
+	}
+	if n := releaseAuditCount(t, "one", "TERMINAL_READY"); n != 1 {
+		t.Errorf("READY audited %d times, want 1", n)
+	}
+}
