@@ -391,8 +391,14 @@ describe('what the trail says about when', () => {
     expect(times.length).toBeGreaterThanOrEqual(2)
 
     // One of them still reads as elapsed time, and one as a date.
+    //
+    // THE FIXTURE IS A FIXED INSTANT AND THE CLOCK IS NOT. Intl.RelativeTimeFormat
+    // with `numeric: 'auto'` says "yesterday", then "last week", "last month" and
+    // "last year" before it ever says "ago" again, and this matched only the
+    // first of those -- so the assertion held for a month after the fixture was
+    // written and then failed on a calendar, not a change.
     const text = times.map((t) => t.textContent ?? '').join(' | ')
-    expect(text).toMatch(/ago|just now|yesterday/i)
+    expect(text).toMatch(/ago|just now|yesterday|last (week|month|year)/i)
     expect(text).toMatch(/\d{4}/)
   })
 
