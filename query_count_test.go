@@ -105,6 +105,26 @@ type queryCountCase struct {
 	allowance int64
 }
 
+// seedAdoptedAnnouncement writes an ADOPTED announcement for a serial straight
+// into the table, as a terminal that has announced and been adopted would leave
+// it. DIRECT ON PURPOSE: the adopt route is rate-limited per caller, and a test
+// that needs thirty of them in a row would be refused by the limiter rather
+// than measured. The hashes only have to be unique, so they are derived from
+// the serial.
+func seedAdoptedAnnouncement(t *testing.T, companyID int64, serial string) {
+	t.Helper()
+	mustExec(t, `
+		INSERT INTO terminal_announcements
+		       (serial_number, pairing_code_hash, pairing_code_prefix,
+		        announce_token_hash, announce_token_prefix,
+		        state, company_id, adopted_at, expires_at)
+		VALUES ($1::text,
+		        md5($1::text || ':code') || md5($1::text || ':code:2'), left($1::text, 8),
+		        md5($1::text || ':token') || md5($1::text || ':token:2'), left($1::text, 12),
+		        'ADOPTED', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + interval '1 hour')`,
+		serial, companyID)
+}
+
 var queryCountCases = []queryCountCase{
 	{
 		name: "GET /console/operators",
@@ -154,6 +174,29 @@ var queryCountCases = []queryCountCase{
 		},
 		request: func(t *testing.T, f *queryCountFixture) {
 			serveOK(t, f.env.router, http.MethodGet, "/api/v1/console/sites", sessionHeaders(f.token))
+		},
+	},
+	{
+		/*
+		  THE ONE PER-ROW READ THE FIRST AUDIT MISSED. The list read the
+		  announcements and then looked each serial's ownership up one
+		  statement at a time to decide its verdict -- 5 statements for 3
+		  rows, 35 for 33 -- on the endpoint the console polls every ten
+		  seconds. The ownership is joined in now. Half the seeded serials
+		  already own a device row so the join has something to meet.
+		*/
+		name: "GET /console/terminal-announcements",
+		seed: func(t *testing.T, f *queryCountFixture, n int) {
+			for i := 0; i < n; i++ {
+				serial := fmt.Sprintf("AT-AN-%d-%03d", n, i)
+				if i%2 == 0 {
+					f.env.registerDevice(f.env.siteAKey, serial)
+				}
+				seedAdoptedAnnouncement(t, f.companyID, serial)
+			}
+		},
+		request: func(t *testing.T, f *queryCountFixture) {
+			serveOK(t, f.env.router, http.MethodGet, "/api/v1/console/terminal-announcements", sessionHeaders(f.token))
 		},
 	},
 	{
