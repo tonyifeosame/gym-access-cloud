@@ -9,7 +9,9 @@
 // WHAT A PROVIDER IS NOT ALLOWED TO DO: decide what is sent. Templates live
 // with the feature that sends them (handlers/password_reset_email.go for the
 // reset), and a provider moves bytes. Adding a provider is a file in this
-// package and a case in FromEnv; nothing about a reset changes.
+// package and a case in FromEnv; nothing about a reset changes. brevo.go is
+// exactly that: the deployment host cannot open SMTP at all, so the same
+// message goes to Brevo over HTTPS instead.
 //
 // WHAT IS DELIBERATELY UNCONFIGURED BY DEFAULT: everything. With EMAIL_PROVIDER
 // unset, FromEnv returns ErrNotConfigured and the platform behaves exactly as
@@ -29,7 +31,8 @@ import (
 
 // Environment variables shared by every provider.
 const (
-	// EnvProvider selects the provider: "smtp" or "log". Unset means none.
+	// EnvProvider selects the provider: "smtp", "brevo_api" or "log". Unset
+	// means none.
 	EnvProvider = "EMAIL_PROVIDER"
 	// EnvFrom is the sender address, optionally with a display name:
 	// `AccessLink <no-reply@example.com>`.
@@ -77,10 +80,16 @@ func FromEnv() (Sender, error) {
 			return nil, err
 		}
 		return NewSMTP(cfg), nil
+	case "brevo_api":
+		cfg, err := brevoConfigFromEnv(from)
+		if err != nil {
+			return nil, err
+		}
+		return NewBrevo(cfg), nil
 	case "log":
 		return NewLog(from), nil
 	default:
-		return nil, fmt.Errorf("%s=%q is not a known provider (smtp, log)", EnvProvider, provider)
+		return nil, fmt.Errorf("%s=%q is not a known provider (smtp, brevo_api, log)", EnvProvider, provider)
 	}
 }
 
