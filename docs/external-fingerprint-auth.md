@@ -1,157 +1,152 @@
-# Integrating an external application with AccessLink fingerprint authentication
+# Using AccessLink fingerprint authentication from your own application
 
-This guide is for a team that runs its own membership, HR, student or visitor
-system and wants AccessLink to do the fingerprint part: enrol people at a
-terminal, recognise them at the door, and tell you what happened. Your
-application stays the system of record for who those people are. AccessLink
-holds only what a door needs.
+This guide is for a developer who already has an application with its own
+people in it — a gym membership system, an HR system, a school or visitor
+system — and wants AccessLink to handle the fingerprint side. Your application
+stays in charge of who your people are. AccessLink handles enrolling their
+fingerprints at a terminal, recognising them at the door, and telling you what
+happened.
 
-Everything below describes the API **as it is implemented today**. Every
-endpoint, field and status code was checked against the running code and
-against [`API_SPEC.md`](../API_SPEC.md), which remains the authoritative
-reference for the details this guide leaves out.
+Everything here describes the API as it works today. Each endpoint, field and
+status code was checked against the running code. [`API_SPEC.md`](../API_SPEC.md)
+is the full reference for anything this guide leaves out.
 
-> **Read this first.** AccessLink does not currently expose a public API for
-> uploading a fingerprint and asking AccessLink to match it, and no API call
-> from your application makes a terminal capture a finger. Matching and capture
-> happen on the AccessLink terminal. Your integration works through member
-> synchronisation, terminal enrolment, access state and access logs — see
-> [section 11](#11-limitation-no-remote-fingerprint-matching).
-
----
-
-## 1. Overview
-
-AccessLink provides:
-
-- **Fingerprint enrolment** — a person places a finger on an AccessLink
-  terminal; the terminal captures and stores the biometric template and reports
-  to AccessLink that the person is enrolled.
-- **Terminal synchronisation** — every person you create, update or delete is
-  pushed to every terminal in your company through AccessLink's sync jobs, so a
-  terminal knows who a fingerprint belongs to and whether they are active.
-- **Access status** — an authorisation decision for a person at a specific
-  terminal, evaluated by the same engine the terminal's own decisions use.
-- **Access logging** — a record of every access attempt, granted or denied,
-  whether it was recorded by a terminal or by your application.
-
-Your application provides:
-
-- the people (customers, members, staff) and their identifiers;
-- the decisions about who should have access (you create, activate, deactivate
-  and remove people in AccessLink to reflect them);
-- whatever your own business does with the outcome (attendance, billing,
-  reporting).
-
-AccessLink never becomes the system of record for your people. It holds a
-short identifier, a display name, a category, an active flag and — after
-enrolment — a fingerprint credential that lives on the terminal.
+> **Two things to know before you start.**
+>
+> 1. **You cannot send AccessLink a fingerprint and ask "who is this?".** There
+>    is no public API for uploading a fingerprint for matching. Matching happens
+>    on the AccessLink terminal itself.
+> 2. **`POST /api/v1/enrollment/start` does not scan anyone's finger.** It only
+>    records that an enrolment is wanted. The finger is captured when an
+>    AccessLink operator, using the AccessLink console, tells one terminal to
+>    enrol the person standing at it.
+>
+> Details are in [How enrolment really works](#5-fingerprint-enrolment) and
+> [What the API does not do](#11-what-the-api-does-not-do).
 
 ---
 
-## 2. Integration model
+## 1. How it works — the short version
 
-Four things need to be understood together.
+1. **You create the person in AccessLink** with `POST /api/v1/members`, using
+   your own member number as the `member_id`.
+2. **AccessLink sends the person to every terminal** in your company. This
+   happens by itself, in the background.
+3. **The person's fingerprint is captured at a terminal.** An AccessLink
+   operator, using the AccessLink console, tells the terminal the person is
+   standing at to enrol them. The person places their finger. The terminal
+   stores the fingerprint and tells AccessLink.
+4. **You check that it worked** by reading the member with
+   `GET /api/v1/members/{MEMBER_ID}`. When `biometric_enrolled` is `true`,
+   enrolment is done. AccessLink copies the fingerprint to the other terminals.
+5. **At the door, the terminal recognises the finger** and decides whether to
+   let the person in. Your application is not involved in that moment.
+6. **You read what happened** from the access log with
+   `GET /api/v1/access/logs/{MEMBER_ID}`, and you can add your own entries
+   with `POST /api/v1/access/log`.
+7. **When someone leaves or is suspended**, you update or delete the member
+   and every terminal is told.
 
-| Concept | Owned by | What it is |
+The rest of this guide explains each step, the exact requests, and the things
+that can catch you out.
+
+---
+
+## 2. Who owns what
+
+| Thing | Who owns it | What it is |
 |---|---|---|
-| **Your person / customer ID** | your application | The primary key in your own database. AccessLink never sees it unless you choose to use it as the `member_id`. |
-| **AccessLink `member_id`** | you choose it; AccessLink stores it | The identifier AccessLink and every terminal use for a person. It is the value in every URL and every log line below. |
-| **Fingerprint template** | the AccessLink terminal | The biometric material captured at enrolment. It is stored on the terminal's sensor and replicated between terminals by AccessLink. **It is never returned to you and you never send one.** |
-| **Terminal / device** | AccessLink | The hardware at a door. It recognises fingerprints, decides admission from the roster AccessLink has synchronised to it, and reports the result. |
+| **Your customer / member record** | your application | Your own database row. AccessLink never sees it unless you use its number as the `member_id`. |
+| **`member_id`** | you choose it, AccessLink stores it | The one identifier AccessLink and the terminals use for a person. It appears in every URL and every log entry. |
+| **The fingerprint** | the AccessLink terminal | Captured and stored on the terminal's sensor, and copied between terminals by AccessLink. **It is never sent to you and you never send it.** |
+| **The terminal** | AccessLink | The device at the door. It recognises fingerprints, decides who gets in using the list AccessLink has sent it, and reports each attempt. |
 
-### Recommendation: use your own stable identifier as `member_id`
+### Use your own member number as `member_id`
 
-`member_id` is the join key between your system and AccessLink, so the simplest
-robust integration is to make it **your own stable identifier** for the person
-— a member number, an employee number, a student number. Then nothing has to be
-mapped or stored on your side.
+The easiest and most reliable setup is to make `member_id` the same stable
+number you already use for the person — a membership number, an employee
+number, a student number. Then there is nothing to map or look up.
 
-That works only if the value satisfies the constraint the terminal imposes.
-`member_id` must be:
+The terminal puts limits on what `member_id` can be:
 
 - **at most 31 characters**, and
-- **printable ASCII with no spaces** (bytes `0x21`–`0x7E`).
+- **only printable ASCII characters, with no spaces** (bytes `0x21`–`0x7E`).
 
-This is a hardware limit, not a style rule: a terminal refuses an identifier it
-cannot store rather than truncating it, because a truncated identifier is a
-different person. The API enforces the same rule when a member is created and
-answers `400` naming the problem, so a person you could never enrol is never
-created. **A UUID does not fit** (36 characters). If your primary key is a UUID
-or contains spaces, use a shorter, stable, unique value you already hold (a
-membership number, a badge number) rather than a fresh mapping table.
+These are hardware limits. A terminal refuses an identifier it cannot store,
+because a shortened identifier would be a different person. AccessLink checks
+the same rule when you create a member and answers `400` if it fails, so you
+never create a person a terminal could not accept. **A UUID is too long**
+(36 characters). If your primary key is a UUID or has spaces, use another
+stable, unique value you already hold, such as a membership or badge number.
 
-`member_id` cannot be changed after creation. If your identifier can change,
-choose a different one.
+`member_id` cannot be changed after the member is created. If your number can
+change, pick one that cannot.
 
-### Do not manage fingerprint templates yourself
+### Leave fingerprint data alone
 
-The member endpoints accept an optional `fingerprint_template` field for legacy
-reasons. **Do not send it.** It is a credential locator the terminal writes
-through the enrolment flow; setting it from outside does not enrol anyone and
-can leave AccessLink's record disagreeing with the hardware. Read
-`biometric_enrolled` (a boolean) to know whether a person is enrolled, and let
-the terminal do the rest.
+The member endpoints accept an optional `fingerprint_template` field for
+historical reasons. **Do not send it.** It is an internal value the terminal
+writes during enrolment. Setting it yourself does not enrol anyone and can put
+AccessLink's records out of step with the hardware. To know whether a person is
+enrolled, read the `biometric_enrolled` flag (`true` or `false`) and let the
+terminal do the rest.
 
 ---
 
-## 3. Authentication
+## 3. Authentication: the site API key
 
-Every endpoint in this guide authenticates with the **site API key**, sent as a
-header on every request:
+Every request in this guide carries your **site API key** in a header:
 
 ```
 X-API-Key: <SITE_API_KEY>
 ```
 
-A site key identifies one **site** and, through it, your **company**
-(tenant). Every query the API runs is scoped to that company, so a key issued
-to one tenant cannot read or change another tenant's data. A resource that
-belongs to another tenant is reported as `404`, not `403` — the API does not
-confirm that an identifier exists in someone else's account.
+A site API key belongs to one **site** and, through it, to your **company**.
+Every request is limited to your company's data. A key from one company cannot
+see or change another company's data. If you ask for something that belongs
+to a different company, you get `404` (not found), not `403`, so the API never
+confirms that someone else's record exists.
 
-Format: `ats_` followed by 64 hexadecimal characters (256 bits from a
-cryptographic random source).
+A key looks like `ats_` followed by 64 hexadecimal characters.
 
-**How you obtain one.** Keys are issued and rotated from the AccessLink
-operator console (`POST /api/v1/console/sites` when a site is created, and
-`POST /api/v1/console/sites/{site_id}/api-key` to rotate). The key is shown
-**once** in that response. AccessLink stores only a SHA-256 hash of it and has
-no endpoint that reads it back. Lose it and you rotate it; rotation invalidates
-the previous key immediately, with no overlap window.
+**Getting a key.** Keys are created and rotated in the AccessLink operator
+console: creating a site (`POST /api/v1/console/sites`) returns one, and
+`POST /api/v1/console/sites/{site_id}/api-key` issues a replacement. The key
+is shown **once**. AccessLink stores only a hash of it and has no way to show
+it again. If you lose it, rotate it. Rotation cancels the old key immediately,
+with no overlap period.
 
-**Treat the site key as a provisioning secret.** Besides the endpoints in this
-guide, the same key authorises registering terminals at the site. Anyone
-holding it can enrol hardware at that site. Keep it in a secrets manager, send
-it only over HTTPS, and never embed it in a client that end users run.
+**Keep it secret.** The same key is also used to set up terminals at the site,
+so anyone holding it can add hardware to your site. Store it in a secrets
+manager, send it only over HTTPS, and never put it in an app that end users
+run.
 
-**Development seed credentials are not production credentials.** The AccessLink
-repository ships a development seed (`seeds/dev_seed.sql`) whose key appears in
-examples in `API_SPEC.md`. It is public. It is not created by the production
-migrations and must never be used against a production deployment.
+**Do not use the development key.** The AccessLink source code ships with a
+development seed (`seeds/dev_seed.sql`) whose key appears in examples in
+`API_SPEC.md`. It is public. It is not created in production and will not
+work there.
 
-Authentication failures:
+When authentication fails:
 
-| Condition | Status | Body |
+| What happened | Status | Body |
 |---|---|---|
-| Header absent | `401` | `{"error":"API key required"}` |
+| No `X-API-Key` header | `401` | `{"error":"API key required"}` |
 | Key unknown, or its site has been deactivated | `401` | `{"error":"Invalid API key"}` |
-| Database unreachable during authentication | `500` | `{"error":"Authentication unavailable"}` |
+| AccessLink's database was unreachable | `500` | `{"error":"Authentication unavailable"}` |
 
-An outage is reported as `500`, never as `401` — do not discard a key because
-one request answered `500`.
+A `500` here means an outage, not a bad key. Do not discard your key because
+of one `500`.
 
 ---
 
-## 4. Member lifecycle
+## 4. Members: create, read, update, delete
 
-A **member** is a person AccessLink and its terminals know about. Four
-operations cover the lifecycle. All of them take `Content-Type:
-application/json` where a body is sent, and all are scoped to your company.
+A **member** is a person that AccessLink and its terminals know about. Send
+`Content-Type: application/json` with any request that has a body.
 
-### The member object
+### What a member looks like
 
-Every read and write returns this shape:
+Every read and write returns this:
 
 ```json
 {
@@ -169,26 +164,27 @@ Every read and write returns this shape:
 
 | Field | Meaning |
 |---|---|
-| `member_id` | Your identifier for the person (section 2). Immutable. |
-| `full_name` | Display name; shown on the terminal during enrolment. |
-| `membership_type` | Free text; a category your organisation uses. Required, so send something meaningful to you (`STANDARD`, `STAFF`, `VISITOR`, …). |
-| `active` | Whether terminals should admit this person. `false` is how you suspend somebody without removing them. |
-| `biometric_enrolled` | `true` once a fingerprint has been captured for this person. Read-only; **this is the entire biometric surface of the object** — no template, no sensor detail is ever returned. |
+| `member_id` | Your identifier for the person (section 2). Cannot be changed. |
+| `full_name` | The person's name. The terminal shows it during enrolment. |
+| `membership_type` | Any text that means something to you (`STANDARD`, `STAFF`, `VISITOR`, …). Required. |
+| `active` | Whether terminals should let this person in. Set it to `false` to suspend someone without deleting them. |
+| `biometric_enrolled` | `true` once a fingerprint has been captured for this person. Read-only. This is the only fingerprint-related information you ever receive. |
 | `id`, `public_id` | AccessLink's internal identifiers. You do not need them. |
 
-### `GET /api/v1/members` — list
+### List members — `GET /api/v1/members`
 
-Every member in your company, newest first, as a JSON array (empty: `[]`).
+Returns every member in your company, newest first, as a JSON array (`[]` if
+there are none).
 
-Without parameters the list is **unpaginated** — it returns everybody. For a
-large roster pass `?limit={n}` (1–1000) and `?offset={n}` to read it in
-windows of the same newest-first order; the response is still a bare array, so
-page until a call returns fewer rows than you asked for.
+With no parameters it returns **everyone**. For a large list, add
+`?limit={n}` (1 to 1000) and `?offset={n}` to read it in pages. The response
+is still a plain array, so keep paging until a call returns fewer members than
+you asked for.
 
-`GET /api/v1/members/{MEMBER_ID}` returns one member, or `404` `{"error":"Member
-not found"}`.
+`GET /api/v1/members/{MEMBER_ID}` returns one member, or
+`404 {"error":"Member not found"}`.
 
-### `POST /api/v1/members` — create
+### Create a member — `POST /api/v1/members`
 
 ```json
 {"member_id": "MEM001", "full_name": "Ada Lovelace", "membership_type": "ANNUAL", "active": true}
@@ -196,98 +192,94 @@ not found"}`.
 
 | Field | Required | Notes |
 |---|---|---|
-| `member_id` | yes | ≤ 31 chars, printable ASCII, no spaces (section 2) |
+| `member_id` | yes | 31 characters or fewer, printable ASCII, no spaces (section 2) |
 | `full_name` | yes | |
 | `membership_type` | yes | |
-| `active` | no | **Defaults to `false`.** Send `true` if the person should be admitted once enrolled. |
+| `active` | no | **Defaults to `false`.** Send `true` if the person should be let in once enrolled. |
 
-→ `201` with the member object (`biometric_enrolled` is `false`).
+Returns `201` with the member (`biometric_enrolled` is `false`).
 
-**Side effect:** a `CREATE` sync job is queued for every terminal in your
-company, in the same transaction as the insert. The terminals learn the person
-on their next poll.
+What happens next: AccessLink queues a `CREATE` sync job for every terminal in
+your company. Each terminal picks it up the next time it checks in.
 
-| Error | Status |
+| Problem | Status |
 |---|---|
-| Missing required field | `400` (validator message) |
-| `member_id` violates the constraint | `400` `{"error": "...", "field": "member_id"}` |
-| `member_id` already exists in this company | `409` `{"error":"Member ID already exists"}` |
+| A required field is missing | `400` |
+| `member_id` breaks the rules above | `400 {"error": "...", "field": "member_id"}` |
+| `member_id` already exists in your company | `409 {"error":"Member ID already exists"}` |
 
-### `PUT /api/v1/members/{MEMBER_ID}` — update
+### Update a member — `PUT /api/v1/members/{MEMBER_ID}`
 
 ```json
 {"full_name": "Ada B. Lovelace", "membership_type": "MONTHLY", "active": true}
 ```
 
-`member_id` comes from the URL and is not in the body. → `200` with the
-updated member object; `404` if the member does not exist.
+`member_id` is in the URL, not the body. Returns `200` with the updated
+member, or `404` if the member does not exist. AccessLink queues an `UPDATE`
+sync job for every terminal.
 
-**This is a full replacement, and two consequences follow.**
+> **Warning: `PUT` replaces the whole member, including the fingerprint.**
+>
+> - If you leave out `active`, it becomes `false` and the person is suspended.
+>   **Always send `active`.**
+> - If you leave out `fingerprint_template` — which you should never send —
+>   **the person's enrolment is cleared.** `biometric_enrolled` becomes `false`
+>   and the terminals are told the person no longer has a fingerprint. Because
+>   AccessLink never gives you the fingerprint value, there is nothing you can
+>   send back to keep it.
+>
+> So: get `full_name`, `membership_type` and `active` right when you create the
+> person, before enrolment. If you must change them later through this
+> endpoint, plan to enrol the person again. Two other ways to change a member
+> keep the fingerprint: the AccessLink operator console, and the separate
+> public API's `PATCH /api/public/v1/members/{member_id}` (see `API_SPEC.md`
+> section 18), which uses its own API credentials and is outside this guide.
 
-1. `active` defaults to `false` when omitted. **Always send it**, or an update
-   that only meant to fix a name will suspend the person.
-2. `fingerprint_template` is replaced too, so **a `PUT` that omits it clears
-   the person's enrolment**: `biometric_enrolled` becomes `false` and the
-   terminals are told the person no longer has a credential. Because the
-   template is never returned to you, there is no value you can send back to
-   preserve it. Consequently:
-   - prefer to set `full_name`, `membership_type` and `active` correctly at
-     creation, before enrolment;
-   - if you must change these fields after enrolment through this endpoint,
-     plan to re-enrol the person;
-   - if you hold integration credentials for AccessLink's public API
-     (`/api/public/v1`, documented in `API_SPEC.md` §18), its `PATCH
-     /api/public/v1/members/{member_id}` is a partial update that leaves the
-     credential alone. That API is separate from the site key and is outside
-     this guide.
+### Delete a member — `DELETE /api/v1/members/{MEMBER_ID}`
 
-**Side effect:** an `UPDATE` sync job is queued for every terminal.
+Returns `200 {"message":"Member deleted successfully"}`.
 
-### `DELETE /api/v1/members/{MEMBER_ID}` — remove
+This is a soft delete: AccessLink keeps the record for its audit history, and
+the `member_id` can be used again. AccessLink queues a `DELETE` sync job for
+every terminal. **This is the only way a terminal learns to stop recognising
+someone**, so when you remove a person from your system, delete them here too.
 
-→ `200` `{"message":"Member deleted successfully"}`.
+Deleting a member that does not exist, or was already deleted, also returns
+`200` and does nothing. Repeating a delete is safe.
 
-A soft delete: the record is retained for audit and the `member_id` becomes
-available for reuse. **Side effect:** a `DELETE` sync job is queued for every
-terminal — this is the only way a terminal learns to stop recognising the
-person, so removing somebody from your system should always be mirrored here.
+### How changes reach the terminals
 
-Deleting a member that does not exist (or was already deleted) also answers
-`200` and queues nothing; repeated deletes are safe.
+Every create, update and delete queues a sync job for each terminal. Terminals
+regularly check in with AccessLink, collect their jobs, apply them, and confirm
+each one. A terminal that is offline gets its backlog when it reconnects.
 
-### How changes reach terminals
-
-Create, update and delete each queue a **sync job** per terminal. Terminals
-poll AccessLink for their jobs and acknowledge each one; a terminal that is
-offline receives its backlog when it reconnects. There is no endpoint that
-tells you when a particular terminal has applied a particular change, and no
-callback. If you need to confirm, read the member back
-(`GET /api/v1/members/{MEMBER_ID}`) for AccessLink's own state, and use the
-operator console for per-terminal sync health.
+There is no endpoint or callback that tells you when a particular terminal has
+applied a particular change. To confirm AccessLink's own record, read the
+member back with `GET /api/v1/members/{MEMBER_ID}`. Per-terminal sync status
+is visible in the AccessLink operator console.
 
 ---
 
 ## 5. Fingerprint enrolment
 
-Enrolment is where the person, a terminal and AccessLink meet. Read this
-section carefully, because the endpoint named "start" does less than its name
-suggests:
+This is where people most often expect the API to do more than it does, so
+here is the plain statement first:
 
-> **`POST /api/v1/enrollment/start` creates AccessLink's enrolment request
-> record. It does not start fingerprint capture at any terminal.** Capture
-> happens only when an AccessLink operator, using the AccessLink console,
-> directs one specific terminal to enrol the person while the person is
-> standing at it. There is no site-key API call that does that.
+> **`POST /api/v1/enrollment/start` records that an enrolment is wanted. It
+> does not scan a finger and it does not make any terminal start scanning.**
+> The finger is captured only when an AccessLink operator, using the AccessLink
+> console, tells one specific terminal to enrol the person standing at it.
+> There is no site-API-key call that does that.
 
 ### What your application can do
 
-**`POST /api/v1/enrollment/start`** — record that an enrolment is wanted.
+**Record that an enrolment is wanted — `POST /api/v1/enrollment/start`**
 
 ```json
 {"member_id": "MEM001"}
 ```
 
-→ `201`:
+Returns `201`:
 
 ```json
 {
@@ -303,104 +295,104 @@ suggests:
 }
 ```
 
-| Error | Status |
+| Problem | Status |
 |---|---|
 | `member_id` missing | `400` |
-| No such member in your company | `404` `{"error":"Member not found"}` |
+| No such member in your company | `404 {"error":"Member not found"}` |
 
-Exactly what this does: it writes an enrolment request for the person with
-status `PENDING`, addressed to **no terminal**. A person has at most one live
-request; calling `start` again supersedes the earlier one rather than failing.
-Nothing is sent to any terminal as a result of this call, and no terminal will
-prompt for a finger because of it. Its practical use is bookkeeping: the
-request is visible in `GET /api/v1/enrollment/pending` (site key) until an
-enrolment for that person completes, when it is closed as `COMPLETED`.
+What this actually does: it saves an enrolment request for the person with
+status `PENDING`. The request is not tied to any terminal, and no terminal is
+told about it. A person has at most one open request; calling `start` again
+replaces the earlier one instead of failing. The request stays open until an
+enrolment for that person completes, when it is marked `COMPLETED`. Its
+practical use is record-keeping.
 
-> The `member` object in this response is AccessLink's internal member record
-> and, for a person already enrolled, may carry a `fingerprint_template`
-> value. It is a credential locator, not usable biometric data; treat it as
-> opaque — do not store, log or forward it. Use `biometric_enrolled` instead.
+The `member` object in this response is AccessLink's internal member record.
+For a person who is already enrolled it may include a `fingerprint_template`
+value. Treat it as an internal value: do not store it, log it, or pass it on.
+Use `biometric_enrolled` instead.
 
-**`GET /api/v1/enrollment/pending`** — the company's requests still in
-`PENDING`, oldest first, as an array of the `request` shape above (empty:
-`[]`).
+**See open requests — `GET /api/v1/enrollment/pending`**
 
-### What has to happen for a terminal to capture the finger
+Returns the company's requests still in `PENDING`, oldest first, as an array of
+the `request` objects shown above (`[]` if there are none).
 
-This is the sequence the current AccessLink implementation runs. Steps 2–4
-are performed by AccessLink and the operator, not by your application.
+### What has to happen for the terminal to capture the finger
 
-1. **Your application** creates the member (section 4). Optionally it calls
+This is the sequence AccessLink runs today. Only step 1 is yours.
+
+1. **Your application** creates the member (section 4). Optionally, it calls
    `POST /api/v1/enrollment/start` to record the intent.
-2. **An AccessLink operator**, with the person physically at a terminal, opens
+2. **An AccessLink operator**, with the person standing at a terminal, opens
    the AccessLink console and starts an enrolment for that person **at that
-   terminal**. The console is an operator-session interface and is not part
-   of the site-key API; the operator chooses the door because only they know
-   which one the person is standing at.
-3. **AccessLink** queues an `ENROLL_FINGERPRINT` sync job addressed to that
-   one terminal. The terminal receives it on its next poll of its job queue
-   (the same channel that delivers member create/update/delete), verifies the
-   job is addressed to itself, and enters enrolment mode showing the person's
-   name. The job carries a time window (default five minutes); if nobody
-   places a finger, it expires and nothing is recorded.
-4. **The terminal** captures the finger, stores the template on its own
-   sensor, and reports the result to AccessLink with its own device
-   credential: `POST /api/v1/devices/enrollment/result`. AccessLink then, in
-   one transaction, marks the person `biometric_enrolled: true`, closes the
-   person's open enrolment request(s) as `COMPLETED`, and queues an `UPDATE`
-   sync job so the credential is replicated to the other terminals. It does
-   **not** change `active` — a suspended person can be enrolled and stays
-   suspended until you set `active: true`.
+   terminal**. The console is a separate, operator-login interface, not part
+   of the site-API-key API. The operator chooses the terminal because only
+   they know which door the person is standing at.
+3. **AccessLink** queues an `ENROLL_FINGERPRINT` sync job for that one
+   terminal. The terminal collects it on its next check-in (the same channel
+   that delivers member changes), checks that the job is meant for it, and
+   switches to enrolment mode showing the person's name. The job has a time
+   limit (five minutes by default). If nobody places a finger in time, it
+   expires and nothing is recorded.
+4. **The terminal** captures the finger, stores the fingerprint on its own
+   sensor, and reports the result to AccessLink using the terminal's own device
+   key (`POST /api/v1/devices/enrollment/result`). AccessLink then, in one
+   step, marks the person `biometric_enrolled: true`, marks the person's open
+   enrolment request `COMPLETED`, and queues an `UPDATE` sync job so the
+   fingerprint is copied to the other terminals. It does **not** change
+   `active`. A suspended person can be enrolled and stays suspended until you
+   set `active: true`.
 
-Two device-credential endpoints appear in that sequence,
+Two terminal-only endpoints appear in that sequence:
 `GET /api/v1/devices/enrollment/pending` and
-`POST /api/v1/devices/enrollment/result`. They authenticate with the
-terminal's `X-Device-Key`, which an integration does not hold, and they are
-listed here only so you know what the hardware is doing. The terminal firmware
-currently in service does not act on the pending list; it acts on the
-terminal-addressed job from step 3.
+`POST /api/v1/devices/enrollment/result`. They use the terminal's own device
+key (`X-Device-Key`), which your application does not have. They are listed
+here only so you know what the hardware is doing. The terminal software
+currently in use does not act on the pending list; it acts on the job from
+step 3.
 
-### How your application knows it worked
+### How you know it worked
 
-**Success means `biometric_enrolled` is `true`** on the member. Read it with
-`GET /api/v1/members/{MEMBER_ID}`. Until then it is `false`, and the request
-(if you created one) is still listed by `GET /api/v1/enrollment/pending`.
+**Enrolment has succeeded when `biometric_enrolled` is `true`** on the member.
+Read it with `GET /api/v1/members/{MEMBER_ID}`. Until then it is `false`, and
+your request (if you made one) is still listed by
+`GET /api/v1/enrollment/pending`.
 
-AccessLink sends no notification and specifies no polling interval. Read the
-member when your own workflow needs the answer — for example when the person
-leaves the desk, or the next time your UI shows their status.
+AccessLink does not send notifications and does not define how often to check.
+Read the member when your own workflow needs the answer — for example when the
+person leaves the front desk, or the next time your screen shows their status.
 
-An enrolment that does not complete leaves the person exactly as they were:
-present, `active` as you set it, `biometric_enrolled: false`. A failed or
-abandoned capture changes nothing on the member record.
+If an enrolment does not complete, nothing changes on the member: they are
+still there, `active` is whatever you set, and `biometric_enrolled` stays
+`false`.
 
 ---
 
-## 6. Access status and access logging
+## 6. Access: who checks the finger, and what you can read
 
-### What recognises the finger
+### The terminal recognises the finger, not the API
 
-**The terminal does.** When a person presents a finger, the AccessLink terminal
-matches it against the templates it holds, decides admission from the roster
-and rules AccessLink has synchronised to it, opens or does not open the door,
-and reports the event to AccessLink under its own device credential. Your
-application is not consulted in that decision, cannot take part in it, and has
-no endpoint through which to submit a fingerprint for matching.
+When someone presents a finger, the AccessLink terminal matches it against the
+fingerprints it holds, checks the person against the list and rules AccessLink
+has sent it, opens the door or not, and reports the event to AccessLink using
+its own device key. Your application is not asked, cannot take part, and has no
+endpoint to submit a fingerprint for matching.
 
-### `GET /api/v1/access/{MEMBER_ID}?terminal={SERIAL}` — access status (deprecated)
+### Would this person be let in? — `GET /api/v1/access/{MEMBER_ID}?terminal={SERIAL}` (deprecated)
 
-Answers the question *"would this person be admitted at this terminal right
-now?"* from AccessLink's authorisation engine — the same evaluator the terminal
-path uses. It evaluates the person's current state in AccessLink (existence,
-`active`, credential state, permissions, schedules, validity windows, the
-terminal's state and application mode, and whether the site and company are
-in service). **It does not perform fingerprint recognition** and it does not
-know whether the person is physically present.
+Asks AccessLink's own decision engine — the same one the terminal's decisions
+use — whether the person would be let in at that terminal right now. It looks
+at AccessLink's current records for the person: whether they exist, are
+`active`, are enrolled, their permissions, schedules and validity dates, the
+terminal's state and mode, and whether the site and company are in service.
 
-`terminal` is **required**: an authorisation decision is about a person at a
-specific door. The serial is resolved inside the authenticated site.
+**It does not recognise a fingerprint** and it does not know whether the
+person is physically there.
 
-→ `200`:
+`terminal` is **required**. The decision depends on which door it is. The
+serial must belong to the site your key is for.
+
+Returns `200`:
 
 ```json
 {
@@ -417,31 +409,29 @@ specific door. The serial is resolved inside the authenticated site.
 }
 ```
 
-Read `granted` and `reason`. `reason` is one of the engine's codes
-(`ALLOWED`, `NO_PERMISSION`, `EXPLICIT_DENY`, `OUTSIDE_SCHEDULE`,
-`PERMISSION_EXPIRED`, `PERMISSION_NOT_YET_VALID`, `PERSON_INACTIVE`,
-`PERSON_UNKNOWN`, `CREDENTIAL_UNKNOWN`, `CREDENTIAL_REVOKED`,
-`CREDENTIAL_SUSPENDED`, `CREDENTIAL_EXPIRED`, `CREDENTIAL_NOT_YET_VALID`,
-`APPLICATION_NOT_ENABLED`, `TERMINAL_DISABLED`, `SITE_INACTIVE`,
-`COMPANY_INACTIVE`, `OFFLINE_POLICY`). `message` is for humans and its wording
-is not stable.
+Use `granted` and `reason`. `reason` is one of: `ALLOWED`, `NO_PERMISSION`,
+`EXPLICIT_DENY`, `OUTSIDE_SCHEDULE`, `PERMISSION_EXPIRED`,
+`PERMISSION_NOT_YET_VALID`, `PERSON_INACTIVE`, `PERSON_UNKNOWN`,
+`CREDENTIAL_UNKNOWN`, `CREDENTIAL_REVOKED`, `CREDENTIAL_SUSPENDED`,
+`CREDENTIAL_EXPIRED`, `CREDENTIAL_NOT_YET_VALID`, `APPLICATION_NOT_ENABLED`,
+`TERMINAL_DISABLED`, `SITE_INACTIVE`, `COMPANY_INACTIVE`, `OFFLINE_POLICY`.
+`message` is for people to read and its wording may change.
 
-| Error | Status |
+| Problem | Status |
 |---|---|
-| `terminal` omitted | `400` `{"error": "...", "code": "TERMINAL_REQUIRED"}` |
-| Serial not registered at the authenticated site | `404` `{"error":"Terminal not registered for this site"}` |
+| `terminal` left out | `400 {"error": "...", "code": "TERMINAL_REQUIRED"}` |
+| That serial is not registered at your site | `404 {"error":"Terminal not registered for this site"}` |
 
-The endpoint is **deprecated**: responses carry `Deprecation: true` and a
-`Link` header naming the successor, which takes an operator session rather
-than a site key. It continues to work; build new integrations to tolerate its
-removal (for example, by relying on the access log rather than on pre-checks).
+This endpoint is **deprecated**. Responses include a `Deprecation: true`
+header and a `Link` header pointing to its replacement, which needs an
+operator login rather than a site API key. It still works today. For new
+integrations, prefer reading the access log over checking in advance.
 
-### `POST /api/v1/access/log` — record an access attempt
+### Record an access attempt — `POST /api/v1/access/log`
 
-Records an attempt your application observed or decided. Use it when your
-system is the one that opened something — a gate you control from a
-fingerprint result the terminal displayed, a manual override at a desk — so
-that AccessLink's log is complete.
+Use this when your application is the one that let someone through or turned
+them away — for example a gate your system controls, or a manual override at
+the front desk — so AccessLink's log is complete.
 
 ```json
 {"member_id": "MEM001", "granted": true, "source": "fingerprint", "message": "front desk"}
@@ -449,13 +439,13 @@ that AccessLink's log is complete.
 
 | Field | Required | Notes |
 |---|---|---|
-| `source` | yes | Free text naming the credential or channel. Use `"fingerprint"` for a fingerprint recognition. |
-| `granted` | no | Defaults to `false`. **A denial is valid and meaningful** — log those too. |
-| `member_id` | no | Omit for an unrecognised credential; stored as null and matches nobody. |
+| `source` | yes | Free text naming how the person was identified. Use `"fingerprint"` for a fingerprint. |
+| `granted` | no | Defaults to `false`. **Logging a refusal is valid and useful.** |
+| `member_id` | no | Leave it out for an unrecognised person; it is stored as empty and matches nobody. |
 | `message` | no | Free text. |
-| `site_name` | no | Ignored; derived from the API key. |
+| `site_name` | no | Ignored. AccessLink fills it in from your API key. |
 
-→ `201` with the stored log entry:
+Returns `201` with the saved entry:
 
 ```json
 {
@@ -470,31 +460,30 @@ that AccessLink's log is complete.
 }
 ```
 
-`400` if `source` is missing. Note that logging an attempt does not grant
-anything and does not check the member — it records what you tell it.
+`400` if `source` is missing. Logging an attempt only records it. It does not
+let anyone in and does not check the member.
 
-### Reading the log
+### Read the log
 
-- `GET /api/v1/access/logs?limit={n}` — company-wide, newest first; `limit`
-  defaults to 100 and is capped at 1000.
+- `GET /api/v1/access/logs?limit={n}` — your whole company, newest first.
+  `limit` defaults to 100 and is capped at 1000.
 - `GET /api/v1/access/logs/{MEMBER_ID}?limit={n}` — the same, for one person.
 
-Both return an array of the log entry shape above (empty: `[]`). Entries
-recorded by terminals under their device credential appear here alongside the
-ones your application writes.
+Both return an array of entries in the shape above (`[]` if none). Entries
+recorded by terminals appear here alongside the ones your application writes.
 
 ---
 
-## 7. End-to-end example
+## 7. A complete example
 
-A gym's membership platform ("MemberBase") integrates with AccessLink. Which
-side performs each step is stated on every line.
+A gym's membership system, "MemberBase", uses AccessLink for the doors. Each
+step says who does it.
 
-**1. MemberBase creates a customer.** Its own database row gets the membership
-number `GYM-000482`. That number is 10 printable ASCII characters — it fits the
-`member_id` constraint, so MemberBase uses it directly.
+**1. MemberBase creates a customer.** Its own database gives her membership
+number `GYM-000482`. That is 10 printable characters with no spaces, so it can
+be the `member_id` as it is.
 
-**2. MemberBase creates the AccessLink member** (your application → AccessLink):
+**2. MemberBase creates the AccessLink member** (MemberBase → AccessLink):
 
 ```bash
 curl -X POST "$BASE_URL/api/v1/members" \
@@ -502,12 +491,12 @@ curl -X POST "$BASE_URL/api/v1/members" \
   -d '{"member_id":"GYM-000482","full_name":"Ada Lovelace","membership_type":"ANNUAL","active":true}'
 ```
 
-`201`. AccessLink queues a `CREATE` job to every terminal; within their next
-poll the terminals know `GYM-000482` exists and is active, but nobody can be
-recognised yet — there is no fingerprint.
+`201`. AccessLink queues a `CREATE` job for every terminal. After their next
+check-in the terminals know `GYM-000482` exists and is active, but they cannot
+recognise her yet because there is no fingerprint.
 
-**3. MemberBase records that enrolment is wanted** (your application →
-AccessLink; optional, and it captures nothing):
+**3. MemberBase records that an enrolment is wanted** (MemberBase →
+AccessLink; optional, and it does not scan anything):
 
 ```bash
 curl -X POST "$BASE_URL/api/v1/enrollment/start" \
@@ -515,48 +504,48 @@ curl -X POST "$BASE_URL/api/v1/enrollment/start" \
   -d '{"member_id":"GYM-000482"}'
 ```
 
-`201`, `request.status` is `PENDING`. No terminal has been told anything yet.
+`201`, with `request.status` `PENDING`. No terminal has been told anything.
 
-**4. The finger is captured at a terminal** (AccessLink operator + terminal —
-**not** MemberBase). At the front desk, an AccessLink operator uses the
-AccessLink console to direct the terminal Ada is standing beside to enrol
-`GYM-000482`. AccessLink queues the instruction to that terminal alone; the
-terminal picks it up on its next poll, shows her name, she places her finger,
-and the terminal captures the template and reports the result to AccessLink
-with its own device credential. There is no API call MemberBase could make to
-do this step.
+**4. Ada's finger is captured at a terminal** (AccessLink operator and the
+terminal — **not** MemberBase). At the front desk, an AccessLink operator uses
+the AccessLink console to tell the terminal Ada is standing at to enrol
+`GYM-000482`. AccessLink sends the instruction to that terminal only. The
+terminal picks it up on its next check-in, shows her name, she places her
+finger, and the terminal captures the fingerprint and reports back to
+AccessLink with its own device key. There is no API call MemberBase could make
+to do this step.
 
-**5. AccessLink records and synchronises the enrolment** (AccessLink). The
-member becomes `biometric_enrolled: true`, the pending request is closed, and
-an `UPDATE` job replicates the credential to the other terminals.
+**5. AccessLink records and copies the enrolment** (AccessLink). Ada becomes
+`biometric_enrolled: true`, her pending request is marked `COMPLETED`, and an
+`UPDATE` job copies the fingerprint to the other terminals.
 
-**6. MemberBase confirms** (your application → AccessLink):
+**6. MemberBase confirms** (MemberBase → AccessLink):
 
 ```bash
 curl "$BASE_URL/api/v1/members/GYM-000482" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-`200` with `"biometric_enrolled": true`. MemberBase marks the customer as
-"fingerprint enrolled" in its own database.
+`200` with `"biometric_enrolled": true`. MemberBase marks her as "fingerprint
+enrolled" in its own database.
 
-**7. Ada arrives the next morning** (terminal). She presents her finger at the
-door terminal. The terminal recognises it, checks her against the roster and
-rules AccessLink has given it, admits her, and records the event with
-AccessLink under its device credential. MemberBase is not consulted.
+**7. Ada arrives the next morning** (the terminal). She places her finger on
+the door terminal. The terminal recognises it, checks her against the list and
+rules AccessLink gave it, lets her in, and records the event with AccessLink
+using its device key. MemberBase is not involved.
 
-**8. MemberBase consumes the outcome** (your application → AccessLink). Its
-attendance job reads recent entries:
+**8. MemberBase reads what happened** (MemberBase → AccessLink). Its
+attendance job reads her recent entries:
 
 ```bash
 curl "$BASE_URL/api/v1/access/logs/GYM-000482?limit=50" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-`200` with an array of entries; the newest shows `granted: true`, `source`
-`FINGERPRINT` (as the terminal reported it) and the timestamp. MemberBase
-records a visit.
+`200` with an array. The newest entry shows `granted: true`, a `source` of
+`FINGERPRINT` (as the terminal reported it) and the time. MemberBase records a
+visit.
 
-**9. Ada's membership lapses** (your application → AccessLink). MemberBase
-suspends her:
+**9. Ada's membership lapses** (MemberBase → AccessLink). MemberBase suspends
+her:
 
 ```bash
 curl -X PUT "$BASE_URL/api/v1/members/GYM-000482" \
@@ -564,15 +553,15 @@ curl -X PUT "$BASE_URL/api/v1/members/GYM-000482" \
   -d '{"full_name":"Ada Lovelace","membership_type":"ANNUAL","active":false}'
 ```
 
-Because `PUT` is a full replacement and no `fingerprint_template` is sent,
-**this call also clears her enrolment** (section 4). If MemberBase wants
-suspension to be reversible without a new capture at a terminal, it should not
-suspend through `PUT`: keep her active in AccessLink and enforce the lapse on
-its own side, or use one of the credential-preserving paths named in section
-4. Otherwise, renewal means a `PUT` back to `active: true` **and** a fresh
-enrolment at a terminal.
+Because `PUT` replaces the whole member and no `fingerprint_template` is sent,
+**this also clears her enrolment** (section 4). If MemberBase wants to be able
+to reinstate her without a new fingerprint capture, it should not suspend
+through `PUT`: it can keep her active in AccessLink and enforce the lapse on
+its own side, or use one of the fingerprint-preserving routes named in
+section 4. Otherwise, reinstating her means a `PUT` back to `active: true`
+**and** a fresh enrolment at a terminal.
 
-**10. Ada leaves for good** (your application → AccessLink):
+**10. Ada leaves for good** (MemberBase → AccessLink):
 
 ```bash
 curl -X DELETE "$BASE_URL/api/v1/members/GYM-000482" -H "X-API-Key: $SITE_API_KEY"
@@ -582,71 +571,70 @@ curl -X DELETE "$BASE_URL/api/v1/members/GYM-000482" -H "X-API-Key: $SITE_API_KE
 
 ---
 
-## 8. Data and security guidance
+## 8. Security and data handling
 
-- **Never handle raw fingerprint data.** Do not build a path where a customer's
-  fingerprint scan is sent to your application, and never ask AccessLink for a
-  template. Enrolment and recognition happen on the terminal; your application
-  only ever sees `biometric_enrolled: true/false` and log entries.
-- **Do not send `fingerprint_template`** on create or update, and do not store
-  or log it if it appears in a response (section 5). It is a locator the
-  terminal owns, not data you can use.
-- **Treat the site API key as a secret.** It also provisions hardware. Keep it
-  server-side in a secrets store, rotate it from the console if it is ever
-  exposed, and remember rotation cuts over immediately.
-- **Use HTTPS in production.** The key travels in a header on every request.
-- **Branch on HTTP status codes, never on error strings.** Every error is
-  `{"error": "<message>"}`; the messages are for humans and are not stable.
-  Where a machine-readable `code` is present (for example `TERMINAL_REQUIRED`)
-  it is stable and may be used.
-- **Tenant isolation is enforced by the credential.** Every request is scoped
-  to the company the site key belongs to; you cannot reach, and will not be
-  told about, anyone else's data. Do not send site or company identifiers to
-  "select" a tenant — there is no such field and it would be ignored.
-- **Log the request id.** Every response carries `X-Request-ID`. Keep it with
-  your own logs; it is what AccessLink support will ask for.
+- **Never handle fingerprint data yourself.** Do not build anything where a
+  customer's fingerprint scan is sent to your application, and never ask
+  AccessLink for a fingerprint. Enrolment and recognition happen on the
+  terminal. All you ever see is `biometric_enrolled: true` or `false` and log
+  entries.
+- **Do not send `fingerprint_template`**, and do not store or log it if it
+  appears in a response (section 5). It is an internal value the terminal
+  owns.
+- **Treat the site API key as a secret.** It also lets someone add terminals
+  to your site. Keep it server-side in a secrets store. Rotate it from the
+  console if it is ever exposed; rotation takes effect at once.
+- **Use HTTPS in production.** The key is sent in a header on every request.
+- **Branch on HTTP status codes, not on error text.** Every error is
+  `{"error": "<message>"}`. The messages are for people and may change. Where
+  a `code` field is present (for example `TERMINAL_REQUIRED`) it is stable and
+  safe to use.
+- **Your data is separated from other companies' by your key.** Every request
+  is limited to your company. There is no field to pick a company or site; if
+  you send one, it is ignored.
+- **Keep the request ID.** Every response carries an `X-Request-ID` header.
+  Save it with your own logs; AccessLink support will ask for it.
 
 ---
 
-## 9. Errors
+## 9. Status codes
 
-| Status | Meaning for this integration |
+| Status | What it means for you |
 |---|---|
-| `400` | Malformed JSON, a missing required field, or a `member_id` the terminal cannot store. The body says which; some carry a stable `code`. Fix the request — do not retry it unchanged. |
-| `401` | No `X-API-Key`, or the key is not recognised (including a key whose site has been deactivated). Check the credential; a key that answers `401` will keep answering `401`. |
-| `403` | Not produced by the endpoints in this guide with a site key. Elsewhere in AccessLink it means a valid credential that is not allowed the action (an inactive device credential, or an operator without the role or CSRF token). If you see it, you are calling an endpoint outside this guide. |
-| `404` | The member (or the terminal named in `?terminal=`) does not exist **in your company**. Anything belonging to another tenant is also `404`. |
-| `409` | The `member_id` already exists in your company (`POST /api/v1/members`). Treat it as "already created", not as a retryable failure. |
-| `500` | AccessLink or its database could not complete the request. Retry with backoff. During authentication this is reported as `500`, never `401`, so do not discard your key. |
+| `400` | The request was malformed, a required field was missing, or the `member_id` breaks the terminal's rules. The body says which, and some carry a stable `code`. Fix the request; do not retry it as it is. |
+| `401` | No `X-API-Key`, or the key is not recognised (including a key whose site was deactivated). A key that gets `401` will keep getting `401`. |
+| `403` | Not returned by the endpoints in this guide when used with a site API key. Elsewhere in AccessLink it means a valid login that is not allowed to do something. If you see it, you are calling an endpoint outside this guide. |
+| `404` | The member (or the terminal in `?terminal=`) does not exist **in your company**. Records belonging to other companies also return `404`. |
+| `409` | The `member_id` already exists in your company (`POST /api/v1/members`). Treat it as "already created", not as something to retry. |
+| `500` | AccessLink or its database could not complete the request. Retry later with a delay. During authentication a `500` is an outage, not a bad key. |
 
-`201` is returned by creates (`POST /api/v1/members`,
-`POST /api/v1/enrollment/start`, `POST /api/v1/access/log`); `200` by
-everything else, including `DELETE`.
+`201` comes back from the three creates (`POST /api/v1/members`,
+`POST /api/v1/enrollment/start`, `POST /api/v1/access/log`). Everything else,
+including `DELETE`, returns `200`.
 
 ---
 
-## 10. API examples
+## 10. Copy-and-paste examples
 
-All examples use three placeholders; substitute your own values and never
-commit real credentials.
+Set these three values first. Never commit a real key.
 
 ```bash
 BASE_URL="https://api.your-accesslink-deployment.example"
 SITE_API_KEY="ats_..."      # from the AccessLink console; keep it secret
-MEMBER_ID="GYM-000482"      # your own stable identifier, <= 31 printable ASCII chars, no spaces
+MEMBER_ID="GYM-000482"      # your own stable number: 31 characters or fewer, no spaces
 ```
 
-List members (unpaginated):
+List all members:
 ```bash
 curl "$BASE_URL/api/v1/members" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-List members in pages of 200:
+List members 200 at a time:
 ```bash
 curl "$BASE_URL/api/v1/members?limit=200&offset=0" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-Read one member (and its `biometric_enrolled` flag):
+Read one member (and see whether they are enrolled):
 ```bash
 curl "$BASE_URL/api/v1/members/$MEMBER_ID" -H "X-API-Key: $SITE_API_KEY"
 ```
@@ -658,38 +646,38 @@ curl -X POST "$BASE_URL/api/v1/members" \
   -d "{\"member_id\":\"$MEMBER_ID\",\"full_name\":\"Ada Lovelace\",\"membership_type\":\"ANNUAL\",\"active\":true}"
 ```
 
-Update a member (full replacement — always send `active`; see section 4 about
-the enrolment):
+Update a member (replaces everything — always send `active`; see the warning
+in section 4 about the fingerprint):
 ```bash
 curl -X PUT "$BASE_URL/api/v1/members/$MEMBER_ID" \
   -H "X-API-Key: $SITE_API_KEY" -H "Content-Type: application/json" \
   -d '{"full_name":"Ada B. Lovelace","membership_type":"ANNUAL","active":true}'
 ```
 
-Remove a member:
+Delete a member:
 ```bash
 curl -X DELETE "$BASE_URL/api/v1/members/$MEMBER_ID" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-Record that an enrolment is wanted:
+Record that an enrolment is wanted (does not scan anything):
 ```bash
 curl -X POST "$BASE_URL/api/v1/enrollment/start" \
   -H "X-API-Key: $SITE_API_KEY" -H "Content-Type: application/json" \
   -d "{\"member_id\":\"$MEMBER_ID\"}"
 ```
 
-See which enrolments are still pending:
+See which enrolment requests are still open:
 ```bash
 curl "$BASE_URL/api/v1/enrollment/pending" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-Ask whether a person would be admitted at a terminal right now (deprecated
-endpoint; `terminal` is required):
+Ask whether a person would be let in at a terminal right now (deprecated;
+`terminal` is required):
 ```bash
 curl "$BASE_URL/api/v1/access/$MEMBER_ID?terminal=AT-000123" -H "X-API-Key: $SITE_API_KEY"
 ```
 
-Record an access attempt observed by your application:
+Record an access attempt your application handled:
 ```bash
 curl -X POST "$BASE_URL/api/v1/access/log" \
   -H "X-API-Key: $SITE_API_KEY" -H "Content-Type: application/json" \
@@ -703,7 +691,7 @@ curl "$BASE_URL/api/v1/access/logs/$MEMBER_ID?limit=50" -H "X-API-Key: $SITE_API
 
 ---
 
-## 11. Limitation: no remote fingerprint matching
+## 11. What the API does not do
 
 > **AccessLink does not currently expose a public API where an external
 > application uploads a fingerprint and asks AccessLink to perform 1:N
@@ -711,19 +699,51 @@ curl "$BASE_URL/api/v1/access/logs/$MEMBER_ID?limit=50" -H "X-API-Key: $SITE_API
 > The external integration works through member synchronisation, terminal
 > enrolment, access state, and access logs.**
 
-Concretely, this means:
+In practice:
 
-- no endpoint accepts an image or template and returns "this is member X";
-- no endpoint returns a person's template for you to match elsewhere;
+- no endpoint takes a fingerprint image or template and answers "this is
+  member X";
+- no endpoint gives you a person's fingerprint to match somewhere else;
 - no endpoint makes a terminal capture a finger — `POST /api/v1/enrollment/start`
-  records a request; the capture is directed by an operator from the console
-  (section 5);
-- `GET /api/v1/access/{member_id}` evaluates AccessLink's rules for a person
-  you have already identified — it is not a recognition step;
+  only records a request; the capture is started by an operator from the
+  console (section 5);
+- `GET /api/v1/access/{member_id}` checks AccessLink's rules for a person you
+  have already identified; it is not fingerprint recognition;
 - "who just presented a finger" is answered by the access log the terminal
-  writes, after the fact, not by a call you make at the moment of presentation.
+  writes, after the event, not by a call you make at that moment.
 
-If your product needs a fingerprint reader that talks to your own application,
-AccessLink terminals are not that reader. If it needs a door that recognises
-your members and tells you who came in, the integration in this guide is the
-one AccessLink supports.
+If your product needs a fingerprint reader that talks directly to your own
+application, AccessLink terminals are not that reader. If it needs a door that
+recognises your members and tells you who came in, this guide describes the
+integration AccessLink supports.
+
+---
+
+## 12. Implementation details worth knowing
+
+These are the finer points behind the sections above, collected in one place.
+
+- **Sync jobs.** Creating, updating or deleting a member queues one job per
+  terminal in the same database transaction as the change itself, so a saved
+  change is always on its way to the terminals. Terminals collect jobs when
+  they check in and confirm each one; a terminal that is offline receives its
+  backlog later.
+- **One open enrolment request per person.** `POST /api/v1/enrollment/start`
+  replaces any earlier open request for the same person rather than failing.
+- **Enrolment never changes `active`.** A completed enrolment sets
+  `biometric_enrolled` only. Suspended people can be enrolled and stay
+  suspended.
+- **Enrolment failures leave no trace on the member.** A capture that fails,
+  expires or is cancelled changes nothing on the member record.
+- **Terminal software and the pending list.** The terminal software currently
+  in use collects enrolment instructions as terminal-specific jobs created from
+  the operator console. It does not act on the company-wide list returned by
+  `GET /api/v1/devices/enrollment/pending`.
+- **The `member` object in the `enrollment/start` response** is AccessLink's
+  internal record and may include `fingerprint_template` for an enrolled
+  person. It is an internal locator, not biometric data, but do not keep it.
+- **Soft deletes.** A deleted member is kept in AccessLink's records for audit
+  purposes; the `member_id` becomes free to reuse.
+- **`GET /api/v1/access/{member_id}` is deprecated** and its replacement
+  requires an operator login. Build new integrations so they still work if it
+  is removed — reading the access log is the durable approach.
