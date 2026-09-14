@@ -91,7 +91,10 @@ export function PeopleListPage() {
     },
     {
       id: 'credential',
-      header: 'Credential',
+      // "Fingerprint", matching the person page: it is the column an operator
+      // lands on after Add a person's enrolment step says Done, and the word
+      // must be the one the step used. The id stays as it was.
+      header: 'Fingerprint',
       // A BOOLEAN AND NOTHING MORE. No template, no locator, no sensor detail.
       render: (person) => <BiometricBadge enrolled={person.biometric_enrolled} />,
     },
