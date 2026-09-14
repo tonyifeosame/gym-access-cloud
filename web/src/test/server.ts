@@ -2066,7 +2066,21 @@ export const handlers = [
     const failure = takeFailure('operators-list')
     if (failure) return json({ error: 'Failed to retrieve operators' }, failure)
 
-    return json({ count: state.operators.length, operators: state.operators })
+    // PAGED HERE, as the API pages it: a default of 100 and a ceiling of 500,
+    // in the same envelope people use. A console that assumed the list was
+    // whole would pass against a mock that returned it whole.
+    const url = new URL(request.url)
+    const limit = boundedParam(url.searchParams.get('limit'), 100, 1, 500)
+    const offset = boundedParam(url.searchParams.get('offset'), 0, 0, 0)
+    const page = state.operators.slice(offset, offset + limit)
+    return json({
+      count: page.length,
+      total: state.operators.length,
+      limit,
+      offset,
+      has_more: offset + page.length < state.operators.length,
+      operators: page,
+    })
   }),
 
   http.post('*/api/v1/console/operators', async ({ request }) => {

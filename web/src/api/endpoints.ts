@@ -37,6 +37,7 @@ import type {
   OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
+  OperatorsQuery,
   OperatorsResponse,
   PasswordResetAcceptedResponse,
   PendingTerminal,
@@ -704,8 +705,12 @@ export function cancelEnrollment(externalId: string): Promise<Enrollment> {
 // Operators
 // ---------------------------------------------------------------------------
 
-export function fetchOperators(): Promise<OperatorsResponse> {
-  return api.get<OperatorsResponse>('/api/v1/console/operators')
+export function fetchOperators(query: OperatorsQuery = {}): Promise<OperatorsResponse> {
+  const params = new URLSearchParams()
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.offset) params.set('offset', String(query.offset))
+  const suffix = params.size > 0 ? `?${params}` : ''
+  return api.get<OperatorsResponse>(`/api/v1/console/operators${suffix}`)
 }
 
 export function fetchOperator(operatorId: string): Promise<OperatorAccount> {

@@ -81,13 +81,37 @@ func scanMembers(rows *sql.Rows) ([]models.Member, error) {
 	return members, rows.Err()
 }
 
-// GetAllMembers retrieves all members for a company
-func GetAllMembers(companyID int64) ([]models.Member, error) {
+// MemberPage bounds a member read. Nil means unbounded, which is what the
+// site-key member routes have always returned and what their existing callers
+// rely on; a caller that passes one gets that window of the same ordering.
+type MemberPage struct {
+	Limit  int
+	Offset int
+}
+
+// pageClause renders the optional LIMIT/OFFSET for a member read, with the
+// parameters appended to args so the statement stays fully parameterised.
+func (p *MemberPage) clause(args []any) (string, []any) {
+	if p == nil {
+		return "", args
+	}
+	n := len(args)
+	return fmt.Sprintf(" LIMIT $%d OFFSET $%d", n+1, n+2), append(args, p.Limit, p.Offset)
+}
+
+// GetAllMembers retrieves all members for a company, newest first.
+//
+// UNBOUNDED BY DEFAULT, deliberately: GET /api/v1/members is a contract
+// terminals and existing tooling speak, and a roster that quietly stopped at
+// fifty would be a roster somebody relied on being complete. A page is
+// applied only when the caller asks for one.
+func GetAllMembers(companyID int64, page *MemberPage) ([]models.Member, error) {
 	query := `SELECT ` + memberColumns + `
 	          FROM people WHERE company_id = $1 AND deleted_at IS NULL
-	          ORDER BY created_at DESC`
+	          ORDER BY created_at DESC, id DESC`
+	clause, args := page.clause([]any{companyID})
 
-	rows, err := DB.Query(query, companyID)
+	rows, err := DB.Query(query+clause, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -125,12 +149,17 @@ func GetMemberByID(companyID int64, memberID string) (*models.Member, error) {
 //
 // Both forms now round-trip: the value a caller passes back here is one this API
 // gave it in a previous response, and those are RFC3339 in UTC.
-func GetMembersChangedSince(companyID int64, since string) ([]models.Member, error) {
+//
+// Unbounded unless the caller passes a page, for the reason GetAllMembers
+// gives. The id tiebreak on the order is what makes a page stable: rows
+// updated in one transaction share an updated_at to the microsecond.
+func GetMembersChangedSince(companyID int64, since string, page *MemberPage) ([]models.Member, error) {
 	query := `SELECT ` + memberColumns + `
 	          FROM people WHERE company_id = $1 AND updated_at > $2::timestamptz AND deleted_at IS NULL
-	          ORDER BY updated_at ASC`
+	          ORDER BY updated_at ASC, id ASC`
+	clause, args := page.clause([]any{companyID, since})
 
-	rows, err := DB.Query(query, companyID, since)
+	rows, err := DB.Query(query+clause, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -242,7 +242,7 @@ func TestChangesSinceHonoursAnOffset(t *testing.T) {
 		"naive (implicitly UTC)": cutoff.Format("2006-01-02T15:04:05"),
 	}
 	for name, since := range spellings {
-		changed, err := database.GetMembersChangedSince(one, since)
+		changed, err := database.GetMembersChangedSince(one, since, nil)
 		if err != nil {
 			t.Fatalf("%s (%q): %v", name, since, err)
 		}
@@ -259,7 +259,7 @@ func TestChangesSinceHonoursAnOffset(t *testing.T) {
 		"future RFC3339 in UTC":    future.Format(time.RFC3339),
 		"future RFC3339 at -05:00": future.In(time.FixedZone("test", -5*3600)).Format(time.RFC3339),
 	} {
-		changed, err := database.GetMembersChangedSince(one, since)
+		changed, err := database.GetMembersChangedSince(one, since, nil)
 		if err != nil {
 			t.Fatalf("%s (%q): %v", name, since, err)
 		}

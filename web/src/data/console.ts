@@ -46,6 +46,7 @@ import type {
   OnboardingState,
   OperatorAccount,
   OperatorSitesResponse,
+  OperatorsQuery,
   OperatorsResponse,
   PendingTerminal,
   PendingTerminalsResponse,
@@ -1008,10 +1009,11 @@ export function useDeletePerson(): UseMutationResult<void, Error, string> {
 // Operators
 // ---------------------------------------------------------------------------
 
-export function useOperators(): UseQueryResult<OperatorsResponse> {
+export function useOperators(query: OperatorsQuery = {}): UseQueryResult<OperatorsResponse> {
   return useQuery({
-    queryKey: keys.operators.list(),
-    queryFn: () => endpoints.fetchOperators(),
+    queryKey: keys.operators.list(query),
+    queryFn: () => endpoints.fetchOperators(query),
+    placeholderData: (previous) => previous,
   })
 }
 

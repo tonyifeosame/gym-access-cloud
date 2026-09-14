@@ -1,4 +1,4 @@
-import type { AuditQuery, EventQuery, PeopleQuery } from '../api/types'
+import type { AuditQuery, EventQuery, OperatorsQuery, PeopleQuery } from '../api/types'
 
 /**
  * Normalises an event filter into a stable cache key.
@@ -150,7 +150,10 @@ export const keys = {
 
   operators: {
     all: [ROOT, 'operators'] as const,
-    list: () => [ROOT, 'operators', 'list'] as const,
+    // The page is part of the key, as it is for people: two pages are two
+    // cache entries, not one overwriting the other.
+    list: (query: OperatorsQuery = {}) =>
+      [ROOT, 'operators', 'list', { limit: query.limit ?? null, offset: query.offset ?? 0 }] as const,
     detail: (operatorId: string) => [ROOT, 'operators', 'detail', operatorId] as const,
     sites: (operatorId: string) => [ROOT, 'operators', 'sites', operatorId] as const,
   },

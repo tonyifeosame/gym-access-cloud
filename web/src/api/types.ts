@@ -1208,9 +1208,24 @@ export interface OperatorAccount {
   created_at: string
 }
 
+/**
+ * One page of operators, in the same envelope as PeoplePage. `count` and
+ * `operators` mean what they meant before the list was paged; the rest is
+ * additive, and a client that never sends `limit` gets the API's default page
+ * (100), which is more operators than almost any company has.
+ */
 export interface OperatorsResponse {
   count: number
+  total: number
+  limit: number
+  offset: number
+  has_more: boolean
   operators: OperatorAccount[]
+}
+
+export interface OperatorsQuery {
+  limit?: number
+  offset?: number
 }
 
 export interface OperatorSitesResponse {
