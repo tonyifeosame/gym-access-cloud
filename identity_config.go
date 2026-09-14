@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"access-terminal-cloud-api/email"
 	"access-terminal-cloud-api/handlers"
 	"access-terminal-cloud-api/oidc"
 )
@@ -49,6 +50,24 @@ func configureIdentityProviders() error {
 		handlers.ConfigureGoogleSignIn(provider)
 		log.Printf("Google sign-in: enabled (client %s, callback %s)",
 			redactClientID(googleCfg.ClientID), googleCfg.RedirectURL)
+	}
+
+	sender, err := email.FromEnv()
+	switch {
+	case errors.Is(err, email.ErrNotConfigured):
+		handlers.ConfigurePasswordResetDelivery(nil)
+		log.Printf("Email delivery: not configured; self-service password resets " +
+			"are logged for an administrator to act on")
+	case err != nil:
+		return err
+	default:
+		if handlers.ConsoleURL() == "" {
+			return fmt.Errorf("%s is required when %s is set: reset emails need an "+
+				"absolute link to the console", handlers.EnvConsoleURL, email.EnvProvider)
+		}
+		handlers.ConfigurePasswordResetDelivery(sender)
+		log.Printf("Email delivery: %s provider; self-service password resets are emailed",
+			sender.Name())
 	}
 
 	return nil

@@ -163,6 +163,11 @@ func AuthProviders(c *gin.Context) {
 			"start_path": "/api/v1/auth/google/start",
 		},
 		"signup": gin.H{"enabled": PublicSignupEnabled()},
+		"password_reset": gin.H{
+			// Whether a forgotten password produces an email, or only a log
+			// line for somebody with server access to act on.
+			"email_delivery": PasswordResetDeliveryEnabled(),
+		},
 	})
 }
 

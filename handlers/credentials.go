@@ -27,11 +27,11 @@ import (
 // to recover, which is the same failure the company-creation blocker had: an
 // ordinary operation only somebody with SQL could perform.
 //
-// WHAT IS DELIBERATELY NOT HERE: delivery. This platform has no transactional
-// email, and writing a send function that logs the link would be worse than
-// being explicit about it. The token is returned ONCE to the administrator who
-// minted it, the response says so in a field rather than in documentation, and
-// wiring real delivery is a change in this file and nowhere else.
+// DELIVERY. The administrative routes below return the token ONCE to the
+// administrator who minted it, and the response says so in a field rather than
+// in documentation. The SELF-SERVICE reset is delivered by email when the
+// deployment configures a provider (handlers/password_reset_email.go) and
+// logged for somebody with server access when it does not.
 //
 // THE SELF-SERVICE RESET IS AN ENUMERATION SURFACE by necessity -- it is
 // unauthenticated and takes an email address. Every response is 202 with the
@@ -159,9 +159,10 @@ func ConsoleResetOperatorPassword(c *gin.Context) {
 //
 // AND THE TOKEN IS NOT IN THE RESPONSE. This is the one place a minted token
 // must not be returned to its caller, because the caller is unauthenticated and
-// has proved nothing. Until delivery exists, a self-service reset therefore
-// completes only in the log -- which is stated plainly in the response rather
-// than dressed up as success.
+// has proved nothing. With email delivery configured (EMAIL_PROVIDER) the link
+// goes to the address that asked; without it, a self-service reset completes
+// only in the log -- which the console states plainly rather than dressing up
+// as success. GET /auth/providers tells the console which of the two it is.
 func RequestPasswordReset(c *gin.Context) {
 	if !requireJSON(c) {
 		return
@@ -204,9 +205,23 @@ func RequestPasswordReset(c *gin.Context) {
 		return
 	}
 
-	// The one place a token is written to the operational log, and the reason is
-	// that there is nowhere else for it to go yet. An installation with delivery
-	// wired removes this line in the same change that adds the send.
+	// DELIVERY, when the deployment has configured it. The send is asynchronous
+	// so that the response leaves at the same moment whether or not an email
+	// is going out -- see handlers/password_reset_email.go. The recipient is
+	// the normalised address the store matched on, which is the account's own.
+	if PasswordResetDeliveryEnabled() {
+		deliverPasswordReset(c, database.NormalizeEmail(req.Email), token.Token, database.ResetTokenTTL())
+		log.Printf("request_id=%s auth=reset-requested match=yes user=%d expires=%s delivery=queued",
+			middleware.RequestID(c), userID, token.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"))
+		c.JSON(http.StatusAccepted, accepted)
+		return
+	}
+
+	// NO DELIVERY CONFIGURED. The token is written to the operational log,
+	// because there is nowhere else for it to go: somebody with server access
+	// finishes the reset by hand. Setting EMAIL_PROVIDER replaces this path with
+	// the one above; it is kept so a deployment that has not is not silently
+	// worse off than it was.
 	log.Printf("request_id=%s auth=reset-requested match=yes user=%d expires=%s "+
 		"DELIVERY NOT CONFIGURED -- reset link: %s",
 		middleware.RequestID(c), userID, token.ExpiresAt.Format("2006-01-02T15:04:05Z07:00"),
