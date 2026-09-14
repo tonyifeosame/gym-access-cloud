@@ -125,6 +125,44 @@ export function describeEnrollment(enrollment: Enrollment): DescribedEnrollment 
 }
 
 /**
+ * Where an enrolment is, as one of the states an operator acts on.
+ *
+ *   choose     nothing live: pick a terminal and start. Also the state after
+ *              an outcome, because the next action is the same -- try again.
+ *   queued     the selected terminal has not picked the request up yet
+ *   scanning   the terminal is showing the prompt; the finger goes on now
+ *   succeeded  captured and bound
+ *   failed     the terminal could not, or the window closed (retry offered)
+ *   cancelled  an operator stopped it (retry offered)
+ *
+ * SIX WORDS FOR THE SIX THINGS A SCREEN DOES DIFFERENTLY. The server's status
+ * codes are what happened; these are what to show. Keeping the mapping here,
+ * pure and tested, is what lets the standalone dialog and the add-person flow
+ * render the same states without each deciding for itself.
+ */
+export type EnrollmentPhase = 'choose' | 'queued' | 'scanning' | 'succeeded' | 'failed' | 'cancelled'
+
+export function phaseOf(enrollment: Enrollment | null | undefined): EnrollmentPhase {
+  if (!enrollment) return 'choose'
+  switch (enrollment.status) {
+    case 'PENDING':
+      return 'queued'
+    case 'IN_PROGRESS':
+      return 'scanning'
+    case 'COMPLETED':
+      return 'succeeded'
+    case 'FAILED':
+    case 'EXPIRED':
+      return 'failed'
+    case 'CANCELLED':
+      return 'cancelled'
+    default:
+      // An unknown state is not a safe one to treat as "start another".
+      return 'failed'
+  }
+}
+
+/**
  * The terminals that may be offered as a place to stand.
  *
  * THE SAME RULE THE SERVER ENFORCES, mirrored here so an operator is not offered

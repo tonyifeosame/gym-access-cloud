@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import { ApiError } from '../../api/client'
 import type { Person } from '../../api/types'
 import { CheckboxField, FormActions, FormError, TextField } from '../../components/Form'
@@ -5,6 +7,12 @@ import { Dialog } from '../../components/Dialog'
 import { useNotifications } from '../../components/Notifications'
 import { submitErrorMessage, useForm, validators } from '../../components/useForm'
 import { useCreatePerson, useUpdatePerson } from '../../data/console'
+import {
+  describeWorkflowLead,
+  EnrollmentWorkflowActions,
+  EnrollmentWorkflowBody,
+  useEnrollmentWorkflow,
+} from './EnrollmentWorkflow'
 import { PERSON_ID_HINT, PERSON_ID_LABEL } from './personVocabulary'
 
 /**
@@ -25,6 +33,14 @@ import { PERSON_ID_HINT, PERSON_ID_LABEL } from './personVocabulary'
  * and sync against, so the API addresses a person by it and offers no way to
  * change it. The field is therefore disabled when editing rather than absent —
  * an operator needs to see the id they are editing.
+ *
+ * ADDING SOMEBODY CONTINUES INTO ENROLLING THEM. The record is created first,
+ * on its own, exactly as before -- then the same dialog moves to the enrolment
+ * workflow for that person, because the moment a front desk adds somebody is
+ * the moment that somebody is most likely to be standing at a terminal. The
+ * step can be skipped, and it can be done later from the person's page with
+ * the identical workflow. Two requests, not one: the person exists whether or
+ * not the enrolment happens, and no outcome of the enrolment can unmake them.
  */
 
 interface Values extends Record<string, unknown> {
@@ -50,6 +66,9 @@ export function PersonFormDialog({
   const notifications = useNotifications()
   const create = useCreatePerson()
   const update = useUpdatePerson(person?.external_id ?? '')
+
+  // The person just created, once the dialog has moved on to enrolling them.
+  const [created, setCreated] = useState<Person | null>(null)
 
   const form = useForm<Values>({
     initialValues: {
@@ -87,9 +106,14 @@ export function PersonFormDialog({
       })
       notifications.success(`${created.full_name} added`)
       onCreated?.(created)
-      onClose()
+      // Not onClose(): the dialog stays open and becomes the enrolment step.
+      setCreated(created)
     },
   })
+
+  if (created) {
+    return <EnrollmentStep open={open} person={created} onClose={onClose} />
+  }
 
   const error = form.submitError
   const conflict = error instanceof ApiError && error.status === 409
@@ -181,11 +205,56 @@ export function PersonFormDialog({
 
         {!editing ? (
           <p className="field__hint">
-            Adding someone sends them to every terminal in your company. A biometric
-            credential is enrolled separately, at a terminal.
+            Adding someone sends them to every terminal in your company. Next, you
+            can enrol their fingerprint at a terminal they are standing at — or skip
+            that and do it later from their page.
           </p>
         ) : null}
       </form>
+    </Dialog>
+  )
+}
+
+/**
+ * Step two of adding a person: enrolling their fingerprint.
+ *
+ * THE SAME WORKFLOW THE PERSON'S PAGE RUNS, with one word changed: leaving it
+ * here is "Skip for now", because what the operator is deciding is "they are
+ * not at a terminal; do it later", and the button should say so.
+ */
+function EnrollmentStep({
+  open,
+  person,
+  onClose,
+}: {
+  open: boolean
+  person: Person
+  onClose: () => void
+}) {
+  const workflow = useEnrollmentWorkflow(person, { enabled: open })
+  const name = person.full_name || person.external_id
+
+  return (
+    <Dialog
+      open={open}
+      size="wide"
+      title={`Enrol a fingerprint for ${name}`}
+      description={
+        workflow.phase === 'choose'
+          ? `${name} has been added. If they are at a terminal now, choose it and start the enrolment. Otherwise skip this — you can enrol them later from their page.`
+          : describeWorkflowLead(workflow)
+      }
+      onClose={onClose}
+      dismissible={!workflow.starting && !workflow.cancelling}
+      footer={
+        <EnrollmentWorkflowActions
+          workflow={workflow}
+          onClose={onClose}
+          closeLabel="Skip for now"
+        />
+      }
+    >
+      <EnrollmentWorkflowBody workflow={workflow} />
     </Dialog>
   )
 }

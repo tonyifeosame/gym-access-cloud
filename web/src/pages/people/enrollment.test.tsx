@@ -512,7 +512,8 @@ describe('when it does not work', () => {
     expect(within(dialog).getByRole('radio', { name: /Reception/ })).toBeInTheDocument()
 
     await user.click(within(dialog).getByRole('radio', { name: /Reception/ }))
-    await user.click(within(dialog).getByRole('button', { name: 'Start enrolment' }))
+    // After an outcome the action is named for what it is.
+    await user.click(within(dialog).getByRole('button', { name: 'Try again' }))
 
     await waitFor(() => expect(enrolmentRequests()).toHaveLength(1))
     expect(theEnrolmentRequestURL()).toContain('/terminals/AT-0002/enrollments')
