@@ -269,10 +269,15 @@ jobs:
         working-directory: firmware
         run: python tools/make_root_ca_inc.py
 
+      # THE BUILD'S OWN OUTPUT IS THE SIZE REPORT. `pio run --target size`
+      # prints no RAM/Flash bars on this PlatformIO version, so the budget
+      # step below parsed nothing, warned, and passed -- for every run that
+      # ever reached it. The bars are printed by the build itself; capture
+      # them here and judge them below, with no second build in between.
       - name: Production build
         if: steps.firmware.outcome == 'success'
         working-directory: firmware
-        run: pio run -e esp32dev
+        run: pio run -e esp32dev | tee size.txt
 
       # A size budget, checked rather than hoped for. The audit's instruction was
       # not to introduce features that exceed the actual flash and RAM budget;
@@ -281,7 +286,6 @@ jobs:
         if: steps.firmware.outcome == 'success'
         working-directory: firmware
         run: |
-          pio run -e esp32dev --target size | tee size.txt
           python - <<'PY'
           import re, sys
           text = open('size.txt').read()
@@ -301,7 +305,10 @@ jobs:
           for name, ceiling in budgets.items():
               m = re.search(rf'{name}:\s+\[[=\s]*\]\s+([\d.]+)%', text)
               if not m:
-                  print(f'::warning::could not read the {name} figure from the size report')
+                  # A figure that cannot be read is a budget that is not being
+                  # applied. That is a failure, not a note.
+                  print(f'::error::could not read the {name} figure from the build output')
+                  failed = True
                   continue
               used = float(m.group(1))
               print(f'{name}: {used}% used, budget {ceiling}%')
