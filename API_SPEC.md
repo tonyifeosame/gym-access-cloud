@@ -1421,7 +1421,7 @@ never had one. Both share the login rate limiter.
 
 | Method | Path | Auth |
 |---|---|---|
-| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists; emails the link when `EMAIL_PROVIDER` is set, otherwise logs it |
+| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists; emails the link when `EMAIL_PROVIDER` is set (`brevo_api` over HTTPS, or `smtp`), otherwise logs it |
 | `POST` | `/api/v1/auth/redeem` | the single-use token is the whole authorisation |
 
 ### Platform administration routes
