@@ -191,6 +191,13 @@ func main() {
 		log.Fatalf("CURSOR_SIGNING_KEY: %v", err)
 	}
 
+	// Sign in with Google and password-reset email, from the environment.
+	// Both off unless configured; both fatal when half-configured. See
+	// identity_config.go.
+	if err := configureIdentityProviders(); err != nil {
+		log.Fatalf("Identity providers: %v", err)
+	}
+
 	// Create the first operator, if this system has none and the environment
 	// says who it should be.
 	//
