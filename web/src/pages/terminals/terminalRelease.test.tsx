@@ -120,7 +120,7 @@ function dialog() {
 
 async function openRelease() {
   const user = userEvent.setup()
-  await screen.findByRole('heading', { name: 'Lifecycle' })
+  await screen.findByRole('heading', { name: 'Actions' })
   await user.click(screen.getByRole('button', { name: /^release$/i }))
   return user
 }
@@ -241,7 +241,7 @@ describe('the automated workflow is gated on terminal_release', () => {
   it('treats a terminal that has never reported capabilities as incapable', async () => {
     signIn('ADMIN', { capabilities: undefined })
     renderTerminal()
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     expect(screen.getByText(/needs a firmware update first/i)).toBeInTheDocument()
   })
 })
@@ -523,7 +523,7 @@ describe('role gating mirrors the server', () => {
   it('disables Release for a MANAGER', async () => {
     signIn('MANAGER')
     renderTerminal()
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     expect(screen.getByRole('button', { name: /^release$/i })).toBeDisabled()
   })
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import type { Terminal } from '../../api/types'
-import { TerminalStatusBadge, humaniseCode } from '../../components/Badge'
+import { TerminalStatusBadge, terminalStatusLabel } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
 import { SearchInput } from '../../components/Pagination'
 import { PageHeader, RefreshingIndicator } from '../../components/states'
@@ -71,8 +71,8 @@ export function TerminalsListPage() {
 
   const columns: Column<Terminal>[] = [
     {
-      id: 'serial',
-      header: 'Serial',
+      id: 'name',
+      header: 'Name',
       primary: true,
       /*
         A REAL LINK, WHICH IS THE ONLY WAY INTO THIS PAGE THAT IS NOT A MOUSE.
@@ -85,28 +85,33 @@ export function TerminalsListPage() {
         opened by keyboard at all. People and Sites had it right; this was the
         outlier.
 
-        THE SERIAL RATHER THAN THE NAME carries the link because it is the one
-        field guaranteed to be there — a terminal added without a name renders
-        an em dash in the Name column, and a link with no text is worse than no
-        link. It is also what the row is keyed and routed by.
+        THE NAME CARRIES THE LINK NOW, AND THE SERIAL IS THE SECOND COLUMN. The
+        serial used to come first because it is the one field guaranteed to be
+        there, and that reasoning still holds -- so a terminal added without a
+        name links by its serial rather than rendering an em dash with no link
+        in it. But a person reading this list is looking for "Reception" or
+        "Back gate", not for AT-000123: the serial is what the platform keys and
+        routes by, and it is what somebody reads to support, which is why it is
+        one column over in monospace and off the card on a phone.
 
-        No automated check caught this: axe cannot see a missing keyboard path
-        when there is no ARIA to contradict, and the row deliberately carries no
-        role. The regression test added alongside this asserts the link exists.
+        No automated check caught the missing link: axe cannot see a missing
+        keyboard path when there is no ARIA to contradict, and the row
+        deliberately carries no role. The regression test asserts it exists.
       */
       render: (terminal) => (
         <Link
           to={`/terminals/${encodeURIComponent(terminal.serial_number)}`}
-          className="table__link mono"
+          className={terminal.device_name ? 'table__link' : 'table__link mono'}
         >
-          {terminal.serial_number}
+          {terminal.device_name || terminal.serial_number}
         </Link>
       ),
     },
     {
-      id: 'name',
-      header: 'Name',
-      render: (terminal) => terminal.device_name || <span className="muted">—</span>,
+      id: 'serial',
+      header: 'Serial',
+      secondary: true,
+      render: (terminal) => <code className="mono muted">{terminal.serial_number}</code>,
     },
     {
       id: 'site',
@@ -118,7 +123,10 @@ export function TerminalsListPage() {
       header: 'Status',
       // The two transient states a terminal can be in beside its liveness
       // (032): being released for transfer, or still loading its roster.
-      // Both are drawn as words, not colours, next to the status.
+      // Both are drawn as words, not colours, next to the status -- and so is
+      // "Needs update", which used to be a badge in a Firmware column of its
+      // own. The version string is on the terminal's page; what the list needs
+      // to say per row is only that an update is due.
       render: (terminal) => (
         <span className="badge-group">
           <TerminalStatusBadge status={terminal.status} />
@@ -126,6 +134,9 @@ export function TerminalsListPage() {
             <span className="badge badge--warning">Releasing</span>
           ) : terminal.readiness?.state === 'SETTING_UP' ? (
             <span className="badge badge--info">Setting up</span>
+          ) : null}
+          {terminal.firmware_outdated ? (
+            <span className="badge badge--warning">Needs update</span>
           ) : null}
         </span>
       ),
@@ -140,19 +151,31 @@ export function TerminalsListPage() {
           <span className="muted">Never</span>
         ),
     },
-    {
-      id: 'firmware',
-      header: 'Firmware',
-      secondary: true,
-      render: (terminal) => (
-        <span className="firmware">
-          <code className="mono">{terminal.firmware_version || '—'}</code>
-          {terminal.firmware_outdated ? (
-            <span className="badge badge--warning">Outdated</span>
-          ) : null}
-        </span>
-      ),
-    },
+    /*
+      THE VERSION COLUMN ONLY WHEN SOMEBODY HAS ASKED ABOUT UPDATES. A column
+      of "1.3.5" against every row is a software inventory, and the person
+      opening this list is asking whether the doors work. Ticking "Needs update
+      only" is the moment the version becomes the question, so that is when
+      the column appears. Nothing is lost: every row already says "Needs
+      update", and the terminal's own page shows the version regardless.
+    */
+    ...(filter.outdatedOnly
+      ? [
+          {
+            id: 'firmware',
+            header: 'Software version',
+            secondary: true,
+            render: (terminal: Terminal) => (
+              <span className="firmware">
+                <code className="mono">{terminal.firmware_version || '—'}</code>
+                {terminal.current_firmware_version ? (
+                  <span className="muted">→ {terminal.current_firmware_version}</span>
+                ) : null}
+              </span>
+            ),
+          } satisfies Column<Terminal>,
+        ]
+      : []),
   ]
 
   return (
@@ -213,18 +236,16 @@ export function TerminalsListPage() {
             <Tile label="Total" value={summary.data?.total} />
             <Tile label="Online" value={summary.data?.online} tone="positive" />
             <Tile label="Offline" value={summary.data?.offline} tone="warning" />
-            <Tile label="Error" value={summary.data?.error} tone="danger" />
-            <Tile
-              label="Firmware outdated"
-              value={summary.data?.firmware_outdated}
-              tone="warning"
-            />
+            <Tile label="Fault" value={summary.data?.error} tone="danger" />
+            {/* "Needs update", not "Firmware outdated": the same count, in the
+                words of somebody who has never heard the word firmware. */}
+            <Tile label="Needs update" value={summary.data?.firmware_outdated} tone="warning" />
           </section>
 
           <div className="toolbar">
             <SearchInput
               label="Search terminals"
-              placeholder="Serial, name or site"
+              placeholder="Name, serial or site"
               value={filter.search ?? ''}
               onChange={(search) => setFilter((current) => ({ ...current, search }))}
             />
@@ -247,7 +268,7 @@ export function TerminalsListPage() {
                 <option value="ALL">All statuses</option>
                 {statuses.map((status) => (
                   <option key={status} value={status}>
-                    {humaniseCode(status)}
+                    {terminalStatusLabel(status)}
                   </option>
                 ))}
               </select>
@@ -288,7 +309,7 @@ export function TerminalsListPage() {
                   setFilter((current) => ({ ...current, outdatedOnly: event.target.checked }))
                 }
               />
-              <span className="checkbox__label">Outdated firmware only</span>
+              <span className="checkbox__label">Needs update only</span>
             </label>
 
             <RefreshingIndicator active={terminals.isFetching && !terminals.isPending} />

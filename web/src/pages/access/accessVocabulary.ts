@@ -130,9 +130,18 @@ export const SCOPE_DESCRIPTIONS: Record<PermissionScope, string> = {
   TERMINAL: 'Exactly one terminal.',
 }
 
+/**
+ * "Let in" and "Keep out" rather than "Allow" and "Deny".
+ *
+ * The engine's words are the policy-language ones and they are exact; the
+ * person reading a rule on somebody's page is deciding whether a colleague can
+ * get through a gate, and "Keep out" says what the rule does to them. The
+ * values are unchanged -- ALLOW and DENY are what the API stores and what the
+ * events page's reasons still refer to.
+ */
 export const EFFECT_LABELS: Record<PermissionEffect, string> = {
-  ALLOW: 'Allow',
-  DENY: 'Deny',
+  ALLOW: 'Let in',
+  DENY: 'Keep out',
 }
 
 /**

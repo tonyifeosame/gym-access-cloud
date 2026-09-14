@@ -26,16 +26,49 @@ export interface NavItem {
   path: string
   /** Lowest role that may see it. */
   minimumRole: Role
+  /** Which of the three headings a platform entry sits under. */
+  group?: NavGroupId
   /** True for capability-derived entries. */
   module?: boolean
   description?: string
 }
 
+/**
+ * The three headings the platform entries sit under.
+ *
+ * ELEVEN LINKS OF EQUAL WEIGHT WAS THE PROBLEM. A front-desk manager uses four
+ * of them every day and the other seven looked just as important and just as
+ * alarming -- "Firmware" and "API access" sat one line below "People". The
+ * grouping separates "my day" from "setting things up" from "the account", and
+ * that is all it does: the links, their labels and their role gates are exactly
+ * what they were.
+ */
+export type NavGroupId = 'everyday' | 'manage' | 'settings'
+
+export const NAV_GROUPS: { id: NavGroupId; title: string }[] = [
+  { id: 'everyday', title: 'Everyday' },
+  { id: 'manage', title: 'Manage' },
+  { id: 'settings', title: 'Settings' },
+]
+
+export interface NavGroup {
+  id: NavGroupId
+  title: string
+  items: NavItem[]
+}
+
 /** Present for every company, whatever it uses the platform for. */
 export const PLATFORM_NAV: NavItem[] = [
-  { id: 'dashboard', label: 'Overview', path: '/', minimumRole: 'VIEWER' },
-  { id: 'people', label: 'People', path: '/people', minimumRole: 'VIEWER' },
-  { id: 'terminals', label: 'Terminals', path: '/terminals', minimumRole: 'VIEWER' },
+  // --- Everyday: what a front desk opens every day ---------------------------
+  { id: 'dashboard', label: 'Overview', path: '/', minimumRole: 'VIEWER', group: 'everyday' },
+  { id: 'people', label: 'People', path: '/people', minimumRole: 'VIEWER', group: 'everyday' },
+  {
+    id: 'terminals',
+    label: 'Terminals',
+    path: '/terminals',
+    minimumRole: 'VIEWER',
+    group: 'everyday',
+  },
   {
     id: 'events',
     label: 'Events',
@@ -43,41 +76,45 @@ export const PLATFORM_NAV: NavItem[] = [
     // VIEWER: "why was she refused" is a question somebody at a front desk has
     // to be able to answer without an administrator.
     minimumRole: 'VIEWER',
+    group: 'everyday',
   },
+
+  // --- Manage: setting up and looking after the deployment -------------------
   {
     id: 'schedules',
     label: 'Schedules',
     path: '/access/schedules',
     // Readable by anyone; the write controls carry their own MANAGER gate.
     minimumRole: 'VIEWER',
+    group: 'manage',
   },
-  { id: 'sites', label: 'Sites', path: '/sites', minimumRole: 'VIEWER' },
-  { id: 'operators', label: 'Operators', path: '/operators', minimumRole: 'ADMIN' },
+  { id: 'sites', label: 'Sites', path: '/sites', minimumRole: 'VIEWER', group: 'manage' },
+  {
+    id: 'operators',
+    label: 'Operators',
+    path: '/operators',
+    minimumRole: 'ADMIN',
+    group: 'manage',
+  },
   {
     id: 'activity',
     label: 'Activity',
     path: '/activity',
     // ADMIN, matching the server: the trail names which operators did what.
     minimumRole: 'ADMIN',
+    group: 'manage',
   },
+
+  // --- Settings: the account and the things an administrator configures once -
   {
-    id: 'firmware',
-    label: 'Firmware',
-    path: '/settings/firmware',
-    // ADMIN, matching the server. The catalogue decides what the fleet is
-    // measured against, which is why these routes left the site-key tree.
-    minimumRole: 'ADMIN',
-  },
-  {
-    id: 'api-credentials',
-    label: 'API access',
-    path: '/settings/api-credentials',
-    // ADMIN, matching the server's route group: issuing a key is "let this
-    // company's data leave it", the same decision as rotating a site key, and
-    // the server mounts both on the same ADMIN group. OWNER qualifies through
-    // the hierarchy; MANAGER and below never see the entry and get 403 from
-    // the API if they type the URL.
-    minimumRole: 'ADMIN',
+    id: 'settings',
+    label: 'Settings',
+    path: '/settings',
+    // VIEWER: it holds YOUR OWN account and password. Every operator needs it,
+    // and nothing on it is privileged -- the company section is read-only and
+    // the rest are links to pages with their own gates.
+    minimumRole: 'VIEWER',
+    group: 'settings',
   },
   {
     id: 'applications',
@@ -89,20 +126,48 @@ export const PLATFORM_NAV: NavItem[] = [
     // ADMIN sees what the company is configured for; only OWNER may change it,
     // and that gate is on the controls rather than the route.
     minimumRole: 'ADMIN',
+    group: 'settings',
   },
   {
-    id: 'settings',
-    label: 'Settings',
-    path: '/settings',
-    // VIEWER: it holds YOUR OWN account and password. Every operator needs it,
-    // and nothing on it is privileged -- the company section is read-only and
-    // the rest are links to pages with their own gates.
-    minimumRole: 'VIEWER',
+    id: 'firmware',
+    label: 'Firmware',
+    path: '/settings/firmware',
+    // ADMIN, matching the server. The catalogue decides what the fleet is
+    // measured against, which is why these routes left the site-key tree.
+    minimumRole: 'ADMIN',
+    group: 'settings',
+  },
+  {
+    id: 'api-credentials',
+    label: 'API access',
+    path: '/settings/api-credentials',
+    // ADMIN, matching the server's route group: issuing a key is "let this
+    // company's data leave it", the same decision as rotating a site key, and
+    // the server mounts both on the same ADMIN group. OWNER qualifies through
+    // the hierarchy; MANAGER and below never see the entry and get 403 from
+    // the API if they type the URL.
+    minimumRole: 'ADMIN',
+    group: 'settings',
   },
 ]
 
 export function platformNav(role: string): NavItem[] {
   return PLATFORM_NAV.filter((item) => roleAtLeast(role, item.minimumRole))
+}
+
+/**
+ * The platform entries this role may see, under their three headings.
+ *
+ * A HEADING WITH NOTHING UNDER IT IS DROPPED rather than rendered empty, and
+ * order within a group is the order of PLATFORM_NAV, so nothing reshuffles by
+ * role -- a VIEWER's "Manage" is simply Schedules and Sites.
+ */
+export function groupedPlatformNav(role: string): NavGroup[] {
+  const visible = platformNav(role)
+  return NAV_GROUPS.map((group) => ({
+    ...group,
+    items: visible.filter((item) => item.group === group.id),
+  })).filter((group) => group.items.length > 0)
 }
 
 /**
@@ -142,9 +207,14 @@ export function moduleNav(session: Session): NavItem[] {
     )
 }
 
-export function navigationFor(session: Session): { platform: NavItem[]; modules: NavItem[] } {
+export function navigationFor(session: Session): {
+  platform: NavItem[]
+  groups: NavGroup[]
+  modules: NavItem[]
+} {
   return {
     platform: platformNav(session.role),
+    groups: groupedPlatformNav(session.role),
     modules: moduleNav(session),
   }
 }

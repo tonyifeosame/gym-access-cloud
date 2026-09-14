@@ -1,4 +1,4 @@
-import type { BadgeTone } from '../../components/Badge'
+import { terminalStatusLabel, type BadgeTone } from '../../components/Badge'
 import type { MeterSegment } from '../../components/Meter'
 import type { EventDecision, FleetSummary, Role, Site, Terminal } from '../../api/types'
 
@@ -72,18 +72,20 @@ export type Segment = MeterSegment
  * state that means somebody has to go and look. Two surfaces disagreeing about
  * which colour offline is would teach operators to ignore the one that matters.
  *
- * ZERO-VALUED STATES ARE KEPT, not filtered out. "Reporting an error: 0" is a
+ * ZERO-VALUED STATES ARE KEPT, not filtered out. "Reporting a fault: 0" is a
  * fact worth reading, and a legend whose rows appear and disappear as the fleet
  * changes is one an operator cannot learn the shape of.
  */
 export function fleetSegments(fleet: FleetSummary): Segment[] {
+  // The same words the status badge uses for the same states (Badge.tsx), so
+  // a legend row and the badge on the terminal it counts never disagree.
   return [
-    { id: 'online', label: 'Online', value: fleet.online, tone: 'positive' },
-    { id: 'offline', label: 'Offline', value: fleet.offline, tone: 'warning' },
-    { id: 'error', label: 'Reporting an error', value: fleet.error, tone: 'danger' },
-    { id: 'updating', label: 'Updating', value: fleet.updating, tone: 'info' },
-    { id: 'provisioning', label: 'Provisioning', value: fleet.provisioning, tone: 'info' },
-    { id: 'disabled', label: 'Disabled', value: fleet.disabled, tone: 'neutral' },
+    { id: 'online', label: terminalStatusLabel('ONLINE'), value: fleet.online, tone: 'positive' },
+    { id: 'offline', label: terminalStatusLabel('OFFLINE'), value: fleet.offline, tone: 'warning' },
+    { id: 'error', label: `Reporting a ${terminalStatusLabel('ERROR').toLowerCase()}`, value: fleet.error, tone: 'danger' },
+    { id: 'updating', label: terminalStatusLabel('UPDATING'), value: fleet.updating, tone: 'info' },
+    { id: 'provisioning', label: terminalStatusLabel('PROVISIONING'), value: fleet.provisioning, tone: 'info' },
+    { id: 'disabled', label: terminalStatusLabel('DISABLED'), value: fleet.disabled, tone: 'neutral' },
   ]
 }
 
@@ -285,6 +287,16 @@ export interface AttentionItem {
   tone: 'danger' | 'warning' | 'info'
   title: string
   detail: string
+  /**
+   * The rest of the explanation, behind "Learn more".
+   *
+   * ONE SENTENCE BY DEFAULT. The first-terminal item used to carry four --
+   * naming a firmware version, two ways of adding a unit and what an older one
+   * needs instead -- and every word of it was true and useful to the one
+   * customer in ten holding an old unit. The other nine read a paragraph to
+   * find "type the code". The paragraph is kept, one press away.
+   */
+  more?: string
   href?: string
   action?: string
   /**
@@ -438,8 +450,10 @@ export function collectAttention({
     items.push({
       id: 'terminals-outdated',
       tone: 'info',
-      title: `${fleet.firmware_outdated} terminal${fleet.firmware_outdated === 1 ? '' : 's'} behind on firmware`,
-      detail: 'Running older software than the version you have made current.',
+      // "Software", not "firmware": the customer did not flash it and does not
+      // need the word. The state is the same server flag it always was.
+      title: `${fleet.firmware_outdated} terminal${fleet.firmware_outdated === 1 ? '' : 's'} with a software update waiting`,
+      detail: 'Running older software than the version you have made current. It updates itself at its next check-in.',
       href: '/terminals',
       action: 'View terminals',
     })
@@ -466,12 +480,14 @@ export function collectAttention({
       id: 'no-terminals',
       tone: 'info',
       title: 'Add your first terminal',
-      // The version is named for the same reason it is named on the terminals
-      // page: this instruction is true of firmware 1.2.0 and newer and false of
-      // everything shipped before it, and a new customer following it on an
-      // older unit waits for a code that never appears.
-      detail:
-        'Power a terminal on and connect it to Wi-Fi from your phone. On firmware 1.2.0 or newer it shows a code on its screen — add it with that code, no serial number and no cable. An older terminal needs a claim code from its site.',
+      detail: 'Switch it on, connect it to Wi-Fi from your phone, then type the code from its screen here.',
+      // The version is still named, behind "Learn more", for the same reason
+      // it is named on the terminals page: the one-line instruction is true of
+      // firmware 1.2.0 and newer and false of everything shipped before it,
+      // and a new customer following it on an older unit would wait for a
+      // code that never appears.
+      more:
+        'A terminal on firmware 1.2.0 or newer shows a code on its screen a few seconds after it joins Wi-Fi — add it with that code, no serial number and no cable. An older terminal needs a claim code instead, issued from its site’s page.',
       href: '/terminals',
       action: 'Add a terminal',
       requiresRole: 'ADMIN',
@@ -483,9 +499,13 @@ export function collectAttention({
     items.push({
       id: 'no-features',
       tone: 'info',
-      title: 'No features turned on',
+      title: 'Choose what you use AccessLink for',
+      // NOT "turn on Access Control to let terminals open doors": a
+      // multi-purpose terminal admits people by your rules with no feature on
+      // at all (see TerminalDetailPage), so the honest sentence is that this
+      // is optional, and what it decides.
       detail:
-        'The platform works without any, and every company starts here. Turning one on decides what your terminals may be assigned to.',
+        'Optional — your terminals work without one. Turning a feature on decides what a terminal can be assigned to.',
       href: '/settings/applications',
       action: 'View features',
       requiresRole: 'ADMIN',

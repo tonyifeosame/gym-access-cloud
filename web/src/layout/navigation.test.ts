@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { describeApplication } from '../applications/registry'
 import { makeSession } from '../test/fixtures'
-import { moduleNav, platformNav } from './navigation'
+import { groupedPlatformNav, moduleNav, platformNav } from './navigation'
 
 /**
  * Navigation is the place the "general-purpose platform" claim is either true or
@@ -117,5 +117,48 @@ describe('platform navigation', () => {
     expect(platformNav('MANAGER').map((item) => item.id)).not.toContain('api-credentials')
     expect(platformNav('ADMIN').map((item) => item.id)).toContain('api-credentials')
     expect(platformNav('OWNER').map((item) => item.id)).toContain('api-credentials')
+  })
+})
+
+describe('grouped navigation', () => {
+  /*
+   * ELEVEN LINKS UNDER ONE HEADING was the finding: Firmware and API access
+   * sat one line below People with the same weight. The groups separate daily
+   * work from setup from the account. They add nothing and hide nothing --
+   * every entry platformNav returns for a role appears in exactly one group,
+   * and a group a role has nothing in is dropped rather than rendered empty.
+   */
+  it('puts every visible entry in exactly one group, in the same order', () => {
+    for (const role of ['VIEWER', 'MANAGER', 'ADMIN', 'OWNER']) {
+      const flat = platformNav(role).map((item) => item.id)
+      const grouped = groupedPlatformNav(role).flatMap((group) => group.items.map((item) => item.id))
+      expect(grouped, `${role} loses or gains an entry when grouped`).toEqual(flat)
+    }
+  })
+
+  it('separates the everyday screens from administration', () => {
+    const groups = Object.fromEntries(
+      groupedPlatformNav('OWNER').map((group) => [group.title, group.items.map((item) => item.id)]),
+    )
+    expect(groups).toEqual({
+      Everyday: ['dashboard', 'people', 'terminals', 'events'],
+      Manage: ['schedules', 'sites', 'operators', 'activity'],
+      Settings: ['settings', 'applications', 'firmware', 'api-credentials'],
+    })
+  })
+
+  it('renders no heading a role has nothing under', () => {
+    // A VIEWER still has Schedules and Sites to manage; the point is that no
+    // group is ever an empty heading, whatever the role.
+    for (const role of ['VIEWER', 'MANAGER', 'ADMIN', 'OWNER']) {
+      for (const group of groupedPlatformNav(role)) {
+        expect(group.items.length, `${role}: "${group.title}" is empty`).toBeGreaterThan(0)
+      }
+    }
+    expect(groupedPlatformNav('VIEWER').map((group) => group.title)).toEqual([
+      'Everyday',
+      'Manage',
+      'Settings',
+    ])
   })
 })

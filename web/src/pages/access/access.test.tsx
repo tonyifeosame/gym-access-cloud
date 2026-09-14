@@ -183,8 +183,8 @@ describe('a person with no rules', () => {
     render('/people/P-0001')
 
     return screen.findByText('This person cannot get in anywhere').then(() => {
-      expect(screen.getByText(/having no rules means reaching/i)).toBeInTheDocument()
-      expect(screen.getByText(/not an unconfigured state that defaults to open/i)).toBeInTheDocument()
+      // The same claim in one sentence: there is no default that lets anyone in.
+      expect(screen.getByText(/there is no default/i)).toBeInTheDocument()
     })
   })
 })
@@ -219,8 +219,9 @@ describe('a person’s access rules', () => {
     // The heading renders immediately; the rules arrive with their own fetch.
     expect(await screen.findByText('Lagos Depot')).toBeInTheDocument()
     expect(screen.getByText('Loading Bay')).toBeInTheDocument()
-    // A deny is marked as one, in words as well as by its edge.
-    expect(screen.getByText('Deny')).toBeInTheDocument()
+    // A deny is marked as one, in words as well as by its edge -- "Keep out",
+    // which is what the rule does to the person, rather than the engine's word.
+    expect(screen.getByText('Keep out', { selector: '.badge' })).toBeInTheDocument()
     // And the expired company-wide rule is marked rather than reading as active.
     expect(screen.getByText('Expired')).toBeInTheDocument()
   })
@@ -229,7 +230,7 @@ describe('a person’s access rules', () => {
     signIn('MANAGER', { permissions: [makePermission({ person_id: 'P-0001' })] })
     render('/people/P-0001')
 
-    expect(await screen.findByText(/applies at any time of day/i)).toBeInTheDocument()
+    expect(await screen.findByText(/any time of day/i)).toBeInTheDocument()
   })
 
   it('grants access and shows the new rule', async () => {
@@ -268,12 +269,43 @@ describe('a person’s access rules', () => {
     await screen.findByText('This person cannot get in anywhere')
     await user.click(screen.getByRole('button', { name: 'Grant access' }))
 
-    const select = within(screen.getByRole('dialog')).getByLabelText(/Only for one feature/)
+    // Behind "More options" now; jsdom does not hide a closed <details>, so
+    // the field is reachable here as it is for anybody who opens it.
+    const select = within(screen.getByRole('dialog')).getByLabelText(/Limit to a feature/)
     const option = within(select).getByRole('option', { name: 'Access Control' })
     expect(option).toHaveValue('ACCESS_CONTROL')
 
     // The code itself must not be readable anywhere in the dialog.
     expect(screen.getByRole('dialog').textContent ?? '').not.toContain('ACCESS_CONTROL')
+  })
+
+  it('asks the everyday questions first and folds the rest behind "More options"', async () => {
+    /*
+      "Let this person in at the front gate" is what most rules are, and it
+      needs a place, a direction and maybe a schedule. The feature limit and the
+      date range are still here with the same fields and the same values sent
+      -- inside a disclosure that is closed by default. jsdom does not hide a
+      closed <details>, so this asserts containment and the open flag; that it
+      is drawn folded is the browser pass's job.
+    */
+    const user = userEvent.setup()
+    signIn()
+    render('/people/P-0001')
+
+    await screen.findByText('This person cannot get in anywhere')
+    await user.click(screen.getByRole('button', { name: 'Grant access' }))
+    const dialog = screen.getByRole('dialog')
+
+    for (const label of [/^Where/, /^Let in or keep out/, /^When/]) {
+      expect(within(dialog).getByLabelText(label).closest('details')).toBeNull()
+    }
+
+    const more = within(dialog).getByText('More options').closest('details')
+    expect(more).not.toBeNull()
+    expect(more?.open).toBe(false)
+    for (const label of [/Limit to a feature/, /^First day/, /^Last day/]) {
+      expect(more?.contains(within(dialog).getByLabelText(label))).toBe(true)
+    }
   })
 
   it('WARNS THAT A COMPANY-WIDE RULE COVERS TERMINALS THAT DO NOT EXIST YET', async () => {
@@ -297,9 +329,9 @@ describe('a person’s access rules', () => {
 
     await screen.findByText('This person cannot get in anywhere')
     await user.click(screen.getByRole('button', { name: 'Grant access' }))
-    await user.selectOptions(screen.getByLabelText(/^Effect/), 'DENY')
+    await user.selectOptions(screen.getByLabelText(/^Let in or keep out/), 'DENY')
 
-    expect(screen.getByText(/beats EVERY allow at every scope/i)).toBeInTheDocument()
+    expect(screen.getByText(/Keep out always wins, even if another rule lets them in/i)).toBeInTheDocument()
   })
 
   it('does not send a site when the scope is the whole company', async () => {
@@ -509,7 +541,7 @@ describe('“would this person get in”', () => {
     signIn()
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
 
     const dialog = screen.getByRole('dialog')
@@ -531,7 +563,7 @@ describe('“would this person get in”', () => {
     })
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
     await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
@@ -557,7 +589,7 @@ describe('“would this person get in”', () => {
     })
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
     await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
@@ -571,7 +603,7 @@ describe('“would this person get in”', () => {
     signIn()
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
 
     expect(screen.getByText('Nothing was recorded')).toBeInTheDocument()
@@ -585,7 +617,7 @@ describe('“would this person get in”', () => {
     signIn()
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
     await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))
@@ -600,7 +632,7 @@ describe('“would this person get in”', () => {
     signIn()
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
     await user.type(screen.getByLabelText(/ID number/), 'NOT-A-PERSON')
     await user.click(screen.getByRole('button', { name: 'Check' }))
@@ -615,7 +647,7 @@ describe('“would this person get in”', () => {
     signIn()
     render('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: 'Check access' }))
     await user.type(screen.getByLabelText(/ID number/), 'P-0001')
     await user.click(screen.getByRole('button', { name: 'Check' }))

@@ -274,6 +274,22 @@ const has = (text, pattern) => new RegExp(pattern, 'i').test(text)
 // The scenarios
 // ---------------------------------------------------------------------------
 
+/**
+ * Opens "More actions" on a terminal page.
+ *
+ * THE DESTRUCTIVE CONTROLS SIT BEHIND A CLOSED DISCLOSURE NOW. Revoke, Retire,
+ * Release, Move and Resync are folded under "More actions" so the first screen
+ * answers "is it working" without them -- and a closed <details> gives its
+ * contents no box, so a sweep that wants to hover or press one has to open it
+ * first, exactly as an operator does. Nothing about the buttons changed.
+ */
+async function openMoreActions(page) {
+  const summary = page.locator('summary.disclosure__summary', { hasText: /^More actions/ })
+  if ((await summary.count()) === 0) return
+  const open = await summary.first().evaluate((node) => node.parentElement?.open ?? false)
+  if (!open) await summary.first().click()
+}
+
 async function scenarios(page, viewport, site, releases) {
   const go = (path) => page.goto(`${site.url}${path}`, { waitUntil: 'networkidle' })
   const label = (name) => `${viewport.name}/${name}`
@@ -289,6 +305,7 @@ async function scenarios(page, viewport, site, releases) {
   releases.reset()
   await go('/terminals/AT-0101')
   await page.waitForSelector('.lifecycle')
+  await openMoreActions(page)
   await page.locator('.lifecycle button', { hasText: /^Release$/ }).click()
   await shotDialog(page, viewport, '01-order-dialog-capable')
   let text = await dialogText(page)
@@ -324,7 +341,8 @@ async function scenarios(page, viewport, site, releases) {
   releases.reset()
   await go('/terminals/AT-0102')
   await page.waitForSelector('.lifecycle')
-  const panel = await page.locator('.lifecycle__option', { hasText: 'Release for transfer' }).innerText()
+  await openMoreActions(page)
+  const panel = await page.locator('.lifecycle__option', { hasText: 'Hand over to another account' }).innerText()
   check(has(panel, 'firmware update first'), `${label('04')}: the lifecycle panel does not send old firmware to an update`)
   await page.locator('.lifecycle button', { hasText: /^Release$/ }).click()
   await shotDialog(page, viewport, '04-order-dialog-old-firmware')
@@ -351,6 +369,7 @@ async function scenarios(page, viewport, site, releases) {
   releases.reset()
   await go('/terminals/AT-0103')
   await page.waitForSelector('.lifecycle')
+  await openMoreActions(page)
   await page.locator('.lifecycle button', { hasText: /^Release$/ }).click()
   await shotDialog(page, viewport, '07-order-dialog-offline')
   text = await dialogText(page)
@@ -367,6 +386,7 @@ async function scenarios(page, viewport, site, releases) {
   releases.reset()
   await go('/terminals/AT-0104')
   await page.waitForSelector('.lifecycle')
+  await openMoreActions(page)
   await page.locator('.lifecycle button', { hasText: /^Release$/ }).click()
   await shotDialog(page, viewport, '09-order-dialog-no-credential')
   text = await dialogText(page)
@@ -383,6 +403,7 @@ async function scenarios(page, viewport, site, releases) {
 
   await go('/terminals/AT-0105')
   await page.waitForSelector('.lifecycle')
+  await openMoreActions(page)
   await page.locator('.lifecycle button', { hasText: /^Release$/ }).click()
   await shotDialog(page, viewport, '11-order-dialog-no-remote-path')
   text = await dialogText(page)
@@ -394,6 +415,7 @@ async function scenarios(page, viewport, site, releases) {
   releases.reset()
   await go('/terminals/AT-0101')
   await page.waitForSelector('.lifecycle')
+  await openMoreActions(page)
   await order('AT-0101', /^Release terminal$/)
   await page.locator('.notice button', { hasText: /cancel release/i }).click()
   await shotDialog(page, viewport, '12-cancel-dialog')
@@ -436,6 +458,7 @@ async function hoverPass(page, site, releases) {
     releases.reset()
     await page.goto(`${site.url}/terminals/AT-0101`, { waitUntil: 'networkidle' })
     await page.waitForSelector('.lifecycle')
+    await openMoreActions(page)
     for (const name of ['Revoke', 'Retire', 'Release']) {
       await measure(page.locator('.lifecycle button.button--danger', { hasText: new RegExp(`^${name}$`) }), `${name}`)
     }

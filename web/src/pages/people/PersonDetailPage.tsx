@@ -175,11 +175,20 @@ export function PersonDetailPage() {
       */}
       <PersonAccessPanel externalId={person.external_id} />
 
-      {/* --- credential ----------------------------------------------------- */}
+      {/*
+        --- credential --------------------------------------------------------
+
+        HEADED "FINGERPRINT", which is what the customer has and what the
+        buttons beside it say. The boundary the file comment describes is
+        untouched: the API still reports one boolean and this screen still
+        names no template, locator, sensor or vendor. "Biometric credential"
+        was the platform's category word for that boolean, and the person
+        reading this page enrols fingers.
+      */}
       <section className="panel" aria-labelledby="person-credential-heading">
         <div className="panel__header">
           <h2 className="panel__title" id="person-credential-heading">
-            Biometric credential
+            Fingerprint
           </h2>
           {mayManage ? (
             <button type="button" className="button" onClick={() => setEnrolling(true)}>
@@ -190,7 +199,7 @@ export function PersonDetailPage() {
 
         <dl className="detail-list">
           <div className="detail-list__row">
-            <dt>Credential status</dt>
+            <dt>Status</dt>
             <dd>
               {/*
                 The entire biometric surface: a boolean. Whatever the hardware
@@ -276,10 +285,9 @@ export function PersonDetailPage() {
           a customer, and it is the reason this page can only show a yes or no.
         */}
         <InfoNote title="Enrolment happens at a terminal">
-          The person has to be standing at the terminal you choose — that is where
-          their fingerprint is captured and where it stays. AccessLink holds no copy
-          of the biometric data, so a fingerprint enrolled at one terminal works at
-          that terminal.
+          The person must be at the terminal you choose. Their fingerprint is stored
+          on that terminal only — AccessLink never keeps a copy — so it works at that
+          terminal.
         </InfoNote>
       </section>
 

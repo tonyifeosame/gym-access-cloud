@@ -315,10 +315,12 @@ describe('console navigation', () => {
       'sites',
       'operators',
       'activity',
+      // The Settings group: the account first, then what an administrator
+      // configures once. Same entries as before, grouped -- see navigation.ts.
+      'settings',
+      'applications',
       'firmware',
       'api-credentials',
-      'applications',
-      'settings',
     ])
   })
 
