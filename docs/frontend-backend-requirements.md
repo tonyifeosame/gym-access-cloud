@@ -326,7 +326,7 @@ relationships between capabilities" — which is better than an empty
 |---|---|---|---|---|
 | CO-01a | CON-03 | `GET /console/sites`, `GET /console/sites/{id}` | Add `api_key_prefix` to the projection. | Non-secret, already read by `database.SiteKeyPrefix`, and it is the only way an operator can tell WHICH key a site is on. Still absent from `ConsoleSite` despite the register marking the finding fixed — see the note at the top. The console types the field optional and populates it from create/rotate responses only, so this is a one-line backend change with nothing to alter here. |
 | CO-01b | GP-01 | `PUT /platform/companies/{id}` | Allow retention to be returned to **indefinite**. | The fields are `*int`, so absent means "leave alone" and there is no way to express null. The console's edit form says plainly that it cannot clear a retention period once set, which is an odd thing to have to tell somebody. |
-| CO-01c | SEC-10 | `POST /auth/forgot-password` | Deliver the link. | The token reaches the operational log and nothing else, so a self-service reset completes only if somebody with log access finishes it by hand. The console says so on the confirmation screen rather than showing "check your inbox" for a message that is never coming. This is a deployment capability, not only code. |
+| CO-01c | SEC-10 | `POST /auth/forgot-password` | Deliver the link. **DONE.** | With `EMAIL_PROVIDER` set the link is emailed to the address that asked and leaves the log; without it the previous behaviour stands. `GET /auth/providers` reports which, and the console's confirmation says "check your email" only when it is true. The deployment half — a relay and `CONSOLE_URL` — is documented in the README. |
 
 ---
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 var DB *sql.DB
@@ -62,10 +62,14 @@ func Open(cfg Config) (*sql.DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("postgres", connStr)
+	// Through a connector rather than sql.Open("postgres", ...), so every
+	// connection the pool hands out counts what it sends -- see statements.go.
+	// Same driver, same connection string, same session settings.
+	connector, err := pq.NewConnector(connStr)
 	if err != nil {
 		return nil, fmt.Errorf("error opening database: %w", err)
 	}
+	db := sql.OpenDB(countingConnector{inner: connector})
 
 	db.SetMaxOpenConns(cfg.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.MaxIdleConns)

@@ -13,6 +13,7 @@ import (
 
 	"access-terminal-cloud-api/models"
 
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -271,6 +272,64 @@ func ListUsers(companyID int64) ([]models.User, error) {
 		users = append(users, *user)
 	}
 	return users, rows.Err()
+}
+
+// UsersPage is one page of a company's operators plus the size of the whole
+// list, the pair a client needs to render "showing 50 of 120" and to know
+// when to stop.
+type UsersPage struct {
+	Users []models.User
+	Total int
+}
+
+// ListUsersPage returns one page of a company's live operators, newest last --
+// the same order ListUsers has always used, so the first page of a paged read
+// is the head of the unpaged one.
+//
+// The total is read in the same statement as the page (a window function)
+// rather than by a second COUNT, so a page and its total cannot disagree
+// about a row created between the two.
+func ListUsersPage(companyID int64, limit, offset int) (*UsersPage, error) {
+	rows, err := DB.Query(`
+		SELECT `+userColumns+`, count(*) OVER () AS total
+		  FROM users
+		 WHERE company_id = $1 AND deleted_at IS NULL
+		 ORDER BY created_at, id
+		 LIMIT $2 OFFSET $3`, companyID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	page := &UsersPage{Users: []models.User{}}
+	for rows.Next() {
+		var (
+			u         models.User
+			lastLogin sql.NullTime
+		)
+		if err := rows.Scan(&u.ID, &u.PublicID, &u.CompanyID, &u.Email, &u.FullName,
+			&u.Role, &u.Active, &lastLogin, &u.CreatedAt, &u.UpdatedAt, &page.Total); err != nil {
+			return nil, err
+		}
+		if lastLogin.Valid {
+			u.LastLoginAt = &lastLogin.Time
+		}
+		page.Users = append(page.Users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// An offset past the end returns no rows and therefore no window total;
+	// the list is not empty, the page is. One cheap count says which.
+	if len(page.Users) == 0 && offset > 0 {
+		if err := DB.QueryRow(`
+			SELECT count(*) FROM users WHERE company_id = $1 AND deleted_at IS NULL`,
+			companyID).Scan(&page.Total); err != nil {
+			return nil, err
+		}
+	}
+	return page, nil
 }
 
 // AuthenticatePassword verifies a login.
@@ -600,6 +659,44 @@ func ListSiteGrants(userID int64) ([]models.SiteGrant, error) {
 			return nil, err
 		}
 		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
+// ListSiteGrantsForUsers reads the grants of many operators in one statement,
+// keyed by user id.
+//
+// THE BATCHED FORM OF ListSiteGrants, for the list that shows every operator
+// beside their sites. One query per row was the difference between two round
+// trips and thirty-one for a page of thirty, and the join is the same one.
+// Operators with no grants have no entry; a caller treats absence as "no
+// grants", exactly as ListSiteGrants returning nothing means.
+func ListSiteGrantsForUsers(userIDs []int64) (map[int64][]models.SiteGrant, error) {
+	grants := make(map[int64][]models.SiteGrant, len(userIDs))
+	if len(userIDs) == 0 {
+		return grants, nil
+	}
+
+	rows, err := DB.Query(`
+		SELECT g.user_id, s.id, s.public_id, s.site_name
+		  FROM user_site_grants g
+		  JOIN sites s ON s.id = g.site_id
+		 WHERE g.user_id = ANY($1) AND s.deleted_at IS NULL
+		 ORDER BY g.user_id, s.site_name`, pq.Array(userIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			userID int64
+			g      models.SiteGrant
+		)
+		if err := rows.Scan(&userID, &g.SiteID, &g.SitePublicID, &g.SiteName); err != nil {
+			return nil, err
+		}
+		grants[userID] = append(grants[userID], g)
 	}
 	return grants, rows.Err()
 }

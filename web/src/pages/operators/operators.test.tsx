@@ -168,6 +168,55 @@ describe('operator list', () => {
     expect(screen.getByText(/Operators administer AccessLink/)).toBeInTheDocument()
   })
 
+  it('PAGES ON THE SERVER, and can reach an operator past the first page', async () => {
+    // The API serves operators a page at a time (default 100). A console that
+    // rendered whatever came back as the whole list would silently hide
+    // everybody past the page on a company with more than that.
+    const user = userEvent.setup()
+    signIn()
+    const many = Array.from({ length: 120 }, (_, i) =>
+      makeOperatorAccount({
+        id: `operator-many-${i}`,
+        email: `many-${String(i).padStart(3, '0')}@example.com`,
+        full_name: `Operator ${i}`,
+      }),
+    )
+    seed({ operators: [...state.operators, ...many] })
+    renderOperators()
+
+    await screen.findByText('viewer@example.com')
+    const listRequests = () =>
+      state.requests.filter((r) => r.method === 'GET' && /\/console\/operators(\?|$)/.test(r.url))
+    expect(listRequests().at(-1)?.url).toContain('limit=100')
+
+    // The last few are on the second page and not on the first.
+    expect(screen.queryByText('many-119@example.com')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    expect(await screen.findByText('many-119@example.com')).toBeInTheDocument()
+    expect(listRequests().at(-1)?.url).toContain('offset=100')
+  })
+
+  it('RENDERS SENSIBLY AGAINST AN API THAT PREDATES PAGING', async () => {
+    // The console and the API deploy separately. For the window where a new
+    // console meets an old API, the list arrives as `{count, operators}` with
+    // no total, offset or limit -- and the page must show the range it has,
+    // not "NaN-4 of undefined".
+    signIn()
+    server.use(
+      http.get('*/api/v1/console/operators', () =>
+        Response.json({ count: state.operators.length, operators: state.operators }),
+      ),
+    )
+    renderOperators()
+
+    await screen.findByText('viewer@example.com')
+    const status = screen.getByText(/showing/i)
+    expect(status).toHaveTextContent(`Showing 1–${state.operators.length} of ${state.operators.length} operators`)
+    expect(status.textContent).not.toMatch(/NaN|undefined/)
+    // One page: no paging controls are offered for a list that is whole.
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+  })
+
   it('reports a failed load as an error rather than an empty console', async () => {
     signIn()
     failNext('operators-list', 500)

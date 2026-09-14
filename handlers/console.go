@@ -878,27 +878,62 @@ func ConsoleDeletePerson(c *gin.Context) {
 // Operators
 // ---------------------------------------------------------------------------
 
-// ConsoleListOperators handles GET /console/operators
+// Operator paging bounds. The default is generous because a company rarely
+// has more operators than fit on one page, and a client that never passes
+// `limit` should keep seeing everybody it saw before paging existed; the
+// ceiling is what stops one call serialising an unbounded list.
+const (
+	defaultOperatorLimit = 100
+	maxOperatorLimit     = 500
+)
+
+// ConsoleListOperators handles GET /console/operators?limit=&offset=
+//
+// TWO STATEMENTS, WHATEVER THE PAGE SIZE. This read one operator page and then
+// asked for each operator's site grants one query at a time -- thirty-one
+// round trips for a page of thirty, and the list is rendered on every visit
+// to the Operators screen. The grants are now read in one query for the
+// whole page (ListSiteGrantsForUsers), and query_count_test.go holds the
+// count flat.
+//
+// The envelope is the same one people and terminals use: `count` and
+// `operators` keep their meaning for a client that predates paging, and
+// `total`, `limit`, `offset` and `has_more` are additive.
 func ConsoleListOperators(c *gin.Context) {
-	users, err := database.ListUsers(c.GetInt64("company_id"))
+	limit := boundedQueryInt(c, "limit", defaultOperatorLimit, 1, maxOperatorLimit)
+	offset := boundedQueryInt(c, "offset", 0, 0, 0)
+
+	page, err := database.ListUsersPage(c.GetInt64("company_id"), limit, offset)
 	if err != nil {
 		logError(c, "console list operators", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operators"})
 		return
 	}
 
-	operators := make([]models.ConsoleOperator, 0, len(users))
-	for _, user := range users {
-		grants, err := database.ListSiteGrants(user.ID)
-		if err != nil {
-			logError(c, "console list operator grants", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operators"})
-			return
-		}
-		operators = append(operators, consoleOperator(user, grants))
+	ids := make([]int64, 0, len(page.Users))
+	for _, user := range page.Users {
+		ids = append(ids, user.ID)
+	}
+	grants, err := database.ListSiteGrantsForUsers(ids)
+	if err != nil {
+		logError(c, "console list operator grants", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve operators"})
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"count": len(operators), "operators": operators})
+	operators := make([]models.ConsoleOperator, 0, len(page.Users))
+	for _, user := range page.Users {
+		operators = append(operators, consoleOperator(user, grants[user.ID]))
+	}
+
+	c.JSON(http.StatusOK, models.ConsoleOperatorsPage{
+		Count:     len(operators),
+		Total:     page.Total,
+		Limit:     limit,
+		Offset:    offset,
+		HasMore:   offset+len(operators) < page.Total,
+		Operators: operators,
+	})
 }
 
 // ConsoleGetOperator handles GET /console/operators/:operator_id

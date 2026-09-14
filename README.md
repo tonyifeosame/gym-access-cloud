@@ -401,6 +401,15 @@ when — worth checking in CI, since a passing `go test` prints nothing.
 | `TRUSTED_PROXIES` | `127.0.0.1,::1` | Whose `X-Forwarded-For` to believe, as IPs/CIDRs. `none` ignores the header entirely. A malformed value is fatal at startup rather than a silent fall back to trusting everything |
 | `CORS_ALLOWED_ORIGINS` | unset | Comma-separated origin allowlist. Unset means any origin, never with credentials |
 | `METRICS_TOKEN` | unset | Requires a bearer token on `/metrics`. Unset leaves it open |
+| `CONSOLE_URL` | unset | The console's origin, e.g. `https://app.accesslink.store` (in development, `http://localhost:5173`). Where the Google callback sends the browser and the base for links in email. **Required** whenever Google sign-in or email delivery is configured; unset means same-origin, which only the development proxy makes true |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URL` | unset | Sign in with Google. All three or none — a partial set is fatal at startup. `GOOGLE_REDIRECT_URL` is this API's callback, `https://<api-host>/api/v1/auth/google/callback`, registered verbatim as an authorised redirect URI on the OAuth client in Google Cloud Console (APIs & Services → Credentials → OAuth 2.0 Client ID, type *Web application*). Plain `http` is accepted only on localhost |
+| `GOOGLE_ISSUER_URL` | `https://accounts.google.com` | The OpenID issuer. For tests; never set in a deployment |
+| `EMAIL_PROVIDER` | unset | `smtp` or `log`. Unset means no outbound mail: a forgotten-password request writes the reset link to the log for an administrator to act on, exactly as before. `log` writes the whole message to the log (development only — it puts the link in the log) |
+| `EMAIL_FROM` | — | Sender address, optionally with a name: `AccessLink <no-reply@example.com>`. Required with `EMAIL_PROVIDER` |
+| `SMTP_HOST` / `SMTP_PORT` | — / `587` (`465` with `SMTP_TLS=tls`) | The relay, for `EMAIL_PROVIDER=smtp` |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | unset | PLAIN authentication; set both or neither |
+| `SMTP_TLS` | `starttls` | `starttls` (upgrade on 587), `tls` (implicit, 465) or `none` — the last only for a loopback relay, refused for any other host |
+| `RESET_TOKEN_TTL_SECONDS` | `3600` | How long an emailed reset link works. Single use regardless |
 | `SYNC_COMPACTION_THRESHOLD` | `500` | Backlog at which a device's queue is replaced by a snapshot |
 | `MAINTENANCE_ENABLED` | `true` | Background sweeps |
 | `DEVICE_OFFLINE_AFTER_SECONDS` | `300` | Silence before a device is marked `OFFLINE`. Must exceed the terminals' poll interval comfortably or a healthy fleet flaps |

@@ -6,6 +6,7 @@ import { isSelf } from '../../auth/permissions'
 import { roleLabel } from '../../auth/roles'
 import { ActiveBadge, Badge } from '../../components/Badge'
 import { DataTable, type Column } from '../../components/DataTable'
+import { Pagination } from '../../components/Pagination'
 import { PageHeader } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useOperators } from '../../data/console'
@@ -25,10 +26,18 @@ import { OperatorFormDialog } from './OperatorFormDialog'
  * account that simply holds no restrictions — so the column distinguishes them
  * rather than showing the same words for both.
  */
+/**
+ * Matches the API's own default. Paged like People, and for the same reason:
+ * the list is served a page at a time, so the page has to be able to ask for
+ * the next one rather than assume it was given everybody.
+ */
+const PAGE_SIZE = 100
+
 export function OperatorsListPage() {
   const navigate = useNavigate()
   const { session } = useSession()
-  const query = useOperators()
+  const [offset, setOffset] = useState(0)
+  const query = useOperators({ limit: PAGE_SIZE, offset })
   const [adding, setAdding] = useState(false)
 
   const columns: Column<OperatorAccount>[] = [
@@ -144,6 +153,26 @@ export function OperatorsListPage() {
         emptyTitle="No operators"
         emptyDescription="Nobody can sign in to this console yet."
       />
+
+      {/*
+        THE PAGE FIELDS MAY BE ABSENT. An API that predates paging answers with
+        `count` and `operators` only, and the console can meet one for as long
+        as the two are deployed separately. Absent means "this is everybody":
+        the total is the count, the offset is zero and the limit is the page
+        size we asked for -- which renders as one page, and never as NaN.
+      */}
+      {query.data ? (
+        <Pagination
+          count={query.data.count}
+          total={query.data.total ?? query.data.count}
+          offset={query.data.offset ?? 0}
+          limit={query.data.limit ?? PAGE_SIZE}
+          hasMore={query.data.has_more ?? false}
+          onOffsetChange={setOffset}
+          noun="operators"
+          busy={query.isFetching}
+        />
+      ) : null}
 
       <p className="field__hint">
         Operators administer AccessLink. The people your terminals recognise are

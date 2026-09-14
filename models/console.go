@@ -185,6 +185,18 @@ type ConsolePeoplePage struct {
 	People  []ConsolePerson `json:"people"`
 }
 
+// ConsoleOperatorsPage is a page of operators, in the same envelope as
+// ConsolePeoplePage: `count` and `operators` mean what they meant before the
+// list was paged, and the rest is additive.
+type ConsoleOperatorsPage struct {
+	Count     int               `json:"count"`
+	Total     int               `json:"total"`
+	Limit     int               `json:"limit"`
+	Offset    int               `json:"offset"`
+	HasMore   bool              `json:"has_more"`
+	Operators []ConsoleOperator `json:"operators"`
+}
+
 // ConsoleOperator is an operator account as the console lists it.
 type ConsoleOperator struct {
 	ID          string      `json:"id"`

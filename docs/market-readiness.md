@@ -565,7 +565,7 @@ a strict CSP on both, and per-environment `VITE_API_BASE_URL`.
 | SEC-07 | No operator action audit log | Never built; sessions are logged, mutations are not | Append-only `audit_events`, written in the mutation's transaction | FIXED |
 | SEC-08 | Access logs unreachable from an operator session | The only log route predates the console | Grant-scoped `GET /console/events` over the typed event model | FIXED |
 | SEC-09 | Rate limiting in-process and credential-only | Written for a single-instance deployment | Shared store; extend to enumeration endpoints | OPEN |
-| SEC-10 | No operator password reset | Requires transactional email the platform lacks | Single-use short-lived reset tokens | FIXED |
+| SEC-10 | No operator password reset | Requires transactional email the platform lacks | Single-use short-lived reset tokens; emailed when `EMAIL_PROVIDER` is configured (`email/`, `handlers/password_reset_email.go`) | FIXED |
 | PPL-01 | No operator API for biometric enrolment | Enrolment endpoints are device/site-key authenticated | Console enrolment lifecycle over the credentials entity | PARTIAL |
 | PPL-02 | No invitation flow, no forced first change | `password_changed_at` exists and is unread | Single-use invitations, `must_change_password` policy | FIXED |
 | GP-02 | `person_type` is a fixed four-value taxonomy | Legacy of the single-purpose product | De-taxonomise; per-company vocabulary | PARTIAL |

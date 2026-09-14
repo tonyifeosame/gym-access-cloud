@@ -294,6 +294,57 @@ summary:focus-visible,
   color: var(--danger);
 }
 
+/* ---------------------------------------------------------------------------
+ * Password fields
+ *
+ * The show/hide control sits INSIDE the input's box rather than beside it, so
+ * the field is exactly as wide as every other field in the form. The input
+ * keeps enough right padding that a long password never runs under the icon.
+ * ------------------------------------------------------------------------ */
+
+.password-control {
+  position: relative;
+  display: flex;
+}
+
+.password-control__input {
+  flex: 1 1 auto;
+  width: 100%;
+  padding-right: calc(var(--space-3) + 28px);
+}
+
+.password-control__toggle {
+  position: absolute;
+  top: 50%;
+  right: var(--space-1);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.password-control__toggle:hover {
+  color: var(--text);
+  background: var(--surface-sunken);
+}
+
+.password-control__toggle[aria-pressed='true'] {
+  color: var(--accent);
+}
+
+.password-control__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .field__input--mono {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);

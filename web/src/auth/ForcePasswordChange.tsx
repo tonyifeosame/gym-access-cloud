@@ -3,6 +3,7 @@ import { useState, type FormEvent } from 'react'
 import { ApiError } from '../api/client'
 import * as endpoints from '../api/endpoints'
 import { useSession } from '../session/useSession'
+import { PasswordInput } from '../components/PasswordInput'
 
 /** Mirrors models.MinPasswordLength. The server is the authority. */
 const MIN_PASSWORD_LENGTH = 12
@@ -117,9 +118,7 @@ export function ForcePasswordChange() {
 
         <label className="field">
           <span className="field__label">Current password</span>
-          <input
-            className="field__input"
-            type="password"
+          <PasswordInput
             name="current-password"
             autoComplete="current-password"
             required
@@ -131,10 +130,8 @@ export function ForcePasswordChange() {
         {/* The hint is a DESCRIPTION, not part of the name — see RedeemPage. */}
         <label className="field" htmlFor="force-new-password">
           <span className="field__label">New password</span>
-          <input
+          <PasswordInput
             id="force-new-password"
-            className="field__input"
-            type="password"
             name="new-password"
             autoComplete="new-password"
             required
@@ -149,9 +146,7 @@ export function ForcePasswordChange() {
 
         <label className="field">
           <span className="field__label">Confirm new password</span>
-          <input
-            className="field__input"
-            type="password"
+          <PasswordInput
             name="confirm-password"
             autoComplete="new-password"
             required

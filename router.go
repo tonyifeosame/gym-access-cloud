@@ -216,6 +216,26 @@ func NewRouter() *gin.Engine {
 		auth.POST("/forgot-password", credentialLimit, handlers.RequestPasswordReset)
 		auth.POST("/redeem", credentialLimit, handlers.RedeemCredential)
 
+		// Which ways in this deployment offers. Static, unauthenticated and
+		// unlimited: the console reads it once to decide which controls to
+		// draw, and nothing in it varies with who is asking.
+		auth.GET("/providers", handlers.AuthProviders)
+
+		// Sign in with Google, UNAUTHENTICATED BY NECESSITY like login.
+		//
+		// Two browser navigations, not XHRs: start sends the browser to
+		// Google with a state cookie set here, and callback receives it back,
+		// exchanges the code, and ends in the SAME session login ends in --
+		// database.CreateSession, the same cookie, resolved the same way. It
+		// is a way to prove who somebody is, not a second way to be signed in.
+		//
+		// ON THE SAME LIMITER as the credential routes. The callback spends a
+		// network round trip to Google and a store lookup per hit, which is
+		// exactly the kind of allowance an attacker alternating between
+		// endpoints must not get a second copy of.
+		auth.GET("/google/start", credentialLimit, handlers.GoogleStart)
+		auth.GET("/google/callback", credentialLimit, handlers.GoogleCallback)
+
 		session := auth.Group("")
 		session.Use(middleware.OperatorAuthMiddleware())
 		{

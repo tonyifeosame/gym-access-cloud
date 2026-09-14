@@ -28,9 +28,29 @@ import (
 // session -- see handlers/console_credentials.go. Sealed biometric material
 // reaches devices over the sync path and reaches nothing else, ever.
 
-// GetMembers handles GET /members
+// Opt-in paging for the site-key member routes.
+//
+// THE DEFAULT IS STILL EVERYTHING. These routes are documented as unpaginated
+// and terminals' tooling reads them as a complete roster; a default page size
+// would silently truncate what somebody depends on being whole. A caller that
+// passes `limit` gets that window (and `offset` from it) of the same ordering,
+// which is what lets a large tenant read the roster in bounded calls. The body
+// stays an array; a client pages until it gets fewer rows than it asked for.
+const maxMemberPageLimit = 1000
+
+func optionalMemberPage(c *gin.Context) *database.MemberPage {
+	if c.Query("limit") == "" {
+		return nil
+	}
+	return &database.MemberPage{
+		Limit:  boundedQueryInt(c, "limit", maxMemberPageLimit, 1, maxMemberPageLimit),
+		Offset: boundedQueryInt(c, "offset", 0, 0, 0),
+	}
+}
+
+// GetMembers handles GET /members?limit=&offset=
 func GetMembers(c *gin.Context) {
-	members, err := database.GetAllMembers(c.GetInt64("company_id"))
+	members, err := database.GetAllMembers(c.GetInt64("company_id"), optionalMemberPage(c))
 	if err != nil {
 		logError(c, "list members", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve members"})
@@ -143,7 +163,7 @@ func DeleteMember(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Member deleted successfully"})
 }
 
-// GetMemberChanges handles GET /members/changes
+// GetMemberChanges handles GET /members/changes?since=&limit=&offset=
 func GetMemberChanges(c *gin.Context) {
 	since := c.Query("since")
 	if since == "" {
@@ -151,7 +171,7 @@ func GetMemberChanges(c *gin.Context) {
 		return
 	}
 
-	members, err := database.GetMembersChangedSince(c.GetInt64("company_id"), since)
+	members, err := database.GetMembersChangedSince(c.GetInt64("company_id"), since, optionalMemberPage(c))
 	if err != nil {
 		logError(c, "list member changes", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve member changes"})

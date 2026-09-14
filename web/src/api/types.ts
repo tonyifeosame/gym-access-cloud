@@ -1208,9 +1208,30 @@ export interface OperatorAccount {
   created_at: string
 }
 
+/**
+ * One page of operators, in the same envelope as PeoplePage. `count` and
+ * `operators` mean what they meant before the list was paged; the rest is
+ * additive, and a client that never sends `limit` gets the API's default page
+ * (100), which is more operators than almost any company has.
+ */
 export interface OperatorsResponse {
   count: number
   operators: OperatorAccount[]
+  /**
+   * OPTIONAL, because an API that predates paging sends only `count` and
+   * `operators`. The console is deployed separately from the API, so for the
+   * window where a new console meets an old API these are absent, and the
+   * page has to render sensibly from `count` alone rather than show NaN.
+   */
+  total?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
+}
+
+export interface OperatorsQuery {
+  limit?: number
+  offset?: number
 }
 
 export interface OperatorSitesResponse {
@@ -1328,6 +1349,29 @@ export interface RedeemRequest {
 export interface PasswordResetAcceptedResponse {
   status: string
   message: string
+}
+
+/**
+ * What ways in this deployment offers, from GET /auth/providers.
+ *
+ * Static and unauthenticated: it varies by deployment, never by who is asking,
+ * so the console reads it once and draws the login screen from it. A console
+ * that showed a Google button on a deployment with no Google configured would
+ * send the operator to a 403; one that said "check your inbox" where no email
+ * is sent would have them wait for a message that is never coming.
+ */
+export interface AuthProviders {
+  password: { enabled: boolean }
+  google: {
+    enabled: boolean
+    /** The API path a browser navigates to; a path, not a URL. */
+    start_path: string
+  }
+  signup: { enabled: boolean }
+  password_reset: {
+    /** True when a forgotten-password request produces an email. */
+    email_delivery: boolean
+  }
 }
 
 // ---------------------------------------------------------------------------

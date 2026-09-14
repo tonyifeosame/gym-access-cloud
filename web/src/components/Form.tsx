@@ -1,5 +1,7 @@
 import { useId, type ReactNode } from 'react'
 
+import { PasswordInput } from './PasswordInput'
+
 /**
  * Form controls.
  *
@@ -128,6 +130,22 @@ export function TextField({
             placeholder={placeholder}
             disabled={disabled}
             spellCheck={mono ? false : undefined}
+          />
+        ) : type === 'password' ? (
+          // Every password field gets the show/hide control, from one place.
+          // See PasswordInput for what the toggle is and is not.
+          <PasswordInput
+            id={id}
+            inputClassName={mono ? 'field__input--mono' : undefined}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onBlur={onBlur}
+            aria-describedby={describedBy}
+            aria-invalid={error ? true : undefined}
+            aria-required={required || undefined}
+            placeholder={placeholder}
+            autoComplete={autoComplete}
+            disabled={disabled}
           />
         ) : (
           <input

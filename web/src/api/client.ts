@@ -21,6 +21,19 @@ import { getCsrfToken, type CredentialScope } from './csrf'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '')
 
+/**
+ * The absolute (or, in development, same-origin) form of an API path.
+ *
+ * FOR BROWSER NAVIGATIONS, not for fetch — every XHR goes through `api` below.
+ * The one caller is the "Sign in with Google" link, which has to be a real
+ * navigation because the flow ends in a redirect from Google back to the API,
+ * and an anchor's href needs the API's origin spelled out in a split-origin
+ * deployment.
+ */
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`
+}
+
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'

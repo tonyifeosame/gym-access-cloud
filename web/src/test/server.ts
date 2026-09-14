@@ -4,6 +4,7 @@ import { setupServer } from 'msw/node'
 import type {
   APICredential,
   APICredentialUsage,
+  AuthProviders,
   Enrollment,
   AuditRecord,
   ConfiguredApplication,
@@ -111,6 +112,12 @@ interface ServerState {
    * exercise the "that link is not valid" path.
    */
   redeemable: Record<string, 'ok' | 'expired' | 'used'>
+  /**
+   * What GET /auth/providers reports. Defaults to the shape a deployment with
+   * nothing extra configured returns -- password only, no email delivery -- so
+   * every existing screen test sees the login screen it always saw.
+   */
+  providers: AuthProviders
   /** Forces the next matching request to fail, for error-path tests. */
   failNext: Record<string, number>
   requests: { method: string; url: string; headers: Headers }[]
@@ -151,6 +158,12 @@ function initialState(): ServerState {
     companies: [],
     administratorCount: {},
     redeemable: {},
+    providers: {
+      password: { enabled: true },
+      google: { enabled: false, start_path: '/api/v1/auth/google/start' },
+      signup: { enabled: true },
+      password_reset: { email_delivery: false },
+    },
     failNext: {},
     requests: [],
   }
@@ -409,6 +422,17 @@ export const handlers = [
     record(request)
     if (!state.session) return unauthorized()
     return json(state.session)
+  }),
+
+  /**
+   * Which ways in the deployment offers. Static and unauthenticated, as on
+   * the server: nothing about it depends on a session or on the caller.
+   */
+  http.get('*/api/v1/auth/providers', ({ request }) => {
+    record(request)
+    const failure = takeFailure('providers')
+    if (failure) return json({ error: 'unavailable' }, failure)
+    return json(state.providers)
   }),
 
   http.post('*/api/v1/auth/login', async ({ request }) => {
@@ -2042,7 +2066,21 @@ export const handlers = [
     const failure = takeFailure('operators-list')
     if (failure) return json({ error: 'Failed to retrieve operators' }, failure)
 
-    return json({ count: state.operators.length, operators: state.operators })
+    // PAGED HERE, as the API pages it: a default of 100 and a ceiling of 500,
+    // in the same envelope people use. A console that assumed the list was
+    // whole would pass against a mock that returned it whole.
+    const url = new URL(request.url)
+    const limit = boundedParam(url.searchParams.get('limit'), 100, 1, 500)
+    const offset = boundedParam(url.searchParams.get('offset'), 0, 0, 0)
+    const page = state.operators.slice(offset, offset + limit)
+    return json({
+      count: page.length,
+      total: state.operators.length,
+      limit,
+      offset,
+      has_more: offset + page.length < state.operators.length,
+      operators: page,
+    })
   }),
 
   http.post('*/api/v1/console/operators', async ({ request }) => {

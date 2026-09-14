@@ -159,6 +159,14 @@ func Metrics(c *gin.Context) {
 	writeGauge(&b, "access_terminal_uptime_seconds",
 		"Seconds since process start.", nil, time.Since(startedAt).Seconds())
 
+	// Statements sent through the pool since process start (a counter, so a
+	// dashboard rates it). Statements per request rising while requests do
+	// not is the signature of a query-per-row regression, which is what
+	// database/statements.go exists to make visible.
+	writeCounter(&b, "access_terminal_db_statements_total",
+		"SQL statements sent to PostgreSQL since process start.",
+		float64(database.StatementCount()))
+
 	// The conventional build_info shape: a constant 1 carrying the identity in
 	// labels, so a dashboard can group by version and a deploy shows up as the
 	// series changing rather than as a gap.
@@ -258,6 +266,12 @@ func metricsTokenValid(c *gin.Context, expected string) bool {
 
 func writeGauge(b *strings.Builder, name, help string, _ map[string]string, value float64) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s gauge\n%s %g\n", name, help, name, name, value)
+}
+
+// writeCounter is writeGauge for a value that only goes up. The type matters
+// to a scraper: rate() is defined over counters and meaningless over gauges.
+func writeCounter(b *strings.Builder, name, help string, value float64) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n%s %g\n", name, help, name, name, value)
 }
 
 // sortedKeys keeps series order stable between scrapes
