@@ -1100,6 +1100,22 @@ func AdoptAnnouncement(companyID, actorID int64, actorEmail, pairingCode string)
 // filtered out: an operator who walked away mid-setup is owed the explanation,
 // and a row that silently vanishes reads as the platform having lost it.
 func ListAnnouncements(companyID int64) ([]Announcement, error) {
+	// THE OWNERSHIP IS JOINED IN, NOT LOOKED UP PER ROW. This used to read the
+	// list and then run lookupTerminalOwnership once per announcement -- one
+	// statement per row, on an endpoint the console polls every ten seconds.
+	// The join answers the same question from the same tables with the same
+	// conditions: a LIVE device row (deleted_at IS NULL) at a LIVE site. Both
+	// conditions sit in the ON clauses so that a device whose site has been
+	// retired reads as not found, exactly as the inner-join lookup did; `owned`
+	// is the site side of that, which is only non-null when both matched.
+	//
+	// The join cannot fan out: devices_serial_number_key is unique over live
+	// rows, so each announcement meets at most one device.
+	//
+	// STILL DELIBERATELY CROSS-TENANT on the device side, for the reason
+	// lookupTerminalOwnership gives: the question is "is this serial already
+	// somebody else's", and verdictFor turns a foreign owner into a refusal
+	// that names nothing. The announcement side stays scoped to the company.
 	rows, err := DB.Query(`
 		SELECT a.public_id, a.serial_number, a.state,
 		       COALESCE(a.firmware_version, ''), COALESCE(a.hardware_revision, ''),
@@ -1117,12 +1133,20 @@ func ListAnnouncements(companyID int64) ([]Announcement, error) {
 		           WHEN a.state = 'ADOPTED'
 		                AND a.expires_at <= CURRENT_TIMESTAMP THEN TRUE
 		           ELSE FALSE
-		       END AS timed_out
+		       END AS timed_out,
+		       ds.id IS NOT NULL AS owned,
+		       COALESCE(ds.company_id, 0), COALESCE(d.device_name, ''),
+		       COALESCE(ds.site_name, ''), COALESCE(d.status, ''),
+		       COALESCE(d.active, FALSE), COALESCE(d.release_state, '')
 		  FROM terminal_announcements a
 		  LEFT JOIN sites s ON s.id = a.site_id
+		  LEFT JOIN devices d ON d.serial_number = a.serial_number
+		                     AND d.deleted_at IS NULL
+		  LEFT JOIN sites ds ON ds.id = d.site_id
+		                    AND ds.deleted_at IS NULL
 		 WHERE a.company_id = $1
 		   AND a.state IN ('ADOPTED', 'APPROVED')
-		 ORDER BY a.created_at DESC
+		 ORDER BY a.created_at DESC, a.id DESC
 		 LIMIT 200`, companyID)
 	if err != nil {
 		return nil, err
@@ -1131,23 +1155,20 @@ func ListAnnouncements(companyID int64) ([]Announcement, error) {
 
 	out := []Announcement{}
 	for rows.Next() {
-		item, err := scanAnnouncement(rows)
+		var own terminalOwnership
+		item, err := scanAnnouncement(rows,
+			&own.found, &own.companyID, &own.name, &own.siteName, &own.status,
+			&own.active, &own.releaseState)
 		if err != nil {
+			return nil, err
+		}
+		if err := applyVerdict(&item, own, companyID); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-
-	// The verdict is per-row and needs its own query, so it is resolved after the
-	// cursor is closed rather than inside the loop -- one connection, one
-	// statement at a time.
-	for i := range out {
-		if err := attachVerdict(&out[i], companyID); err != nil {
-			return nil, err
-		}
 	}
 	return out, nil
 }
@@ -1201,7 +1222,10 @@ type scannable interface {
 	Scan(dest ...any) error
 }
 
-func scanAnnouncement(row scannable) (Announcement, error) {
+// scanAnnouncement reads one announcement row. `extra` receives any columns
+// the caller selected after the announcement's own, in order -- the list read
+// selects the device ownership alongside and scans it into the same call.
+func scanAnnouncement(row scannable, extra ...any) (Announcement, error) {
 	var (
 		item       Announcement
 		lastSeen   sql.NullTime
@@ -1210,12 +1234,13 @@ func scanAnnouncement(row scannable) (Announcement, error) {
 		timedOut   bool
 	)
 	var capabilities []byte
-	err := row.Scan(&item.PublicID, &item.SerialNumber, &item.State,
+	dest := append([]any{&item.PublicID, &item.SerialNumber, &item.State,
 		&item.FirmwareVersion, &item.HardwareRevision, &capabilities,
 		&item.FirstSeenIP, &item.LastSeenIP, &lastSeen, &item.AnnouncedAt,
 		&item.AdoptedByEmail, &adoptedAt,
 		&item.SitePublicID, &item.SiteName, &item.DeviceName,
-		&item.ApprovedByEmail, &approvedAt, &item.ExpiresAt, &timedOut)
+		&item.ApprovedByEmail, &approvedAt, &item.ExpiresAt, &timedOut}, extra...)
+	err := row.Scan(dest...)
 	if err != nil {
 		return item, err
 	}
@@ -1253,7 +1278,15 @@ func attachVerdict(item *Announcement, companyID int64) error {
 	if err != nil {
 		return err
 	}
+	return applyVerdict(item, own, companyID)
+}
 
+// applyVerdict writes the verdict for an ownership answer onto the item.
+//
+// ONE FUNCTION FOR BOTH READS. The single read looks the ownership up; the
+// list read joins it in. Both hand the answer here, so the five verdicts and
+// what each discloses in `existing_terminal` cannot differ between them.
+func applyVerdict(item *Announcement, own terminalOwnership, companyID int64) error {
 	verdict, verdictErr := verdictFor(own, companyID)
 	switch {
 	case errors.Is(verdictErr, ErrTerminalOwnedElsewhere):

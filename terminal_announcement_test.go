@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -1196,4 +1197,135 @@ func announceRaw(f *announceFixture, serial string) (code, token, failure string
 	code, _ = res.Body["pairing_code"].(string)
 	token, _ = res.Body["announce_token"].(string)
 	return code, token, ""
+}
+
+// The list's verdicts are computed from a join; the single read still looks
+// each serial up. Every verdict the platform can give, and what each discloses
+// in existing_terminal, must come out identical from both -- this is the check
+// that the join did not change an answer.
+func TestPendingTerminalListVerdictsMatchTheSingleRead(t *testing.T) {
+	f := newAnnounceFixture(t)
+	// Six serials, one per ownership state the verdict rule distinguishes.
+	cases := map[string]string{
+		"AT-VD-NEW":      "NEW",                         // no device row anywhere
+		"AT-VD-MINE":     "RE_PROVISION",                // live device in this company
+		"AT-VD-THEIRS":   "REFUSED_OTHER_COMPANY",       // live device in another company
+		"AT-VD-DISABLED": "REFUSED_DISABLED",            // this company's, disabled
+		"AT-VD-INACTIVE": "REFUSED_DISABLED",            // this company's, active = false
+		"AT-VD-RELEASE":  "REFUSED_RELEASE_IN_PROGRESS", // this company's, release ordered
+		"AT-VD-GONESITE": "NEW",                         // device row whose site is retired: not found
+	}
+	f.env.registerDevice(f.env.siteAKey, "AT-VD-MINE")
+	f.env.registerDevice(f.env.siteCKey, "AT-VD-THEIRS")
+	f.env.registerDevice(f.env.siteAKey, "AT-VD-DISABLED")
+	mustExec(t, `UPDATE devices SET status = 'DISABLED' WHERE serial_number = 'AT-VD-DISABLED'`)
+	f.env.registerDevice(f.env.siteAKey, "AT-VD-INACTIVE")
+	mustExec(t, `UPDATE devices SET active = FALSE WHERE serial_number = 'AT-VD-INACTIVE'`)
+	f.env.registerDevice(f.env.siteAKey, "AT-VD-RELEASE")
+	mustExec(t, `UPDATE devices
+	                SET release_state = 'ORDERED', release_id = gen_random_uuid(),
+	                    release_ordered_at = CURRENT_TIMESTAMP
+	              WHERE serial_number = 'AT-VD-RELEASE'`)
+	// A device at a site that has since been retired: the ownership lookup
+	// inner-joins live sites, so this must read as no owner at all.
+	seedSite(t, f.companyID, "Retired Site", "retired-site-key")
+	f.env.registerDevice("retired-site-key", "AT-VD-GONESITE")
+	mustExec(t, `UPDATE sites SET deleted_at = CURRENT_TIMESTAMP WHERE site_name = 'Retired Site'`)
+
+	for serial := range cases {
+		seedAdoptedAnnouncement(t, f.companyID, serial)
+	}
+
+	code, list := consoleCall(t, f.env.router, http.MethodGet,
+		"/api/v1/console/terminal-announcements", "", f.token, f.csrf)
+	if code != http.StatusOK {
+		t.Fatalf("list = %d: %v", code, list)
+	}
+	pending, _ := list["pending"].([]any)
+	if len(pending) != len(cases) {
+		t.Fatalf("list has %d pending terminals, want %d: %v", len(pending), len(cases), list)
+	}
+
+	seen := map[string]bool{}
+	for _, raw := range pending {
+		item := raw.(map[string]any)
+		serial, _ := item["serial_number"].(string)
+		want, known := cases[serial]
+		if !known {
+			t.Fatalf("unexpected serial %q in the list", serial)
+		}
+		seen[serial] = true
+
+		if got := item["verdict"]; got != want {
+			t.Errorf("%s: list verdict = %v, want %s", serial, got, want)
+		}
+
+		// The single read of the same announcement must agree on every field
+		// the verdict decides -- the verdict itself and existing_terminal.
+		id, _ := item["id"].(string)
+		code, single := consoleCall(t, f.env.router, http.MethodGet,
+			"/api/v1/console/terminal-announcements/"+id, "", f.token, f.csrf)
+		if code != http.StatusOK {
+			t.Fatalf("%s: single read = %d: %v", serial, code, single)
+		}
+		if single["verdict"] != item["verdict"] {
+			t.Errorf("%s: single read verdict %v != list verdict %v", serial, single["verdict"], item["verdict"])
+		}
+		if mustJSON(t, single["existing_terminal"]) != mustJSON(t, item["existing_terminal"]) {
+			t.Errorf("%s: existing_terminal differs\n list:   %s\n single: %s",
+				serial, mustJSON(t, item["existing_terminal"]), mustJSON(t, single["existing_terminal"]))
+		}
+
+		// What existing_terminal discloses, by verdict: the caller's own
+		// terminals are named; a foreign owner and a fresh serial are not.
+		_, hasExisting := item["existing_terminal"].(map[string]any)
+		switch want {
+		case "RE_PROVISION", "REFUSED_DISABLED", "REFUSED_RELEASE_IN_PROGRESS":
+			if !hasExisting {
+				t.Errorf("%s: %s carries no existing_terminal", serial, want)
+			}
+		default:
+			if hasExisting {
+				t.Errorf("%s: %s must not disclose an existing_terminal: %v", serial, want, item["existing_terminal"])
+			}
+		}
+	}
+	for serial := range cases {
+		if !seen[serial] {
+			t.Errorf("%s missing from the list", serial)
+		}
+	}
+}
+
+// Newest first, and two announcements made in the same instant come back in a
+// fixed order rather than whichever the planner reached first.
+func TestPendingTerminalListOrderIsDeterministic(t *testing.T) {
+	f := newAnnounceFixture(t)
+	for i := 0; i < 5; i++ {
+		seedAdoptedAnnouncement(t, f.companyID, fmt.Sprintf("AT-ORD-%d", i))
+	}
+	// Same created_at for all five, so only the tiebreaker orders them.
+	mustExec(t, `UPDATE terminal_announcements SET created_at = '2026-01-01T00:00:00Z'
+	              WHERE serial_number LIKE 'AT-ORD-%'`)
+
+	read := func() []string {
+		_, list := consoleCall(t, f.env.router, http.MethodGet,
+			"/api/v1/console/terminal-announcements", "", f.token, f.csrf)
+		var serials []string
+		for _, raw := range list["pending"].([]any) {
+			serials = append(serials, raw.(map[string]any)["serial_number"].(string))
+		}
+		return serials
+	}
+	first := read()
+	// Highest id first: the most recently inserted of a same-instant batch.
+	want := []string{"AT-ORD-4", "AT-ORD-3", "AT-ORD-2", "AT-ORD-1", "AT-ORD-0"}
+	if strings.Join(first, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", first, want)
+	}
+	for i := 0; i < 3; i++ {
+		if again := read(); strings.Join(again, ",") != strings.Join(first, ",") {
+			t.Fatalf("order changed between reads: %v then %v", first, again)
+		}
+	}
 }
