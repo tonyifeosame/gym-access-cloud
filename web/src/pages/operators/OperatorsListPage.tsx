@@ -154,13 +154,20 @@ export function OperatorsListPage() {
         emptyDescription="Nobody can sign in to this console yet."
       />
 
+      {/*
+        THE PAGE FIELDS MAY BE ABSENT. An API that predates paging answers with
+        `count` and `operators` only, and the console can meet one for as long
+        as the two are deployed separately. Absent means "this is everybody":
+        the total is the count, the offset is zero and the limit is the page
+        size we asked for -- which renders as one page, and never as NaN.
+      */}
       {query.data ? (
         <Pagination
           count={query.data.count}
-          total={query.data.total}
-          offset={query.data.offset}
-          limit={query.data.limit}
-          hasMore={query.data.has_more}
+          total={query.data.total ?? query.data.count}
+          offset={query.data.offset ?? 0}
+          limit={query.data.limit ?? PAGE_SIZE}
+          hasMore={query.data.has_more ?? false}
           onOffsetChange={setOffset}
           noun="operators"
           busy={query.isFetching}

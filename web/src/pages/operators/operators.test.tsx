@@ -196,6 +196,27 @@ describe('operator list', () => {
     expect(listRequests().at(-1)?.url).toContain('offset=100')
   })
 
+  it('RENDERS SENSIBLY AGAINST AN API THAT PREDATES PAGING', async () => {
+    // The console and the API deploy separately. For the window where a new
+    // console meets an old API, the list arrives as `{count, operators}` with
+    // no total, offset or limit -- and the page must show the range it has,
+    // not "NaN-4 of undefined".
+    signIn()
+    server.use(
+      http.get('*/api/v1/console/operators', () =>
+        Response.json({ count: state.operators.length, operators: state.operators }),
+      ),
+    )
+    renderOperators()
+
+    await screen.findByText('viewer@example.com')
+    const status = screen.getByText(/showing/i)
+    expect(status).toHaveTextContent(`Showing 1–${state.operators.length} of ${state.operators.length} operators`)
+    expect(status.textContent).not.toMatch(/NaN|undefined/)
+    // One page: no paging controls are offered for a list that is whole.
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+  })
+
   it('reports a failed load as an error rather than an empty console', async () => {
     signIn()
     failNext('operators-list', 500)

@@ -1216,11 +1216,17 @@ export interface OperatorAccount {
  */
 export interface OperatorsResponse {
   count: number
-  total: number
-  limit: number
-  offset: number
-  has_more: boolean
   operators: OperatorAccount[]
+  /**
+   * OPTIONAL, because an API that predates paging sends only `count` and
+   * `operators`. The console is deployed separately from the API, so for the
+   * window where a new console meets an old API these are absent, and the
+   * page has to render sensibly from `count` alone rather than show NaN.
+   */
+  total?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
 }
 
 export interface OperatorsQuery {
