@@ -277,7 +277,7 @@ jobs:
       - name: Production build
         if: steps.firmware.outcome == 'success'
         working-directory: firmware
-        run: pio run -e esp32dev | tee size.txt
+        run: set -o pipefail; pio run -e esp32dev | tee size.txt
 
       # A size budget, checked rather than hoped for. The audit's instruction was
       # not to introduce features that exceed the actual flash and RAM budget;
