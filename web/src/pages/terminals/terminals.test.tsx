@@ -263,7 +263,53 @@ describe('terminal inventory', () => {
     expect(within(bay).getByText('Loading Bay')).toBeInTheDocument()
     expect(within(bay).getByText(SITE_B.site_name)).toBeInTheDocument()
     expect(within(bay).getByText('Offline')).toBeInTheDocument()
-    expect(within(bay).getByText('Outdated')).toBeInTheDocument()
+    // "Needs update", as a word beside the status: the Firmware column is gone
+    // from the resting list, and what the row says is only that an update is
+    // due. The version itself is on the terminal's page.
+    expect(within(bay).getByText('Needs update')).toBeInTheDocument()
+    expect(within(bay).queryByText('1.1.0')).not.toBeInTheDocument()
+  })
+
+  it('reads as a list of named access points, with the serial second', async () => {
+    /*
+      NAME FIRST, SERIAL SECOND. The serial was the first column and the row's
+      link, so the list read as a hardware inventory: a column of AT-000123
+      before the word "Reception". A person looking for a door looks for its
+      name; the serial is what the platform keys by and what somebody reads to
+      support, so it is still there, one column over, in monospace.
+    */
+    signIn()
+    renderTerminals()
+
+    const row = (await screen.findByText('AT-0002')).closest('tr') as HTMLElement
+    // The name is the row's heading cell; the serial is the first data cell.
+    const heading = within(row).getByRole('rowheader')
+    expect(heading).toHaveTextContent('Loading Bay')
+    expect(within(heading).getByRole('link', { name: 'Loading Bay' })).toHaveAttribute(
+      'href',
+      '/terminals/AT-0002',
+    )
+    expect(within(row).getAllByRole('cell')[0]).toHaveTextContent('AT-0002')
+    const headers = screen.getAllByRole('columnheader').map((cell) => cell.textContent)
+    expect(headers.slice(0, 2)).toEqual(['Name', 'Serial'])
+    expect(headers).not.toContain('Firmware')
+  })
+
+  it('shows the software version only when asked about updates', async () => {
+    // The version column appears with the "Needs update only" filter, which is
+    // the moment the version becomes the question. Nothing is removed: the
+    // rows already say "Needs update" and the terminal page shows the version.
+    const user = userEvent.setup()
+    signIn()
+    renderTerminals()
+
+    await screen.findByText('AT-0002')
+    expect(screen.queryByRole('columnheader', { name: 'Software version' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Needs update only'))
+    expect(screen.getByRole('columnheader', { name: 'Software version' })).toBeInTheDocument()
+    const bay = screen.getByText('AT-0002').closest('tr') as HTMLElement
+    expect(within(bay).getByText('1.1.0')).toBeInTheDocument()
   })
 
   it('shows fleet health from the summary endpoint', async () => {
@@ -295,7 +341,8 @@ describe('terminal inventory', () => {
     renderTerminals()
 
     const row = (await screen.findByText('AT-0001')).closest('tr') as HTMLElement
-    const link = within(row).getByRole('link', { name: 'AT-0001' })
+    // The link carries the NAME now, and the serial sits in the next column.
+    const link = within(row).getByRole('link', { name: 'North Gate' })
     expect(link).toHaveAttribute('href', '/terminals/AT-0001')
 
     // Every row, not just the first: a fleet with one reachable terminal and
@@ -305,9 +352,9 @@ describe('terminal inventory', () => {
   })
 
   it('links a terminal by its serial even when it has no name yet', async () => {
-    // The link is on the serial rather than the name because the name is
-    // optional -- an unnamed terminal renders an em dash, and a link with no
-    // accessible name is worse than no link.
+    // The name is optional, and a link with no accessible name is worse than
+    // no link -- so an unnamed terminal is linked by its serial instead of
+    // rendering an em dash.
     signIn()
     seed({ sites: SITES, terminals: [makeTerminal({ serial_number: 'AT-9', device_name: '' })] })
     renderTerminals()
@@ -566,12 +613,14 @@ describe('terminal detail', () => {
     expect(screen.queryByText('Current')).not.toBeInTheDocument()
   })
 
-  it('still says "Current" for a terminal that has reported an up-to-date build', async () => {
+  it('still says "Up to date" for a terminal that has reported an up-to-date build', async () => {
+    // "Up to date" rather than "Current": the same word the overview and the
+    // Firmware page use for the same state.
     signIn()
     renderTerminals('/terminals/AT-0001')
 
     await screen.findByRole('heading', { name: 'North Gate', level: 1 })
-    expect(screen.getByText('Current')).toBeInTheDocument()
+    expect(screen.getByText('Up to date')).toBeInTheDocument()
   })
 
   /*
@@ -649,7 +698,7 @@ describe('terminal detail', () => {
     signIn()
     renderTerminals('/terminals/AT-0001')
 
-    expect(await screen.findByRole('heading', { name: 'Lifecycle' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Actions' })).toBeInTheDocument()
     expect(screen.getByText(/Registration itself happens on the device/)).toBeInTheDocument()
     expect(
       screen.getByText(/provisioning key does not need to leave the platform/i),
@@ -952,10 +1001,8 @@ describe('access-point vocabulary', () => {
     renderTerminals('/terminals/AT-0001')
 
     await screen.findByRole('heading', { name: 'North Gate', level: 1 })
-    // The lifecycle copy that used to read "Records nothing and moves no door".
-    expect(
-      screen.getByText(/Records nothing and changes nothing at the access point/),
-    ).toBeInTheDocument()
+    // The action copy that used to read "Records nothing and moves no door".
+    expect(screen.getByText(/Records nothing and changes nothing/)).toBeInTheDocument()
     expectNoDoorWording('The terminal detail page', document.body.textContent ?? '')
   })
 

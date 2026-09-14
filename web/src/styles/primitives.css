@@ -1156,6 +1156,49 @@ textarea.field__input {
   gap: var(--space-3);
 }
 
+/*
+  A body whose children are full-width blocks -- an action list, a nested
+  panel, a notice -- rather than a button and a paragraph. `flex-start` above
+  is right for the Firmware page's Advanced body, where it keeps the button at
+  its natural width; here it would shrink a lifecycle list to its longest
+  sentence and leave the buttons ragged.
+*/
+.disclosure__body--stretch {
+  align-items: stretch;
+}
+
+/* What a collapsed disclosure holds, said beside its name so it is not a
+   single word somebody has to press to find out. */
+.disclosure__summary-note {
+  font-weight: 400;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  /* The note is what gives way on a narrow screen: it wraps, the label does
+     not. Without this the summary's anonymous flex items shared the width
+     and "More options" broke in two beside a one-line note at 390px. */
+  flex: 1 1 12ch;
+  min-width: 0;
+}
+
+.disclosure__summary-label {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* The overview's disclosure holds nested panels, so its summary is the only
+   thing at panel-title weight; the nested titles below it step down. */
+.disclosure__body--stretch > .panel--nested:first-of-type {
+  padding-block-start: 0;
+}
+
+/* The everyday actions sit above the disclosure in the same panel, so the
+   summary needs a little air rather than butting against the last option. */
+.lifecycle + .disclosure {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
 /* --- the site's administrative actions ------------------------------------
  *
  * The three site operations that stop hardware working, grouped at the end of
@@ -2234,6 +2277,36 @@ textarea.field__input {
   font-size: var(--font-size-xs);
   line-height: var(--leading-snug);
   color: var(--text-muted);
+}
+
+/*
+  The rest of an item's explanation, folded. One sentence is what an item
+  shows; the paragraph that used to be the whole item is a press away, styled
+  as a text link rather than a triangle so it reads as "more words" and not as
+  a control that does something.
+*/
+.attention__more {
+  margin-top: var(--space-1);
+  font-size: var(--font-size-xs);
+}
+
+.attention__more > summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--accent);
+  text-decoration: underline;
+  /* A comfortable press target on a phone without changing the visual weight. */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.attention__more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.attention__more > summary:hover {
+  color: var(--accent-hover, var(--accent));
 }
 
 /*

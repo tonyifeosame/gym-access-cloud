@@ -428,7 +428,7 @@ describe('a completed enrolment', () => {
     })
     renderPerson()
 
-    const credential = await screen.findByRole('region', { name: 'Biometric credential' })
+    const credential = await screen.findByRole('region', { name: 'Fingerprint' })
     expect(within(credential).getByText('Not enrolled')).toBeInTheDocument()
 
     // The customer places their finger. The browser's cached person record is

@@ -179,7 +179,7 @@ function TopBar() {
 function SideNav() {
   const session = useAuthenticatedSession()
   const location = useLocation()
-  const { platform, modules } = navigationFor(session)
+  const { groups, modules } = navigationFor(session)
   const [open, setOpen] = useState(false)
 
   /*
@@ -215,7 +215,16 @@ function SideNav() {
       </button>
 
       <div className="sidenav__panel" id="sidenav-panel">
-        <NavSection title="Platform" items={platform} />
+        {/*
+          THREE HEADINGS INSTEAD OF ONE. "Platform" used to head all eleven
+          links as a flat list, so Firmware and API access sat with the same
+          weight as People. The groups come from navigation.ts -- the links,
+          their labels and their role gates are unchanged, and a group a role
+          has nothing in is not rendered at all.
+        */}
+        {groups.map((group) => (
+          <NavSection key={group.id} title={group.title} items={group.items} />
+        ))}
 
       {/*
         No heading when there is nothing under it. `NavSection` renders nothing

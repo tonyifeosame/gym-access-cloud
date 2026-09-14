@@ -393,7 +393,7 @@ describe('editing a person', () => {
 
     // Correcting a name must never unenrol somebody.
     await screen.findByRole('heading', { name: 'Corrected Spelling', level: 1 })
-    const credential = screen.getByRole('region', { name: 'Biometric credential' })
+    const credential = screen.getByRole('region', { name: 'Fingerprint' })
     expect(within(credential).getByText('Enrolled')).toBeInTheDocument()
   })
 })
@@ -513,8 +513,8 @@ describe('biometric non-disclosure', () => {
     renderPeople('/people/P-0000')
 
     await screen.findByRole('heading', { name: 'Ada Number 0', level: 1 })
-    const credential = screen.getByRole('region', { name: 'Biometric credential' })
-    expect(within(credential).getByText('Credential status')).toBeInTheDocument()
+    const credential = screen.getByRole('region', { name: 'Fingerprint' })
+    expect(within(credential).getByText('Status')).toBeInTheDocument()
     expect(within(credential).getByText('Enrolled')).toBeInTheDocument()
   })
 
@@ -545,7 +545,7 @@ describe('biometric non-disclosure', () => {
     renderPeople('/people/P-0000')
 
     expect(await screen.findByText('Enrolment happens at a terminal')).toBeInTheDocument()
-    expect(screen.getByText(/standing at the terminal you choose/i)).toBeInTheDocument()
+    expect(screen.getByText(/must be at the terminal you choose/i)).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: /enrol fingerprint/i }),
     ).toBeInTheDocument()
@@ -566,7 +566,7 @@ describe('biometric non-disclosure', () => {
     renderPeople('/people/P-0000')
 
     await screen.findByRole('heading', { name: 'Ada Number 0', level: 1 })
-    expect(screen.getByText(/holds no copy of the biometric data/i)).toBeInTheDocument()
+    expect(screen.getByText(/never keeps a copy/i)).toBeInTheDocument()
 
     const text = document.body.textContent ?? ''
     for (const pattern of [/operator API/i, /\bAPI\b/, /endpoint/i, /not yet built/i]) {

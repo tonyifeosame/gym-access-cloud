@@ -178,7 +178,7 @@ describe('every screen passes the automated sweep', () => {
     ['the overview', '/', () => screen.findByRole('heading', { level: 1 })],
     ['people', '/people', () => screen.findByText('Ada Okonkwo')],
     ['terminals', '/terminals', () => screen.findByText('AT-0001')],
-    ['one terminal', '/terminals/AT-0001', () => screen.findByRole('heading', { name: 'Lifecycle' })],
+    ['one terminal', '/terminals/AT-0001', () => screen.findByRole('heading', { name: 'Actions' })],
     ['sites', '/sites', () => screen.findByText(SITE_A.site_name)],
     // The site detail page carries the offline-policy radio group, whose options
     // each have a paragraph of description wired by aria-describedby. A fieldset
@@ -227,7 +227,7 @@ describe('dialogs', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^revoke$/i }))
 
     const dialog = await screen.findByRole('dialog')
@@ -242,7 +242,7 @@ describe('dialogs', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^move$/i }))
     await screen.findByRole('dialog')
     await expectNoViolations()
@@ -406,7 +406,7 @@ describe('the console works without a mouse', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^disable$/i }))
 
     const dialog = await screen.findByRole('dialog')
@@ -418,7 +418,7 @@ describe('the console works without a mouse', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^disable$/i }))
     const dialog = await screen.findByRole('dialog')
 
@@ -436,7 +436,7 @@ describe('the console works without a mouse', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     const opener = screen.getByRole('button', { name: /^disable$/i })
     await user.click(opener)
     await screen.findByRole('dialog')
@@ -450,7 +450,7 @@ describe('the console works without a mouse', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^disable$/i }))
     await screen.findByRole('dialog')
 
@@ -538,7 +538,7 @@ describe('errors reach somebody who cannot see them', () => {
     signIn()
     renderInShell('/terminals/AT-0001')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     await user.click(screen.getByRole('button', { name: /^move$/i }))
     const dialog = await screen.findByRole('dialog')
 

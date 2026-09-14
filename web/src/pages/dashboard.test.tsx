@@ -683,10 +683,10 @@ describe('dashboard data', () => {
 
     const health = await screen.findByRole('region', { name: /Terminal health/ })
     expect(await within(health).findByText('Online')).toBeInTheDocument()
-    expect(within(health).getByText('Reporting an error')).toBeInTheDocument()
+    expect(within(health).getByText('Reporting a fault')).toBeInTheDocument()
     // Zero-valued states stay in the legend rather than vanishing.
     expect(within(health).getByText('Disabled')).toBeInTheDocument()
-    expect(within(health).getByText(/behind on firmware/)).toBeInTheDocument()
+    expect(within(health).getByText(/with a software update waiting/)).toBeInTheDocument()
     expect(within(health).getByText(/never reported in/)).toBeInTheDocument()
   })
 
@@ -758,7 +758,7 @@ describe('dashboard data', () => {
     signIn()
     renderDashboard()
 
-    const firmware = await screen.findByRole('region', { name: 'Firmware' })
+    const firmware = await screen.findByRole('region', { name: 'Terminal software' })
     /*
       THREE SEGMENTS, FROM THE SAME FUNCTION THE FIRMWARE SCREEN USES.
 
@@ -1225,7 +1225,7 @@ describe('dashboard data', () => {
       'Today at your access points',
       'Recent access activity',
       'Sites',
-      'Firmware',
+      'Terminal software',
       'Features',
     ]) {
       expect(
@@ -1233,6 +1233,66 @@ describe('dashboard data', () => {
         `the overview lost its "${region}" region`,
       ).toBeInTheDocument()
     }
+  })
+
+  it('folds the installation behind a closed "System" panel and keeps the day on top', async () => {
+    /*
+      WHAT THIS PINS. Firmware standing, the enabled features and the operator
+      trail describe the installation rather than the day, and they were drawn
+      with the same weight as "is anything broken". They are still on the page,
+      each still its own region, inside one disclosure that is closed by
+      default. Everything about the day -- health, today's count, the log, the
+      sites -- stays outside it, in that order.
+
+      jsdom does not hide a closed <details>, so this asserts CONTAINMENT and
+      the open flag; that the fold is drawn is the browser pass's job.
+    */
+    signIn('ADMIN', { applications: [{ code: 'ATTENDANCE', settings: {} }] })
+    seed({
+      terminals: [makeTerminal({ status: 'ONLINE' })],
+      people: [makePerson()],
+    })
+    renderDashboard()
+
+    const system = (await screen.findByText('System')).closest('details')
+    expect(system).not.toBeNull()
+    expect(system?.open).toBe(false)
+
+    for (const name of ['Terminal software', 'Features', 'Recent changes here']) {
+      const region = await screen.findByRole('region', { name })
+      expect(system?.contains(region), `"${name}" is outside the System panel`).toBe(true)
+    }
+
+    const outside = ['Terminal health', 'Today at your access points', 'Recent access activity', 'Sites']
+    for (const name of outside) {
+      const region = await screen.findByRole('region', { name })
+      expect(region.closest('details'), `"${name}" is folded away`).toBeNull()
+    }
+
+    // Reading order, which on a phone is the order the lanes stack in.
+    const positions = outside.map((name) =>
+      Array.from(document.querySelectorAll('section')).indexOf(
+        screen.getByRole('region', { name }) as HTMLElement,
+      ),
+    )
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  it('keeps the long first-terminal instructions one press away rather than gone', async () => {
+    signIn('ADMIN', { applications: [] })
+    seed({ sites: [], terminals: [], people: [], events: [] })
+    renderDashboard()
+
+    const attention = await screen.findByRole('region', { name: 'Needs your attention' })
+    const item = (await within(attention).findByText('Add your first terminal')).closest('li')
+    expect(item).not.toBeNull()
+    // One sentence by default …
+    expect(within(item as HTMLElement).getByText(/type the code from its screen/)).toBeInTheDocument()
+    // … and the version-specific paragraph behind "Learn more", still present.
+    const more = within(item as HTMLElement).getByText('Learn more').closest('details')
+    expect(more?.open).toBe(false)
+    expect(more?.textContent).toMatch(/1\.2\.0/)
+    expect(more?.textContent).toMatch(/claim code/)
   })
 })
 
@@ -1345,7 +1405,7 @@ describe('the dashboard asks for nothing it may not have', () => {
     signIn('MANAGER')
     renderDashboard()
 
-    const firmware = await screen.findByRole('region', { name: 'Firmware' })
+    const firmware = await screen.findByRole('region', { name: 'Terminal software' })
     expect(await within(firmware).findByText('Up to date')).toBeInTheDocument()
     expect(within(firmware).queryByRole('link', { name: 'All versions' })).not.toBeInTheDocument()
   })
@@ -1491,7 +1551,7 @@ describe('the dashboard does not fabricate', () => {
     // Said in two places, deliberately: the attention list offers it as the
     // next step, and the Features panel explains that having none is fine.
     const attention = await screen.findByRole('region', { name: 'Needs your attention' })
-    expect(within(attention).getByText('No features turned on')).toBeInTheDocument()
+    expect(within(attention).getByText('Choose what you use AccessLink for')).toBeInTheDocument()
 
     const features = await screen.findByRole('region', { name: 'Features' })
     expect(within(features).getByText(/No features turned on for/)).toBeInTheDocument()

@@ -39,13 +39,23 @@ const STATUS_TONES: Record<string, BadgeTone> = {
   PROVISIONING: 'info',
 }
 
+/**
+ * The customer's word for each state.
+ *
+ * "Provisioning" and "Error" are the server's enum values and were shown as
+ * written. To somebody running a site, a terminal that is "provisioning" is
+ * one that is not set up yet, and "Error" says less than "Fault" -- a fault is
+ * something on the unit that needs a person, which is what ERROR means here.
+ * NOTHING ABOUT THE STATES CHANGED: the values, the tones and the filters are
+ * keyed on the server's words; only the label read by a person is different.
+ */
 const STATUS_LABELS: Record<string, string> = {
   ONLINE: 'Online',
   OFFLINE: 'Offline',
-  UPDATING: 'Updating',
-  ERROR: 'Error',
+  UPDATING: 'Updating…',
+  ERROR: 'Fault',
   DISABLED: 'Disabled',
-  PROVISIONING: 'Provisioning',
+  PROVISIONING: 'Not set up yet',
 }
 
 export function humaniseCode(code: string): string {
@@ -57,12 +67,17 @@ export function humaniseCode(code: string): string {
     .join(' ')
 }
 
+/**
+ * The label the badge shows, for anywhere that names a status without drawing
+ * one -- the terminals list's status filter reads it, so the option a person
+ * picks is worded exactly as the badge in the rows it selects.
+ */
+export function terminalStatusLabel(status: string): string {
+  return STATUS_LABELS[status] ?? humaniseCode(status)
+}
+
 export function TerminalStatusBadge({ status }: { status: TerminalStatus }) {
-  return (
-    <Badge tone={STATUS_TONES[status] ?? 'neutral'}>
-      {STATUS_LABELS[status] ?? humaniseCode(status)}
-    </Badge>
-  )
+  return <Badge tone={STATUS_TONES[status] ?? 'neutral'}>{terminalStatusLabel(status)}</Badge>
 }
 
 /**

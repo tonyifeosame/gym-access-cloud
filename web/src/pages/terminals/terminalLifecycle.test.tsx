@@ -85,7 +85,7 @@ function dialog() {
 
 async function openLifecycle(name: RegExp) {
   const user = userEvent.setup()
-  await screen.findByRole('heading', { name: 'Lifecycle' })
+  await screen.findByRole('heading', { name: 'Actions' })
   await user.click(screen.getByRole('button', { name }))
   return user
 }
@@ -101,7 +101,7 @@ describe('disable, revoke and retire are presented as different operations', () 
     signIn()
     renderTerminal()
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
 
     // Three distinct controls. A single "deactivate" with a dropdown is exactly
     // the shape this must not have.
@@ -182,7 +182,7 @@ describe('disable and re-enable', () => {
     signIn()
     renderTerminal('AT-0002')
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     expect(screen.getByRole('button', { name: /^re-enable$/i })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^disable$/i })).not.toBeInTheDocument()
   })
@@ -335,7 +335,7 @@ describe('role gating mirrors the server', () => {
     signIn('MANAGER')
     renderTerminal()
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     expect(screen.getByRole('button', { name: /^disable$/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /^revoke$/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /^retire$/i })).toBeDisabled()
@@ -350,8 +350,79 @@ describe('role gating mirrors the server', () => {
     signIn('VIEWER')
     renderTerminal()
 
-    await screen.findByRole('heading', { name: 'Lifecycle' })
+    await screen.findByRole('heading', { name: 'Actions' })
     expect(screen.getByRole('button', { name: /^resync$/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /^revoke$/i })).toBeDisabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Progressive disclosure: simple by default, complete on request
+// ---------------------------------------------------------------------------
+
+describe('the everyday answer comes first and the dangerous controls are folded', () => {
+  /*
+   * WHAT THIS PINS, AND WHAT IT DOES NOT. jsdom draws no closed `<details>`
+   * differently from an open one, so these tests cannot prove the folded
+   * controls are hidden -- the browser pass does that. What they can prove is
+   * the half that would silently regress: which controls sit inside the
+   * disclosure and which outside, that the disclosure is closed by default,
+   * and that every control the page used to offer is still on it.
+   */
+  function disclosureOf(element: HTMLElement) {
+    return element.closest('details')
+  }
+
+  it('keeps disable and check-access on the first screen', async () => {
+    signIn()
+    renderTerminal()
+
+    await screen.findByRole('heading', { name: 'Actions' })
+    expect(disclosureOf(screen.getByRole('button', { name: /^disable$/i }))).toBeNull()
+    expect(disclosureOf(screen.getByRole('button', { name: /^check access$/i }))).toBeNull()
+  })
+
+  it('folds revoke, retire, release, move and resync behind a closed "More actions"', async () => {
+    signIn()
+    renderTerminal()
+
+    await screen.findByRole('heading', { name: 'Actions' })
+    const more = screen.getByText('More actions').closest('details')
+    expect(more).not.toBeNull()
+    expect(more?.open).toBe(false)
+
+    for (const name of [/^revoke$/i, /^retire$/i, /^release$/i, /^move$/i, /^resync$/i]) {
+      const button = screen.getByRole('button', { name })
+      expect(more?.contains(button), `${name} is not under More actions`).toBe(true)
+    }
+  })
+
+  it('folds the software version and the network behind a closed "Advanced"', async () => {
+    signIn()
+    renderTerminal()
+
+    await screen.findByRole('heading', { name: 'Actions' })
+    const advanced = screen.getByText('Advanced').closest('details')
+    expect(advanced).not.toBeNull()
+    expect(advanced?.open).toBe(false)
+
+    expect(advanced?.contains(screen.getByRole('region', { name: 'Software version' }))).toBe(true)
+    expect(advanced?.contains(screen.getByRole('region', { name: 'Network' }))).toBe(true)
+    expect(advanced?.contains(screen.getByText('Technical details'))).toBe(true)
+    // Nothing folded is missing: the rows and the action are all still there.
+    expect(screen.getByText('Set up using')).toBeInTheDocument()
+    expect(screen.getByText('Last sync')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change Wi-Fi' })).toBeInTheDocument()
+  })
+
+  it('leaves what decides whether people get in on the first screen', async () => {
+    // The outage policy and the switched-on card are the two facts on this
+    // page about whether a person is admitted. Neither may fold.
+    signIn()
+    renderTerminal()
+
+    await screen.findByRole('heading', { name: 'Actions' })
+    expect(disclosureOf(screen.getByText('During an outage'))).toBeNull()
+    expect(disclosureOf(screen.getByText('Switched on'))).toBeNull()
   })
 })

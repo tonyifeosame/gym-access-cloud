@@ -71,8 +71,8 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
           Access
         </h2>
         <p className="field__hint">
-          Where this person may go, and when. A rule with no schedule applies at
-          any time; a <strong>deny</strong> beats every allow.
+          Where this person is allowed in, and when. A <strong>Keep out</strong> rule
+          always wins, even if another rule lets them in.
         </p>
       </div>
 
@@ -89,10 +89,13 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
             fact, and only one of them is obvious.
           */
           <InfoNote tone="warning" title="This person cannot get in anywhere">
-            No rule grants them access. On this platform, having no rules means
-            reaching <strong>nothing</strong> — it is not an unconfigured state
-            that defaults to open.
-            {mayManage ? ' Grant access below to change that.' : null}
+            {/*
+              SHORTER, SAME CLAIM. "Absence of permission is not permission" is
+              the one sentence this panel exists for, and it used to take three
+              to say. "There is no default" is the whole of it.
+            */}
+            Nobody gets in without a rule that lets them in — there is no default.
+            {mayManage ? ' Grant access below to choose where they are allowed.' : null}
           </InfoNote>
         ) : (
           <ul className="rule-list">
@@ -132,7 +135,7 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
                       {permission.application ? (
                         <> · only for {describeApplication(permission.application).label}</>
                       ) : (
-                        <> · any feature that terminal serves</>
+                        <> · any feature</>
                       )}
                     </p>
 
@@ -142,27 +145,24 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
                           Schedule: <strong>{permission.schedule_name}</strong>
                         </>
                       ) : (
-                        <span className="muted">No schedule — applies at any time of day</span>
+                        <span className="muted">Any time of day</span>
                       )}
                     </p>
 
                     {permission.starts_at || permission.ends_at ? (
                       <p className="rule__detail">
-                        Valid{' '}
                         {permission.starts_at ? (
                           <>
-                            from <Timestamp value={permission.starts_at} />
+                            From <Timestamp value={permission.starts_at} />
+                            {permission.ends_at ? ' ' : ', no end date'}
                           </>
-                        ) : (
-                          'from any time'
-                        )}{' '}
+                        ) : null}
                         {permission.ends_at ? (
                           <>
-                            until <Timestamp value={permission.ends_at} />
+                            {permission.starts_at ? 'until' : 'Until'}{' '}
+                            <Timestamp value={permission.ends_at} />
                           </>
-                        ) : (
-                          'with no end date'
-                        )}
+                        ) : null}
                       </p>
                     ) : null}
                   </div>
@@ -204,7 +204,7 @@ export function PersonAccessPanel({ externalId }: { externalId: string }) {
         </FormActions>
       ) : (
         <p className="field__hint">
-          Changing who may go where is a manager action. You can read the rules.
+          Changing who is allowed where is a manager action. You can read the rules.
         </p>
       )}
 
@@ -316,7 +316,7 @@ function GrantAccessDialog({
         ends_at: values.ends_at ? new Date(`${values.ends_at}T23:59:59.999`).toISOString() : undefined,
       })
       notifications.success(
-        values.effect === 'DENY' ? 'Denial added' : 'Access granted',
+        values.effect === 'DENY' ? 'Keep-out rule added' : 'Access granted',
       )
       onClose()
     },
@@ -329,7 +329,7 @@ function GrantAccessDialog({
     <Dialog
       open={open}
       title="Grant access"
-      description="One rule, at one scope. Add more rules for more places."
+      description="One rule for one place. Add another rule for another place."
       dismissible={!form.submitting}
       onClose={onClose}
       size="wide"
@@ -383,19 +383,26 @@ function GrantAccessDialog({
           />
         ) : null}
 
+        {/*
+          "LET IN OR KEEP OUT", NOT "EFFECT". The values are still ALLOW and
+          DENY and the API sees exactly what it did; the words are the ones a
+          person uses about a colleague and a gate. The one thing about a
+          keep-out rule that is not obvious -- that it wins over every let-in,
+          including a company-wide one -- is said where the choice is made.
+        */}
         <SelectField
-          label="Effect"
+          label="Let in or keep out"
           required
           value={form.values.effect}
           onChange={(value) => form.setValue('effect', value as PermissionEffect)}
           disabled={form.submitting}
           options={[
-            { value: 'ALLOW', label: 'Allow', description: 'Let them in here.' },
+            { value: 'ALLOW', label: EFFECT_LABELS.ALLOW, description: 'They are allowed in here.' },
             {
               value: 'DENY',
-              label: 'Deny',
+              label: EFFECT_LABELS.DENY,
               description:
-                'Keep them out here. A deny beats EVERY allow at every scope, including a company-wide grant.',
+                'Keep out always wins, even if another rule lets them in — including a rule for everywhere.',
             },
           ]}
         />
@@ -408,8 +415,8 @@ function GrantAccessDialog({
           disabled={form.submitting}
           hint={
             <>
-              Leave blank for any time of day. Schedules are shared and reusable —
-              manage them under <Link to="/access/schedules">Schedules</Link>.
+              Leave blank for any time of day. Schedules are set up under{' '}
+              <Link to="/access/schedules">Schedules</Link>.
             </>
           }
           options={(schedules.data?.schedules ?? []).map((schedule) => ({
@@ -419,55 +426,77 @@ function GrantAccessDialog({
           }))}
         />
 
-        <SelectField
-          label="Only for one feature"
-          placeholder="Any feature the terminal serves"
-          value={form.values.application}
-          onChange={(value) => form.setValue('application', value)}
-          disabled={form.submitting}
-          hint="Blank means this rule applies to whatever the terminal is doing, which is what most rules want."
-          /*
-            THE FEATURE'S NAME, NOT ITS CODE. This select offered the raw
-            platform code as its own label, so an operator narrowing a rule
-            picked between "ACCESS_CONTROL" and "VISITOR_MANAGEMENT" -- the two
-            values printed exactly as the device protocol stores them, on the
-            screen where somebody decides who gets through a door.
+        {/*
+          --- more options ----------------------------------------------------
 
-            `describeApplication` is the registry, which is where every other
-            surface in the console gets these names, and it never returns
-            undefined -- a code this build predates is humanised rather than
-            dropped, so the option still exists and can still be chosen.
-          */
-          options={(session?.applications ?? []).map((application) => ({
-            value: application.code,
-            label: describeApplication(application.code).label,
-          }))}
-        />
+          THE FEATURE LIMIT AND THE DATE RANGE, FOLDED. Both are real and both
+          stay exactly as they were -- same fields, same values sent, same
+          validation -- but "let this person in at the front gate" is what most
+          rules are, and it needs neither. Shown by default they made a
+          seven-field form of a two-field decision. The summary names what is
+          inside and the defaults, so nobody has to open it to learn that
+          leaving it closed means "any feature, starting now, with no end".
+        */}
+        <details className="disclosure">
+          <summary className="disclosure__summary">
+            <span className="disclosure__summary-label">More options</span>
+            <span className="disclosure__summary-note">
+              feature limit, first and last day — usually left blank
+            </span>
+          </summary>
 
-        <div className="filter-grid">
-          <TextField
-            label="Valid from"
-            type="date"
-            value={form.values.starts_at}
-            onChange={(value) => form.setValue('starts_at', value)}
-            disabled={form.submitting}
-            hint="Optional. Blank means immediately."
-          />
-          <TextField
-            label="Valid until"
-            type="date"
-            value={form.values.ends_at}
-            error={form.errors.ends_at}
-            onChange={(value) => form.setValue('ends_at', value)}
-            onBlur={() => form.touch('ends_at')}
-            disabled={form.submitting}
-            hint="Optional, and INCLUSIVE — the rule lasts to the end of this day."
-          />
-        </div>
+          <div className="disclosure__body disclosure__body--stretch">
+            <SelectField
+              label="Limit to a feature"
+              placeholder="Any feature"
+              value={form.values.application}
+              onChange={(value) => form.setValue('application', value)}
+              disabled={form.submitting}
+              hint="Usually leave blank: the rule then applies to whatever the terminal is doing."
+              /*
+                THE FEATURE'S NAME, NOT ITS CODE. This select offered the raw
+                platform code as its own label, so an operator narrowing a rule
+                picked between "ACCESS_CONTROL" and "VISITOR_MANAGEMENT" -- the two
+                values printed exactly as the device protocol stores them, on the
+                screen where somebody decides who gets through a door.
+
+                `describeApplication` is the registry, which is where every other
+                surface in the console gets these names, and it never returns
+                undefined -- a code this build predates is humanised rather than
+                dropped, so the option still exists and can still be chosen.
+              */
+              options={(session?.applications ?? []).map((application) => ({
+                value: application.code,
+                label: describeApplication(application.code).label,
+              }))}
+            />
+
+            <div className="filter-grid">
+              <TextField
+                label="First day"
+                type="date"
+                value={form.values.starts_at}
+                onChange={(value) => form.setValue('starts_at', value)}
+                disabled={form.submitting}
+                hint="Leave blank to start now."
+              />
+              <TextField
+                label="Last day"
+                type="date"
+                value={form.values.ends_at}
+                error={form.errors.ends_at}
+                onChange={(value) => form.setValue('ends_at', value)}
+                onBlur={() => form.touch('ends_at')}
+                disabled={form.submitting}
+                hint="Includes this whole day. Leave blank for no end."
+              />
+            </div>
+          </div>
+        </details>
 
         {scope === 'COMPANY' ? (
           <InfoNote tone="warning" title="This covers terminals that do not exist yet">
-            A company-wide rule applies to every terminal you have and every one
+            A rule for everywhere applies to every terminal you have and every one
             installed later. That is often what somebody wants for staff, and
             rarely what they want for a visitor.
           </InfoNote>
@@ -491,7 +520,7 @@ function GrantAccessDialog({
             {form.submitting
               ? 'Saving…'
               : form.values.effect === 'DENY'
-                ? 'Add denial'
+                ? 'Add keep-out rule'
                 : 'Grant access'}
           </button>
         </FormActions>
@@ -523,7 +552,7 @@ function RevokeAccessDialog({
   return (
     <ConfirmDialog
       open={open}
-      title={denial ? 'Remove this denial?' : 'Remove this access?'}
+      title={denial ? 'Remove this keep-out rule?' : 'Remove this access?'}
       consequence={
         denial ? (
           <>
@@ -545,10 +574,10 @@ function RevokeAccessDialog({
           bounded by its site&apos;s offline policy.
         </>
       }
-      confirmLabel={denial ? 'Remove denial' : 'Remove access'}
+      confirmLabel={denial ? 'Remove keep-out rule' : 'Remove access'}
       onConfirm={async () => {
         await revoke.mutateAsync(permission.id)
-        notifications.success(denial ? 'Denial removed' : 'Access removed')
+        notifications.success(denial ? 'Keep-out rule removed' : 'Access removed')
       }}
       onClose={onClose}
     />

@@ -351,12 +351,6 @@ export function DashboardPage() {
             )}
           </section>
 
-          {/* --- E · the door log ------------------------------------------ */}
-          <RecentActivity query={recent} scopedToOneSite={scopedToOneSite} />
-        </div>
-
-        {/* --- the supporting rail ------------------------------------------ */}
-        <div className="dash__lane">
           {/* --- D · today ------------------------------------------------- */}
           <TodayAtTheDoor
             total={todayAll.data?.total}
@@ -371,6 +365,12 @@ export function DashboardPage() {
             }}
           />
 
+          {/* --- E · the door log ------------------------------------------ */}
+          <RecentActivity query={recent} scopedToOneSite={scopedToOneSite} />
+        </div>
+
+        {/* --- the supporting rail ------------------------------------------ */}
+        <div className="dash__lane">
           {/* --- F · sites -------------------------------------------------- */}
           <SiteSpread
             rows={siteDistribution(sites.data?.sites ?? [], terminals.data?.terminals ?? [])}
@@ -382,12 +382,71 @@ export function DashboardPage() {
             }}
           />
 
-          {/* --- G · firmware ----------------------------------------------- */}
-          <FirmwareStanding
+          {/*
+            --- G · system: software, features, the audit trail ---------------
+
+            ONE COLLAPSED PANEL FOR THE THREE THINGS NOBODY OPENS THE OVERVIEW
+            FOR. Firmware standing, the enabled features and the operator trail
+            are all real, all still here and all still derived from the same
+            data -- but they describe the installation, not the day, and they
+            were drawn with the same weight as "is anything broken". A viewer
+            saw a Firmware panel they could act on nowhere and a Features panel
+            they could change nowhere. Folded, the page reads: attention, the
+            numbers, health, today, the log, the sites -- and then, for whoever
+            wants it, the system.
+          */}
+          <SystemPanel
             terminals={scopedTerminals}
             isPending={terminals.isPending}
             error={terminals.error}
             onRetry={() => void terminals.refetch()}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The installation, behind one disclosure.
+ *
+ * The three sections keep their own headings and regions so each is still
+ * addressable -- by a screen reader's landmark list and by the tests -- and
+ * nothing inside them changed. The summary says what is folded so the panel
+ * is not a word to press to find out.
+ */
+function SystemPanel({
+  terminals,
+  isPending,
+  error,
+  onRetry,
+}: {
+  terminals: Parameters<typeof firmwareCompliance>[0]
+  isPending: boolean
+  error: unknown
+  onRetry: () => void
+}) {
+  const session = useAuthenticatedSession()
+  const mayViewAudit = can(session, 'viewAudit')
+
+  return (
+    <section className="panel" aria-labelledby="dashboard-system-title">
+      <details className="disclosure">
+        <summary className="disclosure__summary" id="dashboard-system-title">
+          <span className="disclosure__summary-label">System</span>
+          <span className="disclosure__summary-note">
+            {mayViewAudit
+              ? 'terminal software, features, recent changes'
+              : 'terminal software and features'}
+          </span>
+        </summary>
+
+        <div className="disclosure__body disclosure__body--stretch">
+          <FirmwareStanding
+            terminals={terminals}
+            isPending={isPending}
+            error={error}
+            onRetry={onRetry}
             mayReachCatalogue={can(session, 'manageFirmware')}
           />
 
@@ -407,21 +466,10 @@ export function DashboardPage() {
             violation; a call gated by `enabled` would leave a permanently empty
             query in the cache.
           */}
-          {can(session, 'viewAudit') ? <RecentChanges /> : null}
+          {mayViewAudit ? <RecentChanges /> : null}
         </div>
-      </div>
-
-      {/*
-        --- H · features and the audit trail -----------------------------
-
-        THESE USED TO SIT IN A THIRD ROW BENEATH BOTH LANES, and that row was
-        the reason the page had a hole in it: the left lane runs to the bottom
-        of the door log while the right lane ended at Firmware, leaving roughly
-        a third of a screen of empty right column before the row began. Moving
-        them into the right lane closes the gap with content that was already
-        on the page and shortens it by a full row.
-      */}
-    </div>
+      </details>
+    </section>
   )
 }
 
@@ -479,11 +527,11 @@ function EnabledFeatures() {
   const session = useAuthenticatedSession()
 
   return (
-    <section className="panel" aria-labelledby="dashboard-features-heading">
+    <section className="panel panel--nested" aria-labelledby="dashboard-features-heading">
       <div className="panel__header panel__header--split">
-        <h2 className="panel__title" id="dashboard-features-heading">
+        <h3 className="panel__title" id="dashboard-features-heading">
           Features
-        </h2>
+        </h3>
         {can(session, 'manageOperators') ? (
           <Link to="/settings/applications" className="panel__link">
             Manage
@@ -555,6 +603,12 @@ function Attention({ items }: { items: AttentionItem[] }) {
             <div>
               <p className="attention__title">{item.title}</p>
               <p className="attention__detail">{item.detail}</p>
+              {item.more ? (
+                <details className="attention__more">
+                  <summary>Learn more</summary>
+                  <p className="attention__detail">{item.more}</p>
+                </details>
+              ) : null}
             </div>
             {item.href && (!item.requiresRole || roleAtLeast(session.role, item.requiresRole)) ? (
               <Link
@@ -670,7 +724,7 @@ function FleetFollowUps({
       <li className="follow-up">
         <span className="follow-up__count">{outdated}</span>
         <span className="follow-up__label">
-          behind on firmware
+          with a software update waiting
           <span className="follow-up__detail">
             Running older software than the version you have made current.
           </span>
@@ -853,11 +907,13 @@ function FirmwareStanding({
   const fleet = fleetStanding(terminals)
 
   return (
-    <section className="panel" aria-labelledby="dashboard-firmware-heading">
+    <section className="panel panel--nested" aria-labelledby="dashboard-firmware-heading">
       <div className="panel__header panel__header--split">
-        <h2 className="panel__title" id="dashboard-firmware-heading">
-          Firmware
-        </h2>
+        {/* "Terminal software": the customer's word. The state, the segments
+            and the link are unchanged. */}
+        <h3 className="panel__title" id="dashboard-firmware-heading">
+          Terminal software
+        </h3>
         {/*
           "All versions", not "Catalogue". The word the destination uses for
           itself, and the one the console stopped showing customers -- a link
@@ -877,8 +933,7 @@ function FirmwareStanding({
         <LoadingState label="Loading firmware standing…" />
       ) : standing.total === 0 ? (
         <p className="field__hint">
-          Nothing to measure yet — firmware standing appears once a terminal has
-          been registered.
+          Nothing to measure yet — this appears once a terminal has been registered.
         </p>
       ) : (
         <>
@@ -1067,11 +1122,11 @@ function RecentChanges() {
   const audit = useAuditEvents({ limit: RECENT_CHANGE_LIMIT })
 
   return (
-    <section className="panel" aria-labelledby="dashboard-changes-heading">
+    <section className="panel panel--nested" aria-labelledby="dashboard-changes-heading">
       <div className="panel__header panel__header--split">
-        <h2 className="panel__title" id="dashboard-changes-heading">
+        <h3 className="panel__title" id="dashboard-changes-heading">
           Recent changes here
-        </h2>
+        </h3>
         <Link to="/activity" className="panel__link">
           Full trail
         </Link>

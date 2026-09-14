@@ -284,6 +284,22 @@ async function contrastOf(page, locator) {
  * Each is hovered and measured; a label that cannot be read under the pointer
  * is a failure, not a note.
  */
+/**
+ * Opens "More actions" on a terminal page.
+ *
+ * THE DESTRUCTIVE CONTROLS SIT BEHIND A CLOSED DISCLOSURE NOW. Revoke, Retire,
+ * Release, Move and Resync are folded under "More actions" so the first screen
+ * answers "is it working" without them -- and a closed <details> gives its
+ * contents no box, so a sweep that wants to hover or press one has to open it
+ * first, exactly as an operator does. Nothing about the buttons changed.
+ */
+async function openMoreActions(page) {
+  const summary = page.locator('summary.disclosure__summary', { hasText: /^More actions/ })
+  if ((await summary.count()) === 0) return
+  const open = await summary.first().evaluate((node) => node.parentElement?.open ?? false)
+  if (!open) await summary.first().click()
+}
+
 async function checkDangerHover(page, viewportName, baseUrl) {
   for (const colorScheme of ['light', 'dark']) {
     await page.emulateMedia({ colorScheme })
@@ -301,6 +317,7 @@ async function checkDangerHover(page, viewportName, baseUrl) {
     }
 
     await page.goto(`${baseUrl}/terminals/AT-0001`, { waitUntil: 'networkidle' })
+    await openMoreActions(page)
     for (const name of ['Revoke', 'Retire', 'Release']) {
       await hoverAndMeasure(page.locator('.lifecycle button.button--danger', { hasText: new RegExp(`^${name}$`) }), `the ${name} button`)
     }
@@ -513,6 +530,7 @@ async function main() {
       // and the only `aria-modal` in the product, and none of it is rendered
       // until something is opened.
       await page.goto(`${site.url}/terminals/AT-0001`, { waitUntil: 'networkidle' })
+      await openMoreActions(page)
       const revoke = page.locator('button', { hasText: /^Revoke$/ }).first()
       if ((await revoke.count()) > 0) {
         await revoke.click()
