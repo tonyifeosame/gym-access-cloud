@@ -439,7 +439,7 @@ function GrantAccessDialog({
         */}
         <details className="disclosure">
           <summary className="disclosure__summary">
-            More options
+            <span className="disclosure__summary-label">More options</span>
             <span className="disclosure__summary-note">
               feature limit, first and last day — usually left blank
             </span>

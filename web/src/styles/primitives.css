@@ -1173,6 +1173,16 @@ textarea.field__input {
   font-weight: 400;
   font-size: var(--font-size-xs);
   color: var(--text-muted);
+  /* The note is what gives way on a narrow screen: it wraps, the label does
+     not. Without this the summary's anonymous flex items shared the width
+     and "More options" broke in two beside a one-line note at 390px. */
+  flex: 1 1 12ch;
+  min-width: 0;
+}
+
+.disclosure__summary-label {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* The overview's disclosure holds nested panels, so its summary is the only

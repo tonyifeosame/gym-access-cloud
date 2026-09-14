@@ -433,7 +433,7 @@ function SystemPanel({
     <section className="panel" aria-labelledby="dashboard-system-title">
       <details className="disclosure">
         <summary className="disclosure__summary" id="dashboard-system-title">
-          System
+          <span className="disclosure__summary-label">System</span>
           <span className="disclosure__summary-note">
             {mayViewAudit
               ? 'terminal software, features, recent changes'
