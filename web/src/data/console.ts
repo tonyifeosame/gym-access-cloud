@@ -195,6 +195,7 @@ export function useCreateSite(): UseMutationResult<CreateSiteResponse, Error, Cr
       // that showed it and be readable by any component with the key factory.
       queryClient.setQueryData(keys.sites.detail(result.site.id), result.site)
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -239,6 +240,7 @@ export function useUpdateSite(
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
       void queryClient.invalidateQueries({ queryKey: keys.sites.settings(siteId) })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -266,6 +268,7 @@ export function useRetireSite(): UseMutationResult<RetireSiteResponse, Error, st
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -289,6 +292,7 @@ export function useRotateSiteKey(
     mutationFn: () => endpoints.rotateSiteKey(siteId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -315,7 +319,7 @@ export function useIssueClaimCode(
   return useMutation({
     mutationFn: (body: ClaimCodeRequest) => endpoints.issueClaimCode(siteId, body),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -340,6 +344,7 @@ export function useUpdateSiteSettings(
     onSuccess: (updated) => {
       queryClient.setQueryData(keys.sites.settings(siteId), updated)
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -394,6 +399,7 @@ export function useUpdateTerminalMode(
     onSuccess: (detail) => {
       queryClient.setQueryData(keys.terminals.detail(serial), detail)
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -401,6 +407,30 @@ export function useUpdateTerminalMode(
 // ---------------------------------------------------------------------------
 // Terminal lifecycle
 // ---------------------------------------------------------------------------
+
+/**
+ * The server wrote an audit entry for what just succeeded.
+ *
+ * ONE CALL, SO THE RULE HAS ONE HOME. Every console write the server records
+ * -- `auditVocabulary.ts` lists the actions -- must refresh the trail, because
+ * the Activity page and the overview's "Recent changes" panel read it and
+ * nothing else refetches them: no interval, no refetch-on-focus, and a 30 s
+ * staleTime. Fifteen hooks had simply not said so, and an operator who added a
+ * person and opened Activity within half a minute did not see it.
+ *
+ * Invalidation, not a refetch: an observer that is mounted refreshes now, one
+ * that is not is marked stale for when its screen next opens. Nothing here
+ * runs on a failed or cancelled action -- it is called from `onSuccess` only.
+ *
+ * NOT called from `useEvaluateAccess`, and from nothing else: the preview
+ * records nothing (handlers/authorization.go, ConsoleEvaluateAccess), so
+ * refreshing the trail after it would fetch the same rows again for nothing.
+ * Every other console write -- including starting or cancelling an enrolment
+ * and adopting or rejecting a pending terminal -- is recorded, and calls this.
+ */
+function recordedInAudit(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+}
 
 /**
  * What every lifecycle mutation invalidates, in one place.
@@ -443,7 +473,7 @@ export function useSetTerminalState(
     mutationFn: (body: TerminalStateRequest) => endpoints.setTerminalState(serial, body),
     onSuccess: (result) => {
       settleTerminal(queryClient, serial, result.terminal)
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -465,7 +495,7 @@ export function useRevokeTerminalCredential(
     onSuccess: (result) => {
       settleTerminal(queryClient, serial, result.terminal)
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -487,7 +517,7 @@ export function useRetireTerminal(
       queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -535,7 +565,7 @@ function settleRelease(queryClient: QueryClient, serial: string): void {
   void queryClient.invalidateQueries({ queryKey: keys.terminals.release(serial) })
   void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
   void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
-  void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+  recordedInAudit(queryClient)
 }
 
 export function useOrderTerminalRelease(
@@ -576,7 +606,7 @@ export function forgetReleasedTerminal(queryClient: QueryClient, serial: string)
   queryClient.removeQueries({ queryKey: keys.terminals.release(serial) })
   void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
   void queryClient.invalidateQueries({ queryKey: keys.sites.all })
-  void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+  recordedInAudit(queryClient)
 }
 
 /**
@@ -603,7 +633,7 @@ export function useMoveTerminal(
     onSuccess: (result) => {
       settleTerminal(queryClient, serial, result.terminal)
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -623,7 +653,7 @@ export function useResyncTerminal(
     mutationFn: () => endpoints.resyncTerminal(serial),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -691,7 +721,7 @@ export function useRequestWifiRecovery(
     onSuccess: (result) => {
       queryClient.setQueryData(keys.terminals.wifiRecovery(serial), result)
       void queryClient.invalidateQueries({ queryKey: keys.terminals.detail(serial) })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -747,7 +777,7 @@ export function useAdoptTerminal(): UseMutationResult<
     onSuccess: (pending) => {
       queryClient.setQueryData(keys.pendingTerminals.detail(pending.id), pending)
       void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -771,7 +801,10 @@ export function useApproveTerminal(
       queryClient.setQueryData(keys.pendingTerminals.detail(id), pending)
       void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      // The site it was approved into now counts one more terminal, on the
+      // sites list and on its own page.
+      void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -786,7 +819,7 @@ export function useRejectTerminal(
     onSuccess: () => {
       queryClient.removeQueries({ queryKey: keys.pendingTerminals.detail(id) })
       void queryClient.invalidateQueries({ queryKey: keys.pendingTerminals.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -851,6 +884,7 @@ export function useCreatePerson(): UseMutationResult<Person, Error, PersonReques
       // have no access rule, which is what the overview's setup guidance
       // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -940,6 +974,7 @@ export function useStartEnrollment(
         enrollment,
       })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -958,6 +993,7 @@ export function useCancelEnrollment(
         enrollment,
       })
       void queryClient.invalidateQueries({ queryKey: keys.people.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -975,6 +1011,7 @@ export function useUpdatePerson(
       // have no access rule, which is what the overview's setup guidance
       // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1001,6 +1038,12 @@ export function useDeletePerson(): UseMutationResult<void, Error, string> {
       // have no access rule, which is what the overview's setup guidance
       // reads. Cheap to invalidate and wrong to leave stale.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
+      // Their rules went with them: a schedule's "N rules" count is now lower,
+      // and the cached rule list for this ID number must not survive to be
+      // shown against somebody added later under the same number.
+      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
+      queryClient.removeQueries({ queryKey: keys.permissions.forPerson(externalId) })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1055,7 +1098,7 @@ export function useCreateOperator(): UseMutationResult<
     mutationFn: (body: CreateOperatorRequest) => endpoints.createOperator(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.operators.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1078,7 +1121,7 @@ export function useInviteOperator(
     mutationFn: () => endpoints.inviteOperator(operatorId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.operators.detail(operatorId) })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1092,7 +1135,7 @@ export function useResetOperatorPassword(
     mutationFn: () => endpoints.resetOperatorPassword(operatorId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.operators.detail(operatorId) })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1115,6 +1158,7 @@ export function useUpdateOperator(
     onSuccess: (operator) => {
       queryClient.setQueryData(keys.operators.detail(operatorId), operator)
       void queryClient.invalidateQueries({ queryKey: keys.operators.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1135,6 +1179,7 @@ export function useSetOperatorSites(
     onSuccess: (result) => {
       queryClient.setQueryData(keys.operators.sites(operatorId), result)
       void queryClient.invalidateQueries({ queryKey: keys.operators.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1147,6 +1192,7 @@ export function useDeleteOperator(): UseMutationResult<void, Error, string> {
       queryClient.removeQueries({ queryKey: keys.operators.detail(operatorId) })
       queryClient.removeQueries({ queryKey: keys.operators.sites(operatorId) })
       void queryClient.invalidateQueries({ queryKey: keys.operators.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1186,6 +1232,7 @@ export function useUpdateApplication(): UseMutationResult<
       void queryClient.invalidateQueries({ queryKey: keys.applications.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1222,7 +1269,7 @@ export function useGrantPermission(
       void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
       // A schedule's permission_count has just changed.
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
       // And so has how many people have no access at all, which is what the
       // overview's setup guidance is built on. Without this, a customer who
       // grants the last outstanding rule still sees "nobody can get in yet"
@@ -1241,7 +1288,7 @@ export function useRevokePermission(
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.permissions.forPerson(externalId) })
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
       // Revoking the last rule for somebody puts them back into the count.
       void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
     },
@@ -1262,7 +1309,7 @@ export function useCreateSchedule(): UseMutationResult<Schedule, Error, Schedule
     mutationFn: (body: ScheduleRequest) => endpoints.createSchedule(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1284,7 +1331,7 @@ export function useUpdateSchedule(
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
       void queryClient.invalidateQueries({ queryKey: keys.permissions.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1296,7 +1343,7 @@ export function useDeleteSchedule(): UseMutationResult<{ deleted: boolean }, Err
     mutationFn: (scheduleId: string) => endpoints.deleteSchedule(scheduleId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1382,7 +1429,7 @@ export function useCreateFirmware(): UseMutationResult<
     mutationFn: (body: CreateFirmwareRequest) => endpoints.createFirmware(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.firmware.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1407,7 +1454,7 @@ export function useSetCurrentFirmware(): UseMutationResult<FirmwareVersion, Erro
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.firmware.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1464,7 +1511,7 @@ export function useIssueAPICredential(): UseMutationResult<
     gcTime: 0,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1482,7 +1529,7 @@ export function useRotateAPICredential(): UseMutationResult<
     onSuccess: () => {
       // Both the old row (now superseded) and the new one changed.
       void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }
@@ -1497,7 +1544,7 @@ export function useRevokeAPICredential(): UseMutationResult<
     mutationFn: ({ credentialId, body }) => endpoints.revokeAPICredential(credentialId, body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.apiCredentials.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+      recordedInAudit(queryClient)
     },
   })
 }

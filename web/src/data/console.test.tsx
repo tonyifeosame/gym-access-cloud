@@ -7,7 +7,10 @@ import { invitationOf, operatorOf } from '../api/types'
 import {
   makeApplication,
   makeOperatorAccount,
+  makePendingTerminal,
+  makePermission,
   makePerson,
+  makeSchedule,
   makeSession,
   makeSite,
   makeTerminal,
@@ -15,14 +18,22 @@ import {
   SITE_B,
 } from '../test/fixtures'
 import { makeTestQueryClient, queryWrapper } from '../test/render'
-import { failNext, resetServerState, resetTerminalModes, seed, state } from '../test/server'
+import { failNext, resetServerState, resetTerminalModes, seed, seedAnnouncedTerminal, state } from '../test/server'
 import {
+  useAdoptTerminal,
   useApplications,
+  useApproveTerminal,
+  useAuditEvents,
+  useCancelEnrollment,
   useCreateOperator,
   useCreatePerson,
   useDeletePerson,
+  useEvaluateAccess,
   usePeople,
+  useRejectTerminal,
+  useSchedules,
   useSetOperatorSites,
+  useStartEnrollment,
   useSites,
   useTerminal,
   useTerminalSummary,
@@ -584,5 +595,180 @@ describe('nothing secret ever reaches the browser', () => {
     for (const request of state.requests) {
       expect(request.headers.get('X-API-Key')).toBeNull()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// After a write, every screen that shows its effect refreshes on its own
+// ---------------------------------------------------------------------------
+
+describe('a successful write refreshes what it changed, without a page reload', () => {
+  /*
+   * THE MECHANISM UNDER TEST IS INVALIDATION, and the proof is a refetch: a
+   * reader hook is mounted, its first request is counted, the write happens,
+   * and the reader is seen to ask the server again. Asserting on
+   * `isInvalidated` alone would pass for an entry nobody is watching; a
+   * mounted observer that fetches again is the thing an operator sees.
+   */
+  function requestsTo(path: string): number {
+    return state.requests.filter(
+      (request) => request.method === 'GET' && request.url.includes(path),
+    ).length
+  }
+
+  async function mounted<T>(hook: () => { isSuccess: boolean } & T, wrapper: ReturnType<typeof queryWrapper>) {
+    const rendered = renderHook(hook, { wrapper })
+    await waitFor(() => expect(rendered.result.current.isSuccess).toBe(true))
+    return rendered
+  }
+
+  it('refreshes the audit trail after the writes the server records', async () => {
+    /*
+      THE FIFTEEN THAT DID NOT. The server audits creating a person, changing a
+      site's settings, pointing a terminal at a feature and toggling a
+      capability -- and those hooks refreshed everything except the trail, so
+      an operator who did one and opened Activity within the trail's 30 s
+      staleTime read a page that omitted what they had just done. Four
+      representatives, one per family; `recordedInAudit` is the single call
+      every audited write now makes.
+    */
+    signIn(makeSession({ role: 'OWNER', applications: [{ code: 'ATTENDANCE', settings: {} }] }))
+    seed({ sites: SITES, terminals: TERMINALS, applications: [makeApplication()] })
+    const client = makeTestQueryClient({ gcTime: 60_000 })
+    const wrapper = queryWrapper(client)
+
+    await mounted(() => useAuditEvents(), wrapper)
+    let seen = requestsTo('/console/audit')
+    expect(seen).toBe(1)
+
+    const person = renderHook(() => useCreatePerson(), { wrapper })
+    await person.result.current.mutateAsync({ external_id: 'P-AUDIT', full_name: 'Audited Person' })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const settings = renderHook(() => useUpdateSiteSettings(SITE_A.site_id), { wrapper })
+    await settings.result.current.mutateAsync({ relay_hold_ms: 1500, sync_interval_seconds: 120 })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const mode = renderHook(() => useUpdateTerminalMode('AT-0001'), { wrapper })
+    await mode.result.current.mutateAsync({ application_mode: 'ATTENDANCE' })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const feature = renderHook(() => useUpdateApplication(), { wrapper })
+    await feature.result.current.mutateAsync({ code: 'ATTENDANCE', body: { enabled: false } })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+  })
+
+  it('refreshes the trail after enrolment starts and stops, and pending-terminal adopt and reject', async () => {
+    /*
+      The four writes the first pass left out. Each is recorded by the server
+      (handlers/console_enrollment.go, handlers/announcements.go), and each
+      is exactly the kind of action somebody then goes to Activity to check.
+    */
+    signIn(makeSession({ role: 'ADMIN' }))
+    seed({
+      sites: SITES,
+      terminals: TERMINALS,
+      people: [makePerson({ external_id: 'P-0001' })],
+      pendingTerminals: [makePendingTerminal({ id: 'announcement-reject', state: 'ADOPTED' })],
+    })
+    seedAnnouncedTerminal('K7M2-P4QX', makePendingTerminal({ id: 'announcement-adopt' }))
+    const client = makeTestQueryClient({ gcTime: 60_000 })
+    const wrapper = queryWrapper(client)
+
+    await mounted(() => useAuditEvents(), wrapper)
+    let seen = requestsTo('/console/audit')
+
+    const start = renderHook(() => useStartEnrollment('P-0001'), { wrapper })
+    await start.result.current.mutateAsync({ serial: 'AT-0001', body: { external_id: 'P-0001' } })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const cancel = renderHook(() => useCancelEnrollment('P-0001'), { wrapper })
+    await cancel.result.current.mutateAsync()
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const adopt = renderHook(() => useAdoptTerminal(), { wrapper })
+    await adopt.result.current.mutateAsync({ pairing_code: 'K7M2-P4QX' })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+    seen += 1
+
+    const reject = renderHook(() => useRejectTerminal('announcement-reject'), { wrapper })
+    await reject.result.current.mutateAsync({ reason: 'Not ours' })
+    await waitFor(() => expect(requestsTo('/console/audit')).toBe(seen + 1))
+  })
+
+  it('leaves the trail alone after an access preview, which records nothing', async () => {
+    signIn()
+    seed({ sites: SITES, terminals: TERMINALS, people: [makePerson({ external_id: 'P-0001' })] })
+    const client = makeTestQueryClient({ gcTime: 60_000 })
+    const wrapper = queryWrapper(client)
+
+    await mounted(() => useAuditEvents(), wrapper)
+    const seen = requestsTo('/console/audit')
+
+    const preview = renderHook(() => useEvaluateAccess('AT-0001'), { wrapper })
+    await preview.result.current.mutateAsync({ external_id: 'P-0001' })
+
+    // Nothing to wait for: the assertion is that no refetch is queued.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(requestsTo('/console/audit')).toBe(seen)
+  })
+
+  it('refreshes the sites when a terminal is approved into one', async () => {
+    // `Site.terminal_count` is what the sites list and the site page show,
+    // and approval is the one way a terminal arrives at a site that did not
+    // refresh them -- retire, move and release already did.
+    signIn(makeSession({ role: 'ADMIN' }))
+    seed({
+      sites: SITES,
+      terminals: TERMINALS,
+      pendingTerminals: [makePendingTerminal({ id: 'announcement-1', state: 'ADOPTED' })],
+    })
+    const client = makeTestQueryClient({ gcTime: 60_000 })
+    const wrapper = queryWrapper(client)
+
+    await mounted(() => useSites(), wrapper)
+    const seen = requestsTo('/console/sites')
+
+    const approve = renderHook(() => useApproveTerminal('announcement-1'), { wrapper })
+    await approve.result.current.mutateAsync({ site_id: SITE_A.site_id, device_name: 'Approved' })
+
+    await waitFor(() => expect(requestsTo('/console/sites')).toBe(seen + 1))
+  })
+
+  it('drops a removed person’s rules and refreshes schedule counts', async () => {
+    /*
+      Removing somebody removes their rules with them. Two readers show that:
+      the Schedules page counts rules per schedule, and the person page reads
+      the rules by ID number -- an entry that outlived the person would be
+      shown, for the trail's 30 s, against whoever is next added under the
+      same number.
+    */
+    signIn()
+    seed({
+      sites: SITES,
+      terminals: TERMINALS,
+      people: [makePerson({ external_id: 'P-GONE' })],
+      schedules: [makeSchedule({ permission_count: 1 })],
+    })
+    const client = makeTestQueryClient({ gcTime: 60_000 })
+    const wrapper = queryWrapper(client)
+    client.setQueryData(keys.permissions.forPerson('P-GONE'), {
+      count: 1,
+      permissions: [makePermission({ person_id: 'P-GONE' })],
+    })
+
+    await mounted(() => useSchedules(), wrapper)
+    const seen = requestsTo('/console/schedules')
+
+    const remove = renderHook(() => useDeletePerson(), { wrapper })
+    await remove.result.current.mutateAsync('P-GONE')
+
+    expect(client.getQueryData(keys.permissions.forPerson('P-GONE'))).toBeUndefined()
+    await waitFor(() => expect(requestsTo('/console/schedules')).toBe(seen + 1))
   })
 })
