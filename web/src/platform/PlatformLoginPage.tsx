@@ -3,6 +3,7 @@ import { Link, Navigate } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import { usePlatformSession } from './PlatformSessionProvider'
+import { PasswordInput } from '../components/PasswordInput'
 
 /**
  * Signing in to platform administration.
@@ -77,9 +78,7 @@ export function PlatformLoginPage() {
 
         <label className="field">
           <span className="field__label">Password</span>
-          <input
-            className="field__input"
-            type="password"
+          <PasswordInput
             name="password"
             autoComplete="current-password"
             required

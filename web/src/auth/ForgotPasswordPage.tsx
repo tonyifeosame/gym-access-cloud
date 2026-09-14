@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import * as endpoints from '../api/endpoints'
+import { useAuthProviders } from './providers'
 
 /**
  * "I have forgotten my password."
@@ -19,14 +20,20 @@ import * as endpoints from '../api/endpoints'
  * trouble of refusing to be one. So the confirmation below is rendered on
  * SUCCESS AND ON FAILURE ALIKE, and does not depend on the response at all.
  *
- * AND THE PLATFORM CANNOT ACTUALLY DELIVER ANYTHING YET. There is no
- * transactional email. The server mints a token and writes it to its own
- * operational log, which means a self-service reset completes only if somebody
- * with log access finishes it by hand. Saying so plainly is the only honest
- * option: a page that showed a confident "check your inbox" would be telling
- * every locked-out operator to wait for something that is never coming.
+ * WHETHER THE LINK ARRIVES BY EMAIL DEPENDS ON THE DEPLOYMENT, and the page
+ * asks rather than assumes. /auth/providers says whether this installation has
+ * email delivery configured. Where it has, the confirmation says "check your
+ * inbox" and means it. Where it has not, the server mints a token and writes
+ * it to its own operational log, so a self-service reset completes only if
+ * somebody with log access finishes it by hand -- and the page says THAT
+ * plainly instead, because a confident "check your inbox" on such a deployment
+ * would be telling every locked-out operator to wait for something that is
+ * never coming. Both confirmations are identical for every address.
  */
 export function ForgotPasswordPage() {
+  const providers = useAuthProviders()
+  const emailed = providers.password_reset.email_delivery
+
   const [email, setEmail] = useState('')
   const [submitted, setSubmitted] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -54,6 +61,41 @@ export function ForgotPasswordPage() {
 
     setSubmitting(false)
     setSubmitted(true)
+  }
+
+  if (submitted && emailed) {
+    return (
+      <main className="login">
+        <div className="login__card">
+          <h1 className="login__title">Check your email</h1>
+
+          {/*
+            THE SAME FIRST SENTENCE AS THE OTHER CONFIRMATION, and rendered on
+            success and on failure alike: nothing here varies with whether the
+            address exists, so a stranger typing addresses learns nothing.
+          */}
+          <p className="login__subtitle">
+            If that address belongs to an operator account, a reset has been issued.
+          </p>
+
+          <p className="login__note">
+            The email contains a link that works once and expires. If it does not
+            arrive within a few minutes, check your spam folder, then try again —
+            each request replaces the last link.
+          </p>
+
+          <p className="login__note">
+            If you no longer have access to that mailbox, ask an owner or
+            administrator in your company to issue you a reset link from Operators
+            in their console. If you are the only one, contact AccessLink support.
+          </p>
+
+          <p className="login__note">
+            <Link to="/login">Back to sign in</Link>
+          </p>
+        </div>
+      </main>
+    )
   }
 
   if (submitted) {
@@ -137,7 +179,9 @@ export function ForgotPasswordPage() {
       <form className="login__card" onSubmit={(event) => void onSubmit(event)}>
         <h1 className="login__title">Reset your password</h1>
         <p className="login__subtitle">
-          Enter the address you sign in with and we will issue a reset.
+          {emailed
+            ? 'Enter the address you sign in with and we will email you a link to choose a new one.'
+            : 'Enter the address you sign in with and we will issue a reset.'}
         </p>
 
         {rateLimited !== null ? (

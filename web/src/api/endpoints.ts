@@ -14,6 +14,7 @@ import type {
   ApproveTerminalRequest,
   AuditPage,
   AuditQuery,
+  AuthProviders,
   ClaimCodeRequest,
   ClaimCodeResponse,
   CompanyDetail,
@@ -766,6 +767,14 @@ export function resetOperatorPassword(operatorId: string): Promise<ResetResponse
  * must not branch on the response either, or it would reintroduce in the browser
  * the enumeration oracle the server refuses to be.
  */
+/**
+ * What ways in this deployment offers. UNAUTHENTICATED and static; see the
+ * note on AuthProviders.
+ */
+export function fetchAuthProviders(signal?: AbortSignal): Promise<AuthProviders> {
+  return api.get<AuthProviders>('/api/v1/auth/providers', { signal })
+}
+
 export function requestPasswordReset(email: string): Promise<PasswordResetAcceptedResponse> {
   return api.post<PasswordResetAcceptedResponse>('/api/v1/auth/forgot-password', { email })
 }

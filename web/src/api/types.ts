@@ -1330,6 +1330,29 @@ export interface PasswordResetAcceptedResponse {
   message: string
 }
 
+/**
+ * What ways in this deployment offers, from GET /auth/providers.
+ *
+ * Static and unauthenticated: it varies by deployment, never by who is asking,
+ * so the console reads it once and draws the login screen from it. A console
+ * that showed a Google button on a deployment with no Google configured would
+ * send the operator to a 403; one that said "check your inbox" where no email
+ * is sent would have them wait for a message that is never coming.
+ */
+export interface AuthProviders {
+  password: { enabled: boolean }
+  google: {
+    enabled: boolean
+    /** The API path a browser navigates to; a path, not a URL. */
+    start_path: string
+  }
+  signup: { enabled: boolean }
+  password_reset: {
+    /** True when a forgotten-password request produces an email. */
+    email_delivery: boolean
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Access control
 // ---------------------------------------------------------------------------

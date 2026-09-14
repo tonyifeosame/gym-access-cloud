@@ -2,7 +2,9 @@ import { useState, type FormEvent } from 'react'
 import { Link, Navigate, useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
+import { PasswordInput } from '../components/PasswordInput'
 import { useSession } from '../session/useSession'
+import { describeGoogleOutcome, googleSignInHref, useAuthProviders } from './providers'
 
 /**
  * Sign in.
@@ -20,10 +22,17 @@ import { useSession } from '../session/useSession'
 export function LoginPage() {
   const { status, login } = useSession()
   const [params] = useSearchParams()
+  const providers = useAuthProviders()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  // A Google sign-in that did not complete comes back here with `?error=`, a
+  // stable code from the API. Read once into state so it survives the URL
+  // being cleaned and so a later password failure replaces it rather than
+  // stacking two messages.
+  const [error, setError] = useState<string | null>(() =>
+    describeGoogleOutcome(params.get('error')),
+  )
   const [submitting, setSubmitting] = useState(false)
 
   const next = params.get('next')
@@ -80,9 +89,7 @@ export function LoginPage() {
 
         <label className="field">
           <span className="field__label">Password</span>
-          <input
-            className="field__input"
-            type="password"
+          <PasswordInput
             name="password"
             autoComplete="current-password"
             required
@@ -94,6 +101,26 @@ export function LoginPage() {
         <button className="button button--primary" type="submit" disabled={submitting}>
           {submitting ? 'Signing in…' : 'Sign in'}
         </button>
+
+        {/*
+          SIGN IN WITH GOOGLE, only where the deployment has it configured.
+
+          A LINK, NOT A BUTTON WITH A HANDLER. The flow is a chain of redirects
+          — to Google, back to the API, back here — and only a real navigation
+          carries the session cookie the API sets at the end of it. It leaves
+          the password form exactly as it is: Google is another way to prove
+          who you are to an account that exists, not a replacement for the
+          form, and an operator whose company never set it up never sees this.
+        */}
+        {providers.google.enabled ? (
+          <>
+            <p className="login__divider">or</p>
+            <a className="button login__secondary login__google" href={googleSignInHref(providers, next)}>
+              <GoogleMark />
+              Sign in with Google
+            </a>
+          </>
+        ) : null}
 
         {/*
           Every destination here is unauthenticated by necessity. The redemption
@@ -122,13 +149,33 @@ export function LoginPage() {
           visitor wants. Same control, same size, same rhythm as everything else
           on the card — an alternative, not a competitor.
         */}
-        <p className="login__divider">New to AccessLink?</p>
+        {providers.signup.enabled ? (
+          <>
+            <p className="login__divider">New to AccessLink?</p>
 
-        <Link className="button login__secondary" to="/register">
-          Create an account
-        </Link>
+            <Link className="button login__secondary" to="/register">
+              Create an account
+            </Link>
+          </>
+        ) : null}
       </form>
     </main>
+  )
+}
+
+/*
+  Google's "G", drawn inline so the CSP stays at 'self' and nothing is fetched
+  from a third party on the login screen. Decorative: the link's text is its
+  name.
+*/
+function GoogleMark() {
+  return (
+    <svg className="login__google-mark" aria-hidden="true" width="18" height="18" viewBox="0 0 48 48">
+      <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.8-6.8C35.7 2.5 30.2 0 24 0 14.6 0 6.5 5.4 2.6 13.3l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z" />
+      <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.7 6c4.5-4.2 6.9-10.3 6.9-17.7z" />
+      <path fill="#FBBC05" d="M10.5 28.6A14.5 14.5 0 0 1 9.7 24c0-1.6.3-3.1.8-4.6l-7.9-6.1A24 24 0 0 0 0 24c0 3.9.9 7.5 2.6 10.7l7.9-6.1z" />
+      <path fill="#34A853" d="M24 48c6.2 0 11.5-2 15.3-5.6l-7.7-6c-2.1 1.4-4.7 2.2-7.6 2.2-6.3 0-11.6-4.1-13.5-9.9l-7.9 6.1C6.5 42.6 14.6 48 24 48z" />
+    </svg>
   )
 }
 

@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import * as endpoints from '../api/endpoints'
+import { PasswordInput } from '../components/PasswordInput'
 
 /** Mirrors models.MinPasswordLength. The server is the authority. */
 const MIN_PASSWORD_LENGTH = 12
@@ -153,10 +154,8 @@ export function RedeemPage() {
         */}
         <label className="field" htmlFor="redeem-password">
           <span className="field__label">New password</span>
-          <input
+          <PasswordInput
             id="redeem-password"
-            className="field__input"
-            type="password"
             name="new-password"
             autoComplete="new-password"
             required
@@ -171,9 +170,7 @@ export function RedeemPage() {
 
         <label className="field">
           <span className="field__label">Confirm password</span>
-          <input
-            className="field__input"
-            type="password"
+          <PasswordInput
             name="confirm-password"
             autoComplete="new-password"
             required

@@ -664,6 +664,20 @@ code {
   text-decoration: none;
 }
 
+/* "Sign in with Google": the same outlined control as the other secondary
+ * action, with Google's mark leading the label. The mark is inline SVG, so the
+ * login screen still fetches nothing from a third party. */
+.login__google {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.login__google-mark {
+  flex: 0 0 auto;
+}
+
 /* Small screens. The card already fills the width; what is left is the air
  * around and inside it, which at phone size is the difference between a form
  * that fits above the keyboard and one that does not. */

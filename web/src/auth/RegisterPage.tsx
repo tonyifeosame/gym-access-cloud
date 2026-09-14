@@ -3,6 +3,7 @@ import { Link, Navigate } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import { useSession } from '../session/useSession'
+import { PasswordInput } from '../components/PasswordInput'
 
 /** Mirrors models.MinPasswordLength. The server is the authority. */
 const MIN_PASSWORD_LENGTH = 12
@@ -185,10 +186,8 @@ export function RegisterPage() {
         */}
         <label className="field" htmlFor="register-password">
           <span className="field__label">Password</span>
-          <input
+          <PasswordInput
             id="register-password"
-            className="field__input"
-            type="password"
             name="new-password"
             autoComplete="new-password"
             required
