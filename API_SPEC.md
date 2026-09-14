@@ -298,8 +298,13 @@ curl http://localhost:8080/api/v1/members \
 
 `fingerprint_template` is omitted when empty and included as a string when set.
 
-> **Not paginated.** Returns every member in the company. For a large tenant the
-> dashboard should prefer `GET /members/changes`.
+> **Not paginated by default.** Without `limit`, returns every member in the
+> company — the contract terminals' tooling reads as a complete roster. Passing
+> `?limit={n}` (1–1000) and optionally `?offset={n}` returns that window of the
+> same newest-first ordering, still as a bare array; page until a call returns
+> fewer rows than it asked for. `GET /members/changes` accepts the same two
+> parameters. For a large tenant, prefer one or the other over the unbounded
+> read.
 
 ### `GET /api/v1/members/{member_id}`
 
@@ -416,7 +421,9 @@ way a terminal learns of a removal.
 
 ### `GET /api/v1/members/changes?since={timestamp}`
 
-Members whose `updated_at` is later than `since`, oldest first.
+Members whose `updated_at` is later than `since`, oldest first. Optional
+`limit` (1–1000) and `offset`, as on `GET /members`; without `limit` every
+changed member is returned.
 
 ```bash
 curl "http://localhost:8080/api/v1/members/changes?since=2000-01-01T00:00:00Z" \
@@ -1327,6 +1334,9 @@ one. CSRF is required on every unsafe method.
 |---|---|---|---|
 | `POST` | `/api/v1/auth/login` | none | — |
 | `POST` | `/api/v1/auth/register` | none | — |
+| `GET` | `/api/v1/auth/providers` | none | — |
+| `GET` | `/api/v1/auth/google/start` | none | — |
+| `GET` | `/api/v1/auth/google/callback` | none | — |
 | `GET` | `/api/v1/auth/me` | session | any |
 | `POST` | `/api/v1/auth/logout` | session + CSRF | any |
 | `POST` | `/api/v1/auth/password` | session + CSRF | any |
@@ -1411,7 +1421,7 @@ never had one. Both share the login rate limiter.
 
 | Method | Path | Auth |
 |---|---|---|
-| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists |
+| `POST` | `/api/v1/auth/forgot-password` | none — always 202, whether or not the address exists; emails the link when `EMAIL_PROVIDER` is set, otherwise logs it |
 | `POST` | `/api/v1/auth/redeem` | the single-use token is the whole authorisation |
 
 ### Platform administration routes
@@ -1667,6 +1677,77 @@ transaction; the calling session survives.
 | `400` | new password fails the policy (minimum 12 characters, maximum 72 bytes) |
 | `403` | current password is wrong, or CSRF failed |
 | `415` | body was not `application/json` |
+
+### `GET /api/v1/auth/providers`
+
+Unauthenticated, unlimited and static: which ways in this deployment offers.
+The console reads it once to decide which controls to draw.
+
+```json
+{
+  "password":       {"enabled": true},
+  "google":         {"enabled": false, "start_path": "/api/v1/auth/google/start"},
+  "signup":         {"enabled": true},
+  "password_reset": {"email_delivery": false}
+}
+```
+
+`google.enabled` is true when `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+`GOOGLE_REDIRECT_URL` are all set; `password_reset.email_delivery` when
+`EMAIL_PROVIDER` is. Nothing here varies with who is asking.
+
+### Sign in with Google
+
+`GET /api/v1/auth/google/start?next={path}` and
+`GET /api/v1/auth/google/callback` — **browser navigations, not XHRs**, on the
+login rate limiter. The flow is the OpenID Connect authorization-code flow with
+PKCE, run entirely server-side, and it **ends in the same session `login`
+creates**: `database.CreateSession`, the same cookie, the same CSRF derivation,
+the same `/me` body. Google is a way to prove who somebody is, not a second way
+to be signed in.
+
+```
+browser  GET /auth/google/start?next=/people
+  -> 303 to accounts.google.com; a state cookie is set on the API origin
+browser  signs in at Google
+  -> Google sends the browser to GET /auth/google/callback?code=…&state=…
+  -> code exchanged, ID token verified (RS256 against Google's published keys,
+     issuer, audience, expiry, nonce), operator resolved, session cookie set
+  -> 303 to CONSOLE_URL + next
+```
+
+Which operator the identity is, decided in one transaction:
+
+| Situation | Result |
+|---|---|
+| A live account is already linked to this Google subject | that account signs in; today's email is not consulted |
+| No account is linked, and Google has **verified** the address, and one live account has it | that account is **linked** (`users.google_subject`), audited as `OPERATOR_GOOGLE_LINKED`, and signs in |
+| The address is unverified | refused — nothing linked |
+| The address belongs to an account linked to a **different** Google subject | refused — nothing changed |
+| No account has the address | refused — nothing created. Google sign-in is not signup |
+| The account or its company is disabled | refused, exactly as for a password |
+
+A Google sign-in on an account flagged `must_change_password` (an invitation or
+an administrative reset) **retires that password** — it is replaced with one
+nobody holds, the flag is cleared and the sessions it opened are revoked — so
+the operator is not stopped by a screen asking for a password they do not know.
+They can set one of their own through the reset route.
+
+Every refusal is a `303` to `CONSOLE_URL/login?error=<code>`, with the reason in
+the server log only:
+
+| `error` | Meaning |
+|---|---|
+| `google_cancelled` | the person declined at Google's consent screen |
+| `google_no_account` | no active account is linked or matches a verified address |
+| `google_email_unverified` | Google has not verified the address |
+| `google_account_conflict` | the address's account is linked to another Google account |
+| `google_state_mismatch` | no state cookie, or it does not match — a pasted or expired link |
+| `google_failed` | the exchange or a token check failed |
+
+`next` is kept inside the console: it must be a path (`/…`, not `//…`) or it
+becomes `/`. With Google unconfigured both routes answer `403`, like
+`register` does when signup is off. Configuration is in the README.
 
 ---
 
@@ -2328,7 +2409,7 @@ All ADMIN. `{operator_id}` is an operator's `public_id`.
 
 | Method | Path |
 |---|---|
-| `GET` | `/console/operators` |
+| `GET` | `/console/operators?limit={n}&offset={n}` |
 | `POST` | `/console/operators` |
 | `GET` | `/console/operators/{operator_id}` |
 | `PUT` | `/console/operators/{operator_id}` |
@@ -2343,6 +2424,20 @@ POST {"email": "…", "full_name": "…", "password": "…", "role": "MANAGER",
 PUT  {"role": "ADMIN", "active": false, "password": "…"}   // all optional
 PUT  /sites {"site_ids": ["5120…", "80e5…"]}               // replaces wholesale
 ```
+
+`GET /console/operators` is **paged**, in the same envelope as
+[`/console/people`](#get-apiv1consolepeople):
+
+```json
+{"count": 100, "total": 213, "limit": 100, "offset": 0, "has_more": true,
+ "operators": [ … ]}
+```
+
+`limit` defaults to 100 and is clamped to 500; `offset` defaults to 0. `count`
+and `operators` mean what they meant before the list was paged, so a client
+that never sends `limit` sees the same first hundred it always saw; the other
+four fields are additive. Site grants are read for the whole page in one
+statement — this endpoint used to make one query per operator.
 
 Guards, each a `403`:
 

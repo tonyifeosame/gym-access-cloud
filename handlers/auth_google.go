@@ -116,8 +116,7 @@ func ConfigureConsoleURL(raw string) error {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return errors.New(EnvConsoleURL + " must be an absolute URL, got " + strconvQuote(raw))
 	}
-	if parsed.Scheme != "https" && !strings.HasPrefix(parsed.Host, "localhost") &&
-		!strings.HasPrefix(parsed.Host, "127.0.0.1") {
+	if parsed.Scheme != "https" && !isLoopbackHost(parsed.Hostname()) {
 		return errors.New(EnvConsoleURL + " must use https unless it is on localhost")
 	}
 	consoleURL = strings.TrimRight(raw, "/")
@@ -131,6 +130,10 @@ func ConsoleURL() string { return consoleURL }
 func ConsoleURLFromEnv() error { return ConfigureConsoleURL(os.Getenv(EnvConsoleURL)) }
 
 func strconvQuote(s string) string { return `"` + s + `"` }
+
+func isLoopbackHost(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
 
 // consoleLink joins a console path onto the configured origin.
 func consoleLink(path string) string {
