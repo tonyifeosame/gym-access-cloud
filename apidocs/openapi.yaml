@@ -142,7 +142,7 @@ info:
     curl -X POST "https://api.accesslink.store/api/public/v1/members" \
       -H "Authorization: Bearer <ACCESSLINK_API_KEY>" \
       -H "Content-Type: application/json" \
-      -H "Idempotency-Key: 4f9d3a5e-join-1" \
+      -H "Idempotency-Key: <UNIQUE_REQUEST_ID>" \
       -d '{"member_id":"MEM042","full_name":"Ada Lovelace","membership_type":"ANNUAL"}'
     ```
 
