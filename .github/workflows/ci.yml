@@ -178,6 +178,57 @@ jobs:
           echo "Bundle carries no machine credentials."
 
   # ---------------------------------------------------------------------------
+  # API documentation (docs.accesslink.store)
+  # ---------------------------------------------------------------------------
+  #
+  # The public reference is generated from apidocs/openapi.yaml. Its parity with
+  # the router (every documented route mounted, every public route documented,
+  # the error catalogue equal to the server's) is a Go test in the backend job;
+  # this job checks the document itself, builds the site, and opens the build
+  # in a browser under the deployed Content-Security-Policy.
+  docs:
+    name: API documentation (OpenAPI + site)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apidocs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apidocs/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate the OpenAPI document
+        run: npm run validate
+
+      - name: Build the site
+        run: npm run build
+
+      # The render check drives the locally installed Chrome (playwright-core,
+      # channel "chrome"), exactly as the console's browser sweep does. The
+      # ubuntu runner image ships Google Chrome.
+      - name: Render check (navigation, search, links, mobile, CSP)
+        run: npm run check
+
+      # The site must carry no credential of any kind and must load nothing
+      # from a third party; the render check enforces the second, this the
+      # first, against the built output.
+      - name: No credentials in the build
+        run: |
+          if grep -rEl 'ats_[0-9a-f]{32}|atd_[0-9a-f]{32}|atp_(live|test)_[0-9a-f]{32}' dist/; then
+            echo "A credential-shaped value is present in the built documentation."
+            exit 1
+          fi
+          echo "Build carries no credentials."
+
+  # ---------------------------------------------------------------------------
   # Firmware
   # ---------------------------------------------------------------------------
   #
@@ -408,16 +459,18 @@ jobs:
   ci:
     name: CI
     runs-on: ubuntu-latest
-    needs: [backend, frontend, security]
+    needs: [backend, frontend, docs, security]
     if: always()
     steps:
       - name: Verify
         run: |
           if [ "${{ needs.backend.result }}" != "success" ] \
           || [ "${{ needs.frontend.result }}" != "success" ] \
+          || [ "${{ needs.docs.result }}" != "success" ] \
           || [ "${{ needs.security.result }}" != "success" ]; then
             echo "backend:  ${{ needs.backend.result }}"
             echo "frontend: ${{ needs.frontend.result }}"
+            echo "docs:     ${{ needs.docs.result }}"
             echo "security: ${{ needs.security.result }}"
             exit 1
           fi
