@@ -47,6 +47,12 @@ type Param struct {
 	MaxLen      int
 	// Format is a hint carried into the schema ("date" for YYYY-MM-DD).
 	Format string
+	// Identifier marks a value a tool places in a request PATH: an ID number,
+	// a serial, a site or rule id. It is refused if it holds anything that
+	// would change which route the path reaches -- a slash above all, which
+	// the router decodes even when escaped -- so a tool can only ever reach
+	// the route it was written for.
+	Identifier bool
 }
 
 // Args are validated tool arguments: strings, ints and bools by name.
@@ -312,6 +318,9 @@ func (t *Tool) ValidateArgs(raw json.RawMessage) (Args, error) {
 			if p.Format == "date" && !looksLikeDate(s) {
 				return nil, fmt.Errorf("%s must be a date in YYYY-MM-DD form", p.Name)
 			}
+			if p.Identifier && !safeIdentifier(s) {
+				return nil, fmt.Errorf("%s must not contain spaces, slashes or punctuation such as ? # %%", p.Name)
+			}
 			out[p.Name] = s
 		case "integer":
 			f, ok := v.(float64)
@@ -344,6 +353,24 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// safeIdentifier accepts printable ASCII with none of the characters that
+// carry meaning in a URL path or query. The set matches what the console's
+// own external-id rule allows (printable ASCII, no spaces) less the path and
+// query delimiters; serials and public ids are narrower still.
+func safeIdentifier(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 0x21 || b > 0x7E {
+			return false
+		}
+		switch b {
+		case '/', '\\', '?', '#', '%':
+			return false
+		}
+	}
+	return true
 }
 
 func looksLikeDate(s string) bool {

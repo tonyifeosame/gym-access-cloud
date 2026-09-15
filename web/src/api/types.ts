@@ -1960,5 +1960,21 @@ export type AssistantEvent =
       phrase_required: string
       expires_at: string
     }
-  | { type: 'turn.completed'; turn_id: string; stop_reason: string; usage?: unknown; replayed?: boolean }
+  | {
+      type: 'confirmation.settled'
+      confirmation_id: string
+      tool: string
+      /** What became of it on the server: ran, was attempted and failed, or was rejected. */
+      outcome: 'approved' | 'failed' | 'rejected'
+      message?: string
+    }
+  | {
+      type: 'turn.completed'
+      turn_id: string
+      stop_reason: string
+      usage?: unknown
+      replayed?: boolean
+      /** The conversation reached its bound with this turn; the next message needs a new one. */
+      conversation_closed?: boolean
+    }
   | { type: 'turn.failed'; turn_id?: string; code: string; message: string; retryable: boolean }

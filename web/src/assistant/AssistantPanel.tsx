@@ -73,7 +73,7 @@ export function AssistantPanel({ open, onClose }: { open: boolean; onClose: () =
               chat.reset()
               inputRef.current?.focus()
             }}
-            disabled={chat.items.length === 0 && !chat.busy}
+            disabled={chat.items.length === 0 && !chat.busy && !chat.closed}
           >
             New conversation
           </button>
@@ -112,12 +112,20 @@ export function AssistantPanel({ open, onClose }: { open: boolean; onClose: () =
           rows={2}
           maxLength={4000}
           value={draft}
-          placeholder="e.g. Who was refused at Reception this morning?"
+          placeholder={
+            chat.closed
+              ? 'This conversation is full. Start a new one.'
+              : 'e.g. Who was refused at Reception this morning?'
+          }
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}
-          disabled={chat.busy}
+          disabled={chat.busy || chat.closed}
         />
-        <button type="submit" className="button button--primary" disabled={chat.busy || draft.trim() === ''}>
+        <button
+          type="submit"
+          className="button button--primary"
+          disabled={chat.busy || chat.closed || draft.trim() === ''}
+        >
           Send
         </button>
       </form>
@@ -181,6 +189,30 @@ function ChatEntry({
   }
 }
 
+function settledTone(settled: 'approved' | 'rejected' | 'failed' | null): 'positive' | 'neutral' | 'danger' {
+  switch (settled) {
+    case 'approved':
+      return 'positive'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'neutral'
+  }
+}
+
+function settledLabel(settled: 'approved' | 'rejected' | 'failed' | null): string {
+  switch (settled) {
+    case 'approved':
+      return 'Approved'
+    case 'rejected':
+      return 'Rejected'
+    case 'failed':
+      return 'Not done'
+    default:
+      return ''
+  }
+}
+
 function toolTone(status: string): 'positive' | 'warning' | 'neutral' | 'danger' {
   switch (status) {
     case 'EXECUTED':
@@ -201,6 +233,9 @@ function failureTitle(code: string): string {
   switch (code) {
     case 'session_expired':
       return 'Your session has ended'
+    case 'conversation_full':
+    case 'conversation_closed':
+      return 'Start a new conversation'
     case 'budget_exhausted':
       return 'Assistant allowance used up'
     case 'rate_limited':
@@ -237,6 +272,7 @@ function ConfirmationCard({
   const [phrase, setPhrase] = useState('')
   const settled = item.settled !== null
   const phraseOk = item.phraseRequired === '' || phrase.trim() === item.phraseRequired
+  const locked = busy || item.pending
 
   return (
     <section className="assistant__card assistant__card--confirm" aria-labelledby={`${item.id}-title`}>
@@ -265,17 +301,22 @@ function ConfirmationCard({
       ) : null}
 
       {settled ? (
-        <p className="assistant__card-settled">
-          <Badge tone={item.settled === 'approved' ? 'positive' : 'neutral'}>
-            {item.settled === 'approved' ? 'Approved' : 'Rejected'}
-          </Badge>
+        <p className="assistant__card-settled" role="status">
+          <Badge tone={settledTone(item.settled)}>{settledLabel(item.settled)}</Badge>
+          {item.settled === 'failed' && item.failure ? (
+            <span className="assistant__card-failure">{item.failure}</span>
+          ) : null}
+        </p>
+      ) : item.pending ? (
+        <p className="assistant__card-settled" role="status">
+          <Badge tone="info">Sending…</Badge>
         </p>
       ) : (
         <div className="assistant__card-actions">
           <button
             type="button"
             className="button"
-            disabled={busy}
+            disabled={locked}
             onClick={() => void onSettle(item.id, item.token, false)}
           >
             Reject
@@ -283,7 +324,7 @@ function ConfirmationCard({
           <button
             type="button"
             className="button button--primary"
-            disabled={busy || !phraseOk}
+            disabled={locked || !phraseOk}
             onClick={() => void onSettle(item.id, item.token, true, phrase)}
           >
             Approve

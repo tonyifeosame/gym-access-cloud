@@ -28,8 +28,8 @@ func registerEnrollmentTools(r *Registry) {
 			"The operator must approve it before the terminal enters enrolment mode; the capture itself " +
 			"then happens in the console's enrolment screen, which opens for them.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
-			{Name: "serial", Type: "string", Description: "The serial number of the terminal the person is standing at.", Required: true, MaxLen: 64},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+			{Name: "serial", Type: "string", Description: "The serial number of the terminal the person is standing at.", Required: true, MaxLen: 64, Identifier: true},
 		},
 		Destructive: false, Idempotent: false,
 		MinRole: models.RoleManager,
@@ -69,7 +69,7 @@ func registerEnrollmentTools(r *Registry) {
 			"final state -- completed, failed, expired or cancelled -- and return it. Returns the current " +
 			"state at the timeout if it is still in progress.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
 			{Name: "timeout_s", Type: "integer", Description: "Seconds to wait (1-60).", Min: intPtr(1), Max: intPtr(60)},
 		},
 		ReadOnly: true, Idempotent: true,

@@ -23,7 +23,7 @@ func registerTerminalTools(r *Registry) {
 			"up yet, or disabled. Optionally narrowed to one site or one status, or to those with a " +
 			"software update waiting.",
 		Params: []Param{
-			{Name: "site_id", Type: "string", Description: "Only terminals at this site (id from list_sites).", MaxLen: 64},
+			{Name: "site_id", Type: "string", Description: "Only terminals at this site (id from list_sites).", MaxLen: 64, Identifier: true},
 			{Name: "status", Type: "string", Description: "Only terminals in this state.", Enum: []string{"ONLINE", "OFFLINE", "ERROR", "UPDATING", "PROVISIONING", "DISABLED"}},
 			{Name: "needs_update", Type: "boolean", Description: "Only terminals with a software update waiting."},
 			{Name: "limit", Type: "integer", Description: "Rows per page (1-100).", Min: intPtr(1), Max: intPtr(100)},
@@ -71,7 +71,7 @@ func registerTerminalTools(r *Registry) {
 		Name:        "get_terminal",
 		Description: "One terminal: where it is, its health, what it is assigned to do, its software version and whether an update is waiting.",
 		Params: []Param{
-			{Name: "serial", Type: "string", Description: "The terminal's serial number.", Required: true, MaxLen: 64},
+			{Name: "serial", Type: "string", Description: "The terminal's serial number.", Required: true, MaxLen: 64, Identifier: true},
 		},
 		ReadOnly: true, Idempotent: true, ParallelSafe: true,
 		MinRole: models.RoleViewer,
@@ -123,7 +123,7 @@ func registerTerminalTools(r *Registry) {
 		Name:        "get_site",
 		Description: "One site and its offline policy.",
 		Params: []Param{
-			{Name: "site_id", Type: "string", Description: "The site's id, from list_sites.", Required: true, MaxLen: 64},
+			{Name: "site_id", Type: "string", Description: "The site's id, from list_sites.", Required: true, MaxLen: 64, Identifier: true},
 		},
 		ReadOnly: true, Idempotent: true, ParallelSafe: true,
 		MinRole: models.RoleViewer,
@@ -156,9 +156,9 @@ func registerTerminalTools(r *Registry) {
 			"were let in, kept out, or something went wrong. Newest first. Filter by person, terminal, " +
 			"site, decision, or a time window.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "Only events for this person's ID number.", MaxLen: 50},
-			{Name: "serial", Type: "string", Description: "Only events at this terminal.", MaxLen: 64},
-			{Name: "site_id", Type: "string", Description: "Only events at this site.", MaxLen: 64},
+			{Name: "external_id", Type: "string", Description: "Only events for this person's ID number.", MaxLen: 50, Identifier: true},
+			{Name: "serial", Type: "string", Description: "Only events at this terminal.", MaxLen: 64, Identifier: true},
+			{Name: "site_id", Type: "string", Description: "Only events at this site.", MaxLen: 64, Identifier: true},
 			{Name: "decision", Type: "string", Description: "Only this outcome.", Enum: []string{"GRANTED", "DENIED", "RECORDED", "ERROR"}},
 			{Name: "from", Type: "string", Description: "Only events at or after this instant (RFC 3339, e.g. 2026-09-15T00:00:00Z).", MaxLen: 40},
 			{Name: "to", Type: "string", Description: "Only events before this instant (RFC 3339).", MaxLen: 40},

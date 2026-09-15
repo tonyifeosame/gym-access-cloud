@@ -58,6 +58,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS assistant_conversations_public_id_key
     ON assistant_conversations(public_id);
 CREATE INDEX IF NOT EXISTS assistant_conversations_owner_idx
     ON assistant_conversations(company_id, user_id, last_message_at DESC);
+-- The retention purge selects by idleness alone; the user cascade by user
+-- alone. Neither is a prefix of the owner index.
+CREATE INDEX IF NOT EXISTS assistant_conversations_idle_idx
+    ON assistant_conversations(last_message_at);
+CREATE INDEX IF NOT EXISTS assistant_conversations_user_idx
+    ON assistant_conversations(user_id);
 
 -- One row per message in the order the model saw them. `content` is the
 -- assistant's own neutral block representation (text / tool_use / tool_result),
@@ -103,6 +109,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS assistant_confirmations_token_id_key
     ON assistant_confirmations(token_id);
 CREATE INDEX IF NOT EXISTS assistant_confirmations_company_idx
     ON assistant_confirmations(company_id, issued_at DESC);
+-- EVERY REFERENCING COLUMN AN ON DELETE ACTION WALKS IS INDEXED. Purging a
+-- conversation sets conversation_id to NULL here and on the tool calls;
+-- deleting a user cascades by user_id. Without these, each deleted parent
+-- row is a sequential scan of the child table.
+CREATE INDEX IF NOT EXISTS assistant_confirmations_conversation_idx
+    ON assistant_confirmations(conversation_id);
+CREATE INDEX IF NOT EXISTS assistant_confirmations_user_idx
+    ON assistant_confirmations(user_id);
 
 CREATE TABLE IF NOT EXISTS assistant_tool_calls (
     id              BIGSERIAL PRIMARY KEY,
@@ -136,6 +150,12 @@ CREATE INDEX IF NOT EXISTS assistant_tool_calls_company_idx
     ON assistant_tool_calls(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS assistant_tool_calls_request_idx
     ON assistant_tool_calls(request_id);
+CREATE INDEX IF NOT EXISTS assistant_tool_calls_conversation_idx
+    ON assistant_tool_calls(conversation_id);
+CREATE INDEX IF NOT EXISTS assistant_tool_calls_user_idx
+    ON assistant_tool_calls(user_id);
+CREATE INDEX IF NOT EXISTS assistant_tool_calls_confirmation_idx
+    ON assistant_tool_calls(confirmation_id);
 
 -- One row per company per calendar month. Checked before every model call;
 -- updated from the model's own usage figures after it.

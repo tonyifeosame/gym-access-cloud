@@ -53,7 +53,7 @@ func registerPeopleTools(r *Registry) {
 		Name:        "get_person",
 		Description: "One person: their details, fingerprint status, and every access rule they have.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
 		},
 		ReadOnly: true, Idempotent: true, ParallelSafe: true,
 		MinRole: models.RoleViewer,
@@ -79,7 +79,7 @@ func registerPeopleTools(r *Registry) {
 		Description: "The state of a person's most recent fingerprint enrolment: waiting for the terminal, " +
 			"ready for a finger, completed, failed (with the terminal's words), expired or cancelled.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
 		},
 		ReadOnly: true, Idempotent: true, ParallelSafe: true,
 		MinRole: models.RoleViewer,
@@ -93,7 +93,7 @@ func registerPeopleTools(r *Registry) {
 		Description: "Add a person the terminals should recognise. Creates the record only: it does not " +
 			"start a fingerprint enrolment and grants no access. Fails if the ID number is already used.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The badge, employee, student or reference number the organisation already uses. Unique within the company.", Required: true, MaxLen: 50},
+			{Name: "external_id", Type: "string", Description: "The badge, employee, student or reference number the organisation already uses. Unique within the company.", Required: true, MaxLen: 50, Identifier: true},
 			{Name: "full_name", Type: "string", Description: "The person's full name.", Required: true, MaxLen: 100},
 			{Name: "category", Type: "string", Description: "Optional free-text type, e.g. staff, contractor, student.", MaxLen: 50},
 		},
@@ -127,11 +127,11 @@ func registerPeopleTools(r *Registry) {
 			"site, or at one terminal. The operator must approve it before it is added. A Keep out rule " +
 			"always wins over a Let in rule.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
 			{Name: "effect", Type: "string", Description: "ALLOW lets them in; DENY keeps them out.", Required: true, Enum: []string{"ALLOW", "DENY"}},
 			{Name: "scope_type", Type: "string", Description: "COMPANY = everywhere (including terminals installed later); SITE = one site; TERMINAL = one terminal.", Required: true, Enum: []string{"COMPANY", "SITE", "TERMINAL"}},
-			{Name: "site_id", Type: "string", Description: "The site's id (from list_sites) when scope_type is SITE.", MaxLen: 64},
-			{Name: "serial", Type: "string", Description: "The terminal's serial number when scope_type is TERMINAL.", MaxLen: 64},
+			{Name: "site_id", Type: "string", Description: "The site's id (from list_sites) when scope_type is SITE.", MaxLen: 64, Identifier: true},
+			{Name: "serial", Type: "string", Description: "The terminal's serial number when scope_type is TERMINAL.", MaxLen: 64, Identifier: true},
 			{Name: "schedule_id", Type: "string", Description: "Optional schedule id (from list_schedules) limiting when the rule applies. Blank means any time.", MaxLen: 64},
 			{Name: "application", Type: "string", Description: "Optional feature code to limit the rule to. Usually blank.", MaxLen: 64},
 			{Name: "first_day", Type: "string", Description: "Optional first day the rule applies, YYYY-MM-DD. Blank means now.", Format: "date"},
@@ -201,8 +201,8 @@ func registerPeopleTools(r *Registry) {
 		Description: "Remove one of a person's access rules (find the rule id with get_person). The operator " +
 			"must approve it before it is removed.",
 		Params: []Param{
-			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50},
-			{Name: "rule_id", Type: "string", Description: "The access rule's id, from get_person.", Required: true, MaxLen: 64},
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+			{Name: "rule_id", Type: "string", Description: "The access rule's id, from get_person.", Required: true, MaxLen: 64, Identifier: true},
 		},
 		Destructive: true, Idempotent: true,
 		MinRole: models.RoleManager,

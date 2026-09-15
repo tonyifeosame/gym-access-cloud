@@ -2821,6 +2821,9 @@ export const handlers = [
     const refused = guard(request)
     if (refused) return refused
     const failure = takeFailure('assistant-message')
+    if (failure === 409) {
+      return json({ error: 'This conversation has reached its limit. Start a new one to continue.', code: 'conversation_closed' }, 409)
+    }
     if (failure) return json({ error: 'Too many messages', code: 'rate_limited' }, failure)
     return streamTurn(state.assistantTurns.shift() ?? [{ type: 'assistant.message', text: 'Done.' }])
   }),
@@ -2833,9 +2836,12 @@ export const handlers = [
     if (!body.token) return json({ error: 'A confirmation token is required' }, 400)
     const failure = takeFailure('assistant-confirm')
     if (failure) return json({ error: 'That confirmation has expired.' }, failure)
+    // The real service settles the card with confirmation.settled, never by
+    // the request having been sent; the mock does the same.
     return streamTurn(
       state.assistantTurns.shift() ?? [
-        { type: 'tool.result', call_id: 'c1', tool: 'grant_access', status: body.approve ? 'CONFIRMED_EXECUTED' : 'CONFIRMATION_REJECTED', summary: body.approve ? 'done' : 'rejected' },
+        { type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: body.approve ? 'CONFIRMED_EXECUTED' : 'CONFIRMATION_REJECTED', summary: body.approve ? 'done' : 'rejected' },
+        { type: 'confirmation.settled', confirmation_id: 'conf-1', tool: 'grant_access', outcome: body.approve ? 'approved' : 'rejected' },
         { type: 'assistant.message', text: body.approve ? 'Done.' : 'Understood, nothing was changed.' },
       ],
     )

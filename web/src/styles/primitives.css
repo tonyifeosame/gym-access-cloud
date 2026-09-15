@@ -2891,6 +2891,17 @@ textarea.field__input {
   color: var(--text-muted);
 }
 
+.assistant__card-settled {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.assistant__card-failure {
+  color: var(--text-muted);
+}
+
 .assistant__card-actions {
   display: flex;
   justify-content: flex-end;

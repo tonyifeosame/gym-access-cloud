@@ -26,6 +26,12 @@ import { keys } from '../data/keys'
  * person added, a rule granted or removed, an enrolment started -- the
  * caches those screens read are invalidated the moment the tool result says
  * it ran, so closing the panel lands on the new state, not the old one.
+ *
+ * A CONFIRMATION CARD SETTLES ON THE SERVER'S WORD, NOT ON THE CLICK. Sending
+ * an approval marks the card pending; only the confirmation.settled event --
+ * ran, failed, or rejected -- moves it on. A token the server refuses (expired,
+ * already used, another session) never produces that event, and the card
+ * shows the refusal rather than an approval that did not happen.
  */
 
 export type ChatItem =
@@ -40,7 +46,12 @@ export type ChatItem =
       consequence: AssistantConsequence
       phraseRequired: string
       expiresAt: string
-      settled: 'approved' | 'rejected' | null
+      /** The answer is on its way to the server and nothing has come back yet. */
+      pending: boolean
+      /** What the server said became of it; null while unanswered or pending. */
+      settled: 'approved' | 'rejected' | 'failed' | null
+      /** Why it failed, in the server's words, when settled is 'failed'. */
+      failure: string | null
     }
   | { kind: 'handoff'; id: string; label: string; route: string; handoffKind: string }
   | { kind: 'failure'; id: string; code: string; message: string; retryable: boolean }
@@ -91,9 +102,14 @@ export function useAssistantChat() {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [items, setItems] = useState<ChatItem[]>([])
   const [busy, setBusy] = useState(false)
+  // The conversation reached its bound; only a new one takes a message.
+  const [closed, setClosed] = useState(false)
   const abort = useRef<AbortController | null>(null)
   // What each tool call was, so a later result can say what changed.
   const calls = useRef<Map<string, string>>(new Map())
+  // The confirmation card whose answer is in flight, so a refusal or a lost
+  // stream can be written back to it.
+  const settling = useRef<string | null>(null)
 
   useEffect(() => () => abort.current?.abort(), [])
 
@@ -111,6 +127,15 @@ export function useAssistantChat() {
       void queryClient.invalidateQueries({ queryKey: keys.audit.all })
     },
     [queryClient],
+  )
+
+  const settleCard = useCallback(
+    (itemId: string, outcome: 'approved' | 'rejected' | 'failed', failure: string | null) => {
+      patch(itemId, (item) =>
+        item.kind === 'confirmation' ? { ...item, pending: false, settled: outcome, failure } : item,
+      )
+    },
+    [patch],
   )
 
   const applyEvent = useCallback(
@@ -188,12 +213,27 @@ export function useAssistantChat() {
               consequence: event.consequence,
               phraseRequired: event.phrase_required,
               expiresAt: event.expires_at,
+              pending: false,
               settled: null,
+              failure: null,
             },
           ])
           break
         }
+        case 'confirmation.settled': {
+          const id = `confirm-${event.confirmation_id}`
+          settleCard(id, event.outcome, event.outcome === 'failed' ? (event.message ?? 'It did not run.') : null)
+          if (settling.current === id) settling.current = null
+          break
+        }
         case 'turn.failed': {
+          if (event.code === 'conversation_full') setClosed(true)
+          if (settling.current) {
+            // The server checked the token again under the stream and refused
+            // it (a second approval racing this one, say). Nothing ran.
+            settleCard(settling.current, 'failed', event.message)
+            settling.current = null
+          }
           if (assistantItemId.current) {
             patch(assistantItemId.current, (item) =>
               item.kind === 'assistant' ? { ...item, streaming: false } : item,
@@ -206,12 +246,27 @@ export function useAssistantChat() {
           ])
           break
         }
+        case 'turn.completed': {
+          if (event.conversation_closed) {
+            setClosed(true)
+            setItems((current) => [
+              ...current,
+              {
+                kind: 'failure',
+                id: makeId('failure'),
+                code: 'conversation_full',
+                message: 'This conversation has reached its limit. Start a new one to continue.',
+                retryable: false,
+              },
+            ])
+          }
+          break
+        }
         case 'turn.started':
-        case 'turn.completed':
           break
       }
     },
-    [patch, refreshAfter],
+    [patch, refreshAfter, settleCard],
   )
 
   const runTurn = useCallback(
@@ -233,35 +288,48 @@ export function useAssistantChat() {
         const message =
           error instanceof ApiError ? error.message : 'The assistant could not be reached.'
         const code = error instanceof ApiError && error.code ? error.code : 'request_failed'
+        if (code === 'conversation_closed') setClosed(true)
+        if (settling.current) {
+          // The server refused the answer before anything ran: an expired or
+          // spent token, another session's, a malformed one. The card says so.
+          settleCard(settling.current, 'failed', message)
+          settling.current = null
+        }
         setItems((current) => [
           ...current,
-          { kind: 'failure', id: makeId('failure'), code, message, retryable: true },
+          { kind: 'failure', id: makeId('failure'), code, message, retryable: code !== 'conversation_closed' },
         ])
       } finally {
+        if (settling.current) {
+          // The stream ended without the server saying what became of it.
+          // Not approved: nothing confirmed that it ran.
+          settleCard(settling.current, 'failed', 'No outcome was reported. Check the audit trail before trying again.')
+          settling.current = null
+        }
         if (abort.current === controller) abort.current = null
         setBusy(false)
       }
     },
-    [applyEvent, conversationId],
+    [applyEvent, conversationId, settleCard],
   )
 
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim()
-      if (!trimmed || busy) return
+      if (!trimmed || busy || closed) return
       setItems((current) => [...current, { kind: 'user', id: makeId('user'), text: trimmed }])
       const clientMessageId = makeId('cm')
       await runTurn((id, onEvent, signal) => sendAssistantMessage(id, trimmed, clientMessageId, onEvent, signal))
     },
-    [busy, runTurn],
+    [busy, closed, runTurn],
   )
 
   const settle = useCallback(
     async (itemId: string, token: string, approve: boolean, phrase?: string) => {
       if (busy) return
-      patch(itemId, (item) =>
-        item.kind === 'confirmation' ? { ...item, settled: approve ? 'approved' : 'rejected' } : item,
-      )
+      // Pending, not settled: what the card shows next is the server's answer.
+      settling.current = itemId
+      patch(itemId, (item) => (item.kind === 'confirmation' ? { ...item, pending: true } : item))
       await runTurn((id, onEvent, signal) =>
         settleAssistantConfirmation(id, token, approve, phrase, onEvent, signal),
       )
@@ -275,8 +343,10 @@ export function useAssistantChat() {
     setConversationId(null)
     setItems([])
     setBusy(false)
+    setClosed(false)
     calls.current.clear()
+    settling.current = null
   }, [])
 
-  return { conversationId, items, busy, send, settle, reset }
+  return { conversationId, items, busy, closed, send, settle, reset }
 }

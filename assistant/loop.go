@@ -25,6 +25,14 @@ type Limits struct {
 	MaxTokensPerCall     int
 	CompanyMonthlyTokens int64
 	RetentionDays        int
+
+	// A conversation is closed once it has run this many turns, or once the
+	// context the model was last sent reached this many tokens. Both are
+	// bounds on the transcript, which is otherwise replayed whole on every
+	// model call: without them a conversation grows until the model refuses
+	// it, and costs more on every message until it does.
+	MaxConversationTurns         int
+	MaxConversationContextTokens int64
 }
 
 // DefaultLimits are the Phase 1 defaults; LimitsFromEnv overrides them.
@@ -36,6 +44,9 @@ func DefaultLimits() Limits {
 		MaxTokensPerCall:     8000,
 		CompanyMonthlyTokens: 2_000_000,
 		RetentionDays:        30,
+
+		MaxConversationTurns:         40,
+		MaxConversationContextTokens: 120_000,
 	}
 }
 
@@ -56,6 +67,12 @@ func LimitsFromEnv() Limits {
 	}
 	if n := envInt("ASSISTANT_RETENTION_DAYS"); n > 0 {
 		l.RetentionDays = n
+	}
+	if n := envInt("ASSISTANT_MAX_CONVERSATION_TURNS"); n > 0 {
+		l.MaxConversationTurns = n
+	}
+	if n := envInt("ASSISTANT_MAX_CONTEXT_TOKENS"); n > 0 {
+		l.MaxConversationContextTokens = int64(n)
 	}
 	return l
 }
@@ -197,8 +214,13 @@ const (
 	FailTimeout          = "timeout"
 	FailModelUnavailable = "model_unavailable"
 	FailRefused          = "refused"
+	FailConversationFull = "conversation_full"
 	FailInternal         = "internal"
 )
+
+// ConversationFullMessage is what the operator reads when a conversation has
+// reached its bound, wherever that is discovered.
+const ConversationFullMessage = "This conversation has reached its limit. Start a new one to continue."
 
 type turnFailure struct {
 	code      string
@@ -259,6 +281,15 @@ func (s *Service) RunTurn(parent context.Context, in TurnInput, emit Emitter) {
 		return
 	}
 
+	// A conversation at its bound takes no new message. A continuation (the
+	// narration after a confirmation is settled) is still allowed through so
+	// the operator hears what happened; the check after the turn closes it.
+	if in.UserText != "" && (in.Conversation.Status != models.ConversationOpen || s.conversationFull(in.Conversation.TurnCount, 0)) {
+		s.closeConversation(in.Conversation)
+		fail(turnFailure{FailConversationFull, ConversationFullMessage, false})
+		return
+	}
+
 	// Replay: the same client message again means the stream was lost. Hand
 	// back what was persisted rather than run the turn twice.
 	if in.ClientMessageID != "" {
@@ -293,6 +324,9 @@ func (s *Service) RunTurn(parent context.Context, in TurnInput, emit Emitter) {
 	tools := s.registry.ForRole(in.Operator.Role)
 
 	var usage models.AssistantUsage
+	// contextTokens is the size of the context the model was last sent: what
+	// the conversation bound is measured against.
+	var contextTokens int64
 	toolCalls := 0
 	awaitingConfirmation := false
 	stopReason := "end_turn"
@@ -321,6 +355,7 @@ rounds:
 			break rounds
 		}
 		usage.Add(resp.Usage)
+		contextTokens = resp.Usage.InputTokens + resp.Usage.CacheReadTokens + resp.Usage.CacheWriteTokens
 
 		assistantMsg := models.AssistantMessage{Role: "assistant", Blocks: resp.Blocks}
 		if _, err := database.AppendAssistantMessage(in.Conversation.ID, "assistant", resp.Blocks, ""); err != nil {
@@ -336,12 +371,18 @@ rounds:
 			// handled below
 		case "refusal":
 			failure = &turnFailure{FailRefused, "The assistant declined to continue with that request.", false}
-			break rounds
 		case "max_tokens":
 			stopReason = "max_tokens"
-			break rounds
 		default:
 			stopReason = resp.StopReason
+		}
+		if resp.StopReason != "tool_use" {
+			// EVERY tool_use GETS A tool_result, whatever stopped the model. A
+			// response cut off by max_tokens can still carry tool_use blocks;
+			// they are not run, but the transcript must answer each of them
+			// or the next model request for this conversation is refused.
+			s.answerUnrun(in.Conversation.ID, resp.Blocks,
+				"The response was cut off before this tool could run. It did not run.", &transcript)
 			break rounds
 		}
 
@@ -352,21 +393,29 @@ rounds:
 				continue
 			}
 			toolCalls++
-			if toolCalls > s.limits.MaxToolCalls {
-				failure = &turnFailure{FailToolLimit, "The assistant made too many tool calls in one turn and stopped.", false}
-				break rounds
-			}
 			emit.Emit(EventToolCall, map[string]any{
 				"call_id": block.ID, "tool": block.Name, "arguments": json.RawMessage(nonEmpty(block.Input)),
 			})
 
 			var r toolResult
-			if awaitingConfirmation {
+			switch {
+			case toolCalls > s.limits.MaxToolCalls:
+				// The cap bounds what RUNS, not what is answered: this call and
+				// the rest of the round are refused, each with its own result,
+				// so the transcript stays valid for the next turn.
+				if failure == nil {
+					failure = &turnFailure{FailToolLimit, "The assistant made too many tool calls in one turn and stopped.", false}
+				}
+				r = toolResult{
+					Outcome: Outcome{IsError: true, Status: models.ToolCallInvalid},
+					Content: "The turn's tool-call limit was reached. This tool did not run.",
+				}
+			case awaitingConfirmation:
 				r = toolResult{
 					Outcome: Outcome{IsError: true, Status: models.ToolCallInvalid},
 					Content: "A confirmation is pending with the operator. Do not call tools until they answer.",
 				}
-			} else {
+			default:
 				r = s.Execute(t, block.Name, block.Input, nil)
 			}
 			results = append(results, models.AssistantBlock{
@@ -414,6 +463,16 @@ rounds:
 		log.Printf("assistant: recording turn usage: %v", err)
 	}
 
+	// The bound, after the turn: the conversation closes once it has run its
+	// last turn or the model's context is as large as it may get. A turn that
+	// left a confirmation pending keeps the conversation open so the answer
+	// can be given; the continuation closes it.
+	conversationClosed := false
+	if !awaitingConfirmation && s.conversationFull(in.Conversation.TurnCount+1, contextTokens) {
+		s.closeConversation(in.Conversation)
+		conversationClosed = true
+	}
+
 	if failure != nil {
 		fail(*failure)
 		return
@@ -422,10 +481,54 @@ rounds:
 		stopReason = "confirmation"
 	}
 	emit.Emit(EventTurnCompleted, map[string]any{
-		"turn_id":     turnID,
-		"stop_reason": stopReason,
-		"usage":       usage,
+		"turn_id":             turnID,
+		"stop_reason":         stopReason,
+		"usage":               usage,
+		"conversation_closed": conversationClosed,
 	})
+}
+
+// answerUnrun appends an error tool_result for every tool_use in blocks, for
+// a round whose tools were never run.
+func (s *Service) answerUnrun(conversationID int64, blocks []models.AssistantBlock, reason string, transcript *[]models.AssistantMessage) {
+	results := []models.AssistantBlock{}
+	for _, b := range blocks {
+		if b.Type == "tool_use" {
+			results = append(results, models.AssistantBlock{Type: "tool_result", ToolUseID: b.ID, Content: reason, IsError: true})
+		}
+	}
+	if len(results) == 0 {
+		return
+	}
+	if _, err := database.AppendAssistantMessage(conversationID, "user", results, ""); err != nil {
+		log.Printf("assistant: persisting unrun tool results: %v", err)
+	}
+	*transcript = append(*transcript, models.AssistantMessage{Role: "user", Blocks: results})
+}
+
+// conversationFull reports whether a conversation that has run `turns` turns,
+// with a model context of `contextTokens`, has reached its bound.
+func (s *Service) conversationFull(turns int, contextTokens int64) bool {
+	if s.limits.MaxConversationTurns > 0 && turns >= s.limits.MaxConversationTurns {
+		return true
+	}
+	if s.limits.MaxConversationContextTokens > 0 && contextTokens >= s.limits.MaxConversationContextTokens {
+		return true
+	}
+	return false
+}
+
+// closeConversation marks a conversation closed, once, and keeps the in-memory
+// record in step so the rest of the turn sees it.
+func (s *Service) closeConversation(conv *models.AssistantConversation) {
+	if conv.Status == models.ConversationClosed {
+		return
+	}
+	if err := database.CloseAssistantConversation(conv.ID, models.ConversationClosed); err != nil {
+		log.Printf("assistant: closing conversation %d: %v", conv.ID, err)
+		return
+	}
+	conv.Status = models.ConversationClosed
 }
 
 // Settle answers a pending confirmation: approve runs the stored tool as
@@ -462,6 +565,15 @@ func (s *Service) Settle(parent context.Context, in TurnInput, token string, app
 		return describeConfirmationError(err)
 	}
 
+	// THE CARD SETTLES ON THIS EVENT AND NOTHING ELSE. The console does not
+	// mark a confirmation approved because it sent an approval; it marks it
+	// from what the server says became of it -- ran, failed, or rejected.
+	settled := func(outcome, message string) {
+		emit.Emit(EventConfirmationSettled, map[string]any{
+			"confirmation_id": row.TokenID, "tool": row.ToolName, "outcome": outcome, "message": message,
+		})
+	}
+
 	var note string
 	if approve {
 		r := s.Execute(t, row.ToolName, row.Arguments, row)
@@ -475,12 +587,15 @@ func (s *Service) Settle(parent context.Context, in TurnInput, token string, app
 			})
 		}
 		if r.IsError {
+			settled("failed", r.Content)
 			note = fmt.Sprintf("The operator approved %s, and it was attempted but did not succeed: %s", row.ToolName, r.Content)
 		} else {
+			settled("approved", "")
 			note = fmt.Sprintf("The operator approved %s and it ran. Result: %s", row.ToolName, r.Content)
 		}
 	} else {
 		s.recordSettlement(t, row, models.ToolCallConfirmationRejected)
+		settled("rejected", "")
 		note = fmt.Sprintf("The operator rejected %s. It did not run. Do not retry it unless they ask again.", row.ToolName)
 	}
 

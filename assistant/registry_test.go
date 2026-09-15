@@ -132,3 +132,44 @@ func TestConsequenceWordingIsTheDialogsWording(t *testing.T) {
 		t.Fatalf("enrolment consequence = %+v", e)
 	}
 }
+
+func TestIdentifierArgumentsRefusePathDelimiters(t *testing.T) {
+	// Anything a tool puts in a request path is checked here, before it can
+	// change which route the path reaches. The router decodes %2F before it
+	// matches, so an escaped slash is as good as a bare one.
+	r := NewRegistry()
+	registerPhase1Tools(r)
+	for _, tool := range []string{"get_person", "get_person_enrollment", "create_person", "grant_access", "revoke_access", "start_enrollment", "wait_for_enrollment", "list_events"} {
+		def, _ := r.Get(tool)
+		for _, p := range def.Params {
+			if p.Name == "external_id" && !p.Identifier {
+				t.Errorf("%s: external_id is placed in a path but is not marked Identifier", tool)
+			}
+		}
+	}
+	for _, tool := range []string{"get_terminal", "start_enrollment", "grant_access", "list_events"} {
+		def, _ := r.Get(tool)
+		for _, p := range def.Params {
+			if p.Name == "serial" && !p.Identifier {
+				t.Errorf("%s: serial is not marked Identifier", tool)
+			}
+		}
+	}
+	get, _ := r.Get("get_person")
+	for _, bad := range []string{"P-1/permissions", "P-1%2Fpermissions", "../company", `P\1`, "P-1?x=1", "P-1#f", "P 1", "P\n1"} {
+		raw, _ := json.Marshal(map[string]any{"external_id": bad})
+		if _, err := get.ValidateArgs(raw); err == nil {
+			t.Errorf("get_person accepted external_id %q", bad)
+		}
+	}
+	for _, ok := range []string{"P-1", "EMP_0042", "badge.7", "AT-E05A1B38AA38", "a7f3c2e1-0000-4000-8000-000000000000"} {
+		raw, _ := json.Marshal(map[string]any{"external_id": ok})
+		if _, err := get.ValidateArgs(raw); err != nil {
+			t.Errorf("get_person refused external_id %q: %v", ok, err)
+		}
+	}
+	revoke, _ := r.Get("revoke_access")
+	if _, err := revoke.ValidateArgs(json.RawMessage(`{"external_id":"P-1","rule_id":"x/../../people/P-2"}`)); err == nil {
+		t.Errorf("revoke_access accepted a rule id with slashes")
+	}
+}

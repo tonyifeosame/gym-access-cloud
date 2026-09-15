@@ -13,7 +13,7 @@ import { PersonDetailPage } from '../pages/people/PersonDetailPage'
 import { expectNoViolations } from '../test/axe'
 import { makePerson, makeSession } from '../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../test/render'
-import { resetServerState, seed, state } from '../test/server'
+import { failNext, resetServerState, seed, state } from '../test/server'
 
 /**
  * The assistant panel, against the mock's scripted turns.
@@ -211,6 +211,97 @@ describe('a confirmation', () => {
     expect(within(card).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
   })
 
+  it('marks the card approved only when the server says it ran, not when the click was sent', async () => {
+    const user = userEvent.setup()
+    signIn()
+    // The settlement stream carries a result and a reply but NO
+    // confirmation.settled: the server never said what became of it.
+    seed({
+      assistantEnabled: true,
+      people: [makePerson()],
+      assistantTurns: [
+        [...grantTurn],
+        [
+          { type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: 'FAILED', summary: 'That is temporarily unavailable.' },
+          { type: 'assistant.message', text: 'It was attempted but did not succeed.' },
+        ],
+      ],
+    })
+    renderShell()
+    const panel = await openPanel(user)
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'keep Ada out{Enter}')
+    const card = await within(panel).findByRole('region', { name: 'Keep Ada Okonkwo out of everywhere?' })
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    await within(panel).findByText('It was attempted but did not succeed.')
+    await within(card).findByText('Not done')
+    expect(within(card).queryByText('Approved')).not.toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('shows a failed run as not done, in the server words', async () => {
+    const user = userEvent.setup()
+    signIn()
+    seed({
+      assistantEnabled: true,
+      people: [makePerson()],
+      assistantTurns: [
+        [...grantTurn],
+        [
+          { type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: 'REFUSED_SCOPE', summary: 'Not permitted: site' },
+          { type: 'confirmation.settled', confirmation_id: 'conf-1', tool: 'grant_access', outcome: 'failed', message: 'Not permitted: that site is outside your access.' },
+          { type: 'assistant.message', text: 'I could not add the rule.' },
+        ],
+      ],
+    })
+    renderShell()
+    const panel = await openPanel(user)
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'keep Ada out{Enter}')
+    const card = await within(panel).findByRole('region', { name: 'Keep Ada Okonkwo out of everywhere?' })
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    await within(panel).findByText('I could not add the rule.')
+    expect(within(card).getByText('Not done')).toBeInTheDocument()
+    expect(within(card).getByText('Not permitted: that site is outside your access.')).toBeInTheDocument()
+    expect(within(card).queryByText('Approved')).not.toBeInTheDocument()
+  })
+
+  it('never shows an expired or spent confirmation as approved', async () => {
+    const user = userEvent.setup()
+    signIn()
+    seed({ assistantEnabled: true, people: [makePerson()], assistantTurns: [[...grantTurn]] })
+    renderShell()
+    const panel = await openPanel(user)
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'keep Ada out{Enter}')
+    const card = await within(panel).findByRole('region', { name: 'Keep Ada Okonkwo out of everywhere?' })
+
+    // The server refuses the token before any stream opens: 410 Gone.
+    failNext('assistant-confirm', 410)
+    const peopleReadsBefore = state.requests.filter((r) => r.method === 'GET' && r.url.includes('/console/people')).length
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    await within(card).findByText('Not done')
+    expect(within(card).getByText('That confirmation has expired.')).toBeInTheDocument()
+    expect(within(card).queryByText('Approved')).not.toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    // The refusal is also reported as a failure the operator can read.
+    expect(within(panel).getByText('The assistant hit a problem')).toBeInTheDocument()
+    // Nothing behind the panel was refreshed as if a write had happened.
+    expect(state.requests.filter((r) => r.method === 'GET' && r.url.includes('/console/people')).length).toBe(peopleReadsBefore)
+  })
+
+  it('locks the card while the answer is in flight', async () => {
+    const user = userEvent.setup()
+    signIn()
+    seed({ assistantEnabled: true, people: [makePerson()], assistantTurns: [[...grantTurn]] })
+    renderShell()
+    const panel = await openPanel(user)
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'keep Ada out{Enter}')
+    const card = await within(panel).findByRole('region', { name: 'Keep Ada Okonkwo out of everywhere?' })
+    await user.click(within(card).getByRole('button', { name: 'Approve' }))
+    // Between the click and the server's word the card says so, and offers
+    // no second click.
+    expect(within(card).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    await within(card).findByText('Approved')
+  })
+
   it('rejects without running anything, and says so', async () => {
     const user = userEvent.setup()
     signIn()
@@ -233,6 +324,47 @@ describe('a confirmation', () => {
     await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'keep Ada out{Enter}')
     await within(panel).findByRole('region', { name: 'Keep Ada Okonkwo out of everywhere?' })
     await expectNoViolations()
+  })
+})
+
+describe('a full conversation', () => {
+  it('closes the composer when the server closes the conversation, until a new one starts', async () => {
+    const user = userEvent.setup()
+    signIn()
+    seed({
+      assistantEnabled: true,
+      assistantTurns: [
+        [
+          { type: 'assistant.message', text: 'That was the last one.' },
+          { type: 'turn.completed', turn_id: 't1', stop_reason: 'end_turn', conversation_closed: true },
+        ],
+      ],
+    })
+    renderShell()
+    const panel = await openPanel(user)
+    const input = within(panel).getByRole('textbox', { name: 'Message the assistant' })
+    await user.type(input, 'hi{Enter}')
+    await within(panel).findByText('That was the last one.')
+    expect(await within(panel).findByText('Start a new conversation')).toBeInTheDocument()
+    expect(within(panel).getByText(/reached its limit/)).toBeInTheDocument()
+    expect(within(panel).getByRole('textbox', { name: 'Message the assistant' })).toBeDisabled()
+    expect(within(panel).getByRole('button', { name: 'Send' })).toBeDisabled()
+
+    await user.click(within(panel).getByRole('button', { name: 'New conversation' }))
+    expect(within(panel).getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled()
+    expect(within(panel).queryByText(/reached its limit/)).not.toBeInTheDocument()
+  })
+
+  it('reports a closed conversation the server refuses as not retryable', async () => {
+    const user = userEvent.setup()
+    signIn()
+    seed({ assistantEnabled: true })
+    renderShell()
+    const panel = await openPanel(user)
+    failNext('assistant-message', 409)
+    await user.type(within(panel).getByRole('textbox', { name: 'Message the assistant' }), 'hi{Enter}')
+    expect(await within(panel).findByText('Start a new conversation')).toBeInTheDocument()
+    expect(within(panel).getByRole('textbox', { name: 'Message the assistant' })).toBeDisabled()
   })
 })
 

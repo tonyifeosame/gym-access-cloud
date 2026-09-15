@@ -920,3 +920,337 @@ func TestAssistantReplaysAResentMessage(t *testing.T) {
 		t.Fatalf("the model ran %d times for one message", f.model.calls)
 	}
 }
+
+// --- every tool_use is answered, whatever stops the turn ---------------------------------
+
+// assertTranscriptAnswersEveryToolUse reads the persisted transcript and
+// checks the invariant the model API enforces: every tool_use block in an
+// assistant message is answered by a tool_result in the message that follows,
+// and no tool_result answers a tool_use that was never made.
+func assertTranscriptAnswersEveryToolUse(t *testing.T, conversationPublicID string) {
+	t.Helper()
+	var convID int64
+	scanRow(t, `SELECT id FROM assistant_conversations WHERE public_id = $1::uuid`, []any{conversationPublicID}, &convID)
+	messages, err := database.ListAssistantMessages(convID)
+	if err != nil {
+		t.Fatalf("reading transcript: %v", err)
+	}
+	for i, m := range messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		asked := map[string]bool{}
+		for _, b := range m.Blocks {
+			if b.Type == "tool_use" {
+				asked[b.ID] = true
+			}
+		}
+		if len(asked) == 0 {
+			continue
+		}
+		if i+1 >= len(messages) || messages[i+1].Role != "user" {
+			t.Fatalf("seq %d has %d tool_use blocks and no message follows it", m.Seq, len(asked))
+		}
+		answered := map[string]bool{}
+		for _, b := range messages[i+1].Blocks {
+			if b.Type == "tool_result" {
+				if !asked[b.ToolUseID] {
+					t.Fatalf("seq %d answers tool_use %q that seq %d never made", messages[i+1].Seq, b.ToolUseID, m.Seq)
+				}
+				answered[b.ToolUseID] = true
+			}
+		}
+		for id := range asked {
+			if !answered[id] {
+				t.Fatalf("seq %d: tool_use %q was never answered -- the next model request for this conversation would be refused", m.Seq, id)
+			}
+		}
+	}
+}
+
+func hasToolResult(blocks []models.AssistantBlock, toolUseID string) bool {
+	for _, b := range blocks {
+		if b.Type == "tool_result" && b.ToolUseID == toolUseID {
+			return true
+		}
+	}
+	return false
+}
+
+// assertModelRequestWellFormed checks the last request the model received:
+// every tool_use in it is followed by its tool_result.
+func assertModelRequestWellFormed(t *testing.T, f *assistantFixture) {
+	t.Helper()
+	last := f.model.requests[len(f.model.requests)-1].Messages
+	for i, m := range last {
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, b := range m.Blocks {
+			if b.Type != "tool_use" {
+				continue
+			}
+			if i+1 >= len(last) || !hasToolResult(last[i+1].Blocks, b.ID) {
+				t.Fatalf("model request carries tool_use %q with no tool_result after it", b.ID)
+			}
+		}
+	}
+}
+
+func TestAssistantAnswersEveryToolUseAtTheCallCap(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	limits := assistant.DefaultLimits()
+	limits.MaxToolCalls = 2
+	f.install(limits)
+	// Three calls in one round, one over the cap.
+	f.model.steps = []modelStep{{blocks: []models.AssistantBlock{
+		{Type: "tool_use", ID: "toolu_a", Name: "get_fleet_summary", Input: json.RawMessage(`{}`)},
+		{Type: "tool_use", ID: "toolu_b", Name: "get_fleet_summary", Input: json.RawMessage(`{}`)},
+		{Type: "tool_use", ID: "toolu_c", Name: "get_fleet_summary", Input: json.RawMessage(`{}`)},
+	}}}
+	conv := f.newConversation(t)
+	events := f.send(t, conv, "three at once")
+
+	if failed := onlyEvent(t, events, assistant.EventTurnFailed); failed.Data["code"] != assistant.FailToolLimit || failed.Data["retryable"] != false {
+		t.Fatalf("turn.failed = %v", failed.Data)
+	}
+	results := findEvents(events, assistant.EventToolResult)
+	if len(results) != 3 || results[0].Data["status"] != models.ToolCallExecuted ||
+		results[1].Data["status"] != models.ToolCallExecuted || results[2].Data["status"] != models.ToolCallInvalid {
+		t.Fatalf("tool results = %v", results)
+	}
+	// The cap held: two ran, the third never touched the router.
+	if statuses := toolCallStatuses(t, f.companyID); statuses[models.ToolCallExecuted] != 2 || len(statuses) != 1 {
+		t.Fatalf("tool call records = %v, want exactly 2 EXECUTED", statuses)
+	}
+	assertTranscriptAnswersEveryToolUse(t, conv)
+
+	// And the conversation goes on: the next message is a well-formed request.
+	f.model.steps = []modelStep{say("Still here.")}
+	next := f.send(t, conv, "and now?")
+	if len(findEvents(next, assistant.EventTurnFailed)) != 0 {
+		t.Fatalf("the conversation is unusable after the cap: %v", eventTypes(next))
+	}
+	assertModelRequestWellFormed(t, f)
+}
+
+func TestAssistantAnswersToolUseCutOffByMaxTokens(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	// The model was cut off while asking for a tool: the block is there, the
+	// stop reason is max_tokens.
+	f.model.steps = []modelStep{{
+		blocks: []models.AssistantBlock{
+			{Type: "text", Text: "Let me check"},
+			{Type: "tool_use", ID: "toolu_cut", Name: "get_fleet_summary", Input: json.RawMessage(`{}`)},
+		},
+		stop: "max_tokens",
+	}}
+	conv := f.newConversation(t)
+	events := f.send(t, conv, "summary")
+
+	if completed := onlyEvent(t, events, assistant.EventTurnCompleted); completed.Data["stop_reason"] != "max_tokens" {
+		t.Fatalf("turn.completed = %v", completed.Data)
+	}
+	// The tool did not run -- a cut-off request is not a request.
+	if statuses := toolCallStatuses(t, f.companyID); len(statuses) != 0 {
+		t.Fatalf("a cut-off tool_use ran: %v", statuses)
+	}
+	if f.model.calls != 1 {
+		t.Fatalf("model called %d times, want 1", f.model.calls)
+	}
+	assertTranscriptAnswersEveryToolUse(t, conv)
+	if content := lastToolResultContent(t, conv); !strings.Contains(content, "did not run") {
+		t.Fatalf("the unrun tool_use was answered with %q", content)
+	}
+
+	f.model.steps = []modelStep{say("Second try.")}
+	if next := f.send(t, conv, "again"); len(findEvents(next, assistant.EventTurnFailed)) != 0 {
+		t.Fatalf("the conversation is unusable after a max_tokens cut: %v", eventTypes(next))
+	}
+	assertModelRequestWellFormed(t, f)
+}
+
+// --- a conversation has a bound ----------------------------------------------------------------
+
+func conversationStatus(t *testing.T, conv string) string {
+	t.Helper()
+	var status string
+	scanRow(t, `SELECT status FROM assistant_conversations WHERE public_id = $1::uuid`, []any{conv}, &status)
+	return status
+}
+
+func TestAssistantClosesAConversationAtItsTurnLimit(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	limits := assistant.DefaultLimits()
+	limits.MaxConversationTurns = 2
+	f.install(limits)
+	conv := f.newConversation(t)
+
+	f.model.steps = []modelStep{say("one")}
+	if completed := onlyEvent(t, f.send(t, conv, "first"), assistant.EventTurnCompleted); completed.Data["conversation_closed"] != false {
+		t.Fatalf("closed after the first turn: %v", completed.Data)
+	}
+	f.model.steps = []modelStep{say("two")}
+	events := f.send(t, conv, "second")
+	if completed := onlyEvent(t, events, assistant.EventTurnCompleted); completed.Data["conversation_closed"] != true {
+		t.Fatalf("not closed at the limit: %v", completed.Data)
+	}
+	if status := conversationStatus(t, conv); status != models.ConversationClosed {
+		t.Fatalf("conversation status = %s, want CLOSED", status)
+	}
+
+	// A third message is refused before anything streams, with a code the
+	// console can act on, and the model is not called.
+	calls := f.model.calls
+	w := f.request(t, http.MethodPost, "/api/v1/console/assistant/conversations/"+conv+"/messages", `{"text":"third"}`)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"conversation_closed"`) {
+		t.Fatalf("message to a closed conversation = %d: %s", w.Code, w.Body.String())
+	}
+	if f.model.calls != calls {
+		t.Fatalf("the model was called for a closed conversation")
+	}
+	// The record is still readable.
+	if code, _ := consoleCall(t, f.env.router, http.MethodGet, "/api/v1/console/assistant/conversations/"+conv, "", f.token, f.csrf); code != http.StatusOK {
+		t.Fatalf("reading a closed conversation = %d", code)
+	}
+}
+
+func TestAssistantRefusesATurnPastTheLimitAsNotRetryable(t *testing.T) {
+	// The limit can be lowered under a live conversation; a turn that finds
+	// itself past it fails with a non-retryable code and closes the record.
+	f := newAssistantFixture(t, models.RoleManager)
+	limits := assistant.DefaultLimits()
+	limits.MaxConversationTurns = 3
+	f.install(limits)
+	conv := f.newConversation(t)
+	mustExec(t, `UPDATE assistant_conversations SET turn_count = 3 WHERE public_id = $1::uuid`, conv)
+
+	events := f.send(t, conv, "one more")
+	failed := onlyEvent(t, events, assistant.EventTurnFailed)
+	if failed.Data["code"] != assistant.FailConversationFull || failed.Data["retryable"] != false ||
+		!strings.Contains(fmt.Sprint(failed.Data["message"]), "Start a new one") {
+		t.Fatalf("turn.failed = %v", failed.Data)
+	}
+	if f.model.calls != 0 {
+		t.Fatalf("the model was called %d times past the limit", f.model.calls)
+	}
+	if status := conversationStatus(t, conv); status != models.ConversationClosed {
+		t.Fatalf("conversation status = %s, want CLOSED", status)
+	}
+}
+
+func TestAssistantClosesAConversationWhenItsContextIsFull(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	limits := assistant.DefaultLimits()
+	limits.MaxConversationContextTokens = 10_000
+	f.install(limits)
+	conv := f.newConversation(t)
+
+	f.model.usage = models.AssistantUsage{InputTokens: 4_000, OutputTokens: 50}
+	f.model.steps = []modelStep{say("small")}
+	if completed := onlyEvent(t, f.send(t, conv, "first"), assistant.EventTurnCompleted); completed.Data["conversation_closed"] != false {
+		t.Fatalf("closed under the context limit: %v", completed.Data)
+	}
+	// The model reports the context it was sent -- part read from cache --
+	// as large as it may get.
+	f.model.usage = models.AssistantUsage{InputTokens: 2_000, CacheReadTokens: 8_000, OutputTokens: 50}
+	f.model.steps = []modelStep{say("large")}
+	if completed := onlyEvent(t, f.send(t, conv, "second"), assistant.EventTurnCompleted); completed.Data["conversation_closed"] != true {
+		t.Fatalf("not closed at the context limit: %v", completed.Data)
+	}
+	w := f.request(t, http.MethodPost, "/api/v1/console/assistant/conversations/"+conv+"/messages", `{"text":"third"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("message after the context limit = %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAssistantConfirmationStillSettlesOnTheLastTurn(t *testing.T) {
+	// A confirmation issued on the conversation's last allowed turn can still
+	// be answered: the turn that asked does not close the conversation, the
+	// continuation that narrates the outcome does.
+	f := newAssistantFixture(t, models.RoleManager)
+	limits := assistant.DefaultLimits()
+	limits.MaxConversationTurns = 1
+	f.install(limits)
+	seedPerson(t, f.companyID, "P-LAST", "Last Person")
+	f.model.steps = []modelStep{
+		call("toolu_1", "grant_access", map[string]any{"external_id": "P-LAST", "effect": "ALLOW", "scope_type": "COMPANY"}),
+		say("Waiting."),
+	}
+	conv := f.newConversation(t)
+	events := f.send(t, conv, "let them in everywhere")
+	if completed := onlyEvent(t, events, assistant.EventTurnCompleted); completed.Data["conversation_closed"] != false {
+		t.Fatalf("closed with a confirmation pending: %v", completed.Data)
+	}
+	token, _ := onlyEvent(t, events, assistant.EventConfirmationRequired).Data["token"].(string)
+
+	f.model.steps = []modelStep{say("Done.")}
+	w := f.confirm(t, conv, token, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve on the last turn = %d: %s", w.Code, w.Body.String())
+	}
+	approved := parseSSE(t, w.Body.String())
+	if settled := onlyEvent(t, approved, assistant.EventConfirmationSettled); settled.Data["outcome"] != "approved" {
+		t.Fatalf("confirmation.settled = %v", settled.Data)
+	}
+	if completed := onlyEvent(t, approved, assistant.EventTurnCompleted); completed.Data["conversation_closed"] != true {
+		t.Fatalf("the continuation did not close the conversation: %v", completed.Data)
+	}
+	var rules int
+	scanRow(t, `SELECT count(*) FROM audit_events WHERE company_id = $1 AND action = 'PERMISSION_CREATED'`, []any{f.companyID}, &rules)
+	if rules != 1 {
+		t.Fatalf("rules created = %d, want 1", rules)
+	}
+}
+
+func TestAssistantSettlementIsReportedAsAnEvent(t *testing.T) {
+	// The console settles its card from confirmation.settled, never from
+	// having sent the request: a rejection says rejected, and a refused
+	// token never produces the event at all.
+	f := newAssistantFixture(t, models.RoleManager)
+	seedPerson(t, f.companyID, "P-SET", "Settled Person")
+	f.model.steps = []modelStep{
+		call("toolu_1", "grant_access", map[string]any{"external_id": "P-SET", "effect": "DENY", "scope_type": "COMPANY"}),
+		say("Waiting."),
+	}
+	conv := f.newConversation(t)
+	token, _ := onlyEvent(t, f.send(t, conv, "keep out"), assistant.EventConfirmationRequired).Data["token"].(string)
+
+	f.model.steps = []modelStep{say("Understood.")}
+	w := f.confirm(t, conv, token, false)
+	rejected := parseSSE(t, w.Body.String())
+	if settled := onlyEvent(t, rejected, assistant.EventConfirmationSettled); settled.Data["outcome"] != "rejected" {
+		t.Fatalf("confirmation.settled after reject = %v", settled.Data)
+	}
+	// Spent: approving now is refused before the stream opens, so nothing
+	// could be mistaken for a settlement.
+	w = f.confirm(t, conv, token, true)
+	if w.Code != http.StatusConflict || strings.Contains(w.Body.String(), "confirmation.settled") {
+		t.Fatalf("approve after reject = %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- identifiers stay on the route they were written for -------------------------------------
+
+func TestAssistantIdentifiersCannotRerouteARequest(t *testing.T) {
+	// An escaped slash in an identifier is decoded by the router before it
+	// matches a route, so "P-1/permissions" would turn GET /people/:id into
+	// GET /people/P-1/permissions. Such a value is refused before any request.
+	f := newAssistantFixture(t, models.RoleManager)
+	seedPerson(t, f.companyID, "P-1", "Routed Person")
+	f.model.steps = []modelStep{
+		call("toolu_1", "get_person", map[string]any{"external_id": "P-1/permissions"}),
+		say("no"),
+	}
+	conv := f.newConversation(t)
+	events := f.send(t, conv, "lookup")
+	result := onlyEvent(t, events, assistant.EventToolResult)
+	if result.Data["status"] != models.ToolCallInvalid {
+		t.Fatalf("get_person with a slash = %v, want INVALID", result.Data)
+	}
+	var routed int
+	scanRow(t, `SELECT count(*) FROM assistant_tool_calls WHERE company_id = $1 AND route <> ''`, []any{f.companyID}, &routed)
+	if routed != 0 {
+		t.Fatalf("a request was made for a rejected identifier")
+	}
+}

@@ -26,6 +26,7 @@ const (
 	EventToolResult           = "tool.result"
 	EventHandoff              = "handoff"
 	EventConfirmationRequired = "confirmation.required"
+	EventConfirmationSettled  = "confirmation.settled"
 	EventTurnCompleted        = "turn.completed"
 	EventTurnFailed           = "turn.failed"
 )

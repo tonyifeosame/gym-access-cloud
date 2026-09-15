@@ -159,7 +159,7 @@ func AssistantPostMessage(c *gin.Context) {
 		return
 	}
 	if conv.Status != models.ConversationOpen {
-		c.JSON(http.StatusConflict, gin.H{"error": "This conversation is closed. Start a new one."})
+		c.JSON(http.StatusConflict, gin.H{"error": assistant.ConversationFullMessage, "code": "conversation_closed"})
 		return
 	}
 	var req models.AssistantMessageRequest
@@ -202,6 +202,10 @@ func AssistantSettleConfirmation(c *gin.Context) {
 	}
 	conv := loadConversation(c)
 	if conv == nil {
+		return
+	}
+	if conv.Status != models.ConversationOpen {
+		c.JSON(http.StatusConflict, gin.H{"error": assistant.ConversationFullMessage, "code": "conversation_closed"})
 		return
 	}
 	var req models.AssistantConfirmationRequest

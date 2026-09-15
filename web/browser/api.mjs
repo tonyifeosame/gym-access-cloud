@@ -876,7 +876,8 @@ export async function mockApi(page, options = {}) {
       if (url.pathname.endsWith('/messages') || url.pathname.endsWith('/confirmations')) {
         const events = url.pathname.endsWith('/messages')
           ? ASSISTANT_SCRIPT
-          : [{ type: 'tool.result', call_id: 'c2', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done' },
+          : [{ type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done' },
+             { type: 'confirmation.settled', confirmation_id: 'conf-1', tool: 'grant_access', outcome: 'approved' },
              { type: 'assistant.message', text: 'Done. The rule is in place.' }]
         return route.fulfill({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: assistantTurn(events) })
       }
