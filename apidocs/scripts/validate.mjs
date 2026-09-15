@@ -111,7 +111,7 @@ for (const c of codes) {
 }
 // Every code the guide or an example names must be registered, and every
 // doc_url in the document must be this site's own error page for that code.
-for (const m of text.matchAll(/docs\.accesslink\.store\/errors\/([a-z_]+)/g)) {
+for (const m of text.matchAll(/accesslink\.store\/docs\/errors\/([a-z_]+)/g)) {
   if (!codeSet.has(m[1])) fail(`doc_url names unregistered error code "${m[1]}"`)
 }
 for (const m of text.matchAll(/code: ([a-z_]+)$/gm)) {
@@ -129,12 +129,25 @@ const forbidden = [
   [/\breplicat(e|es|ed|ion)\b/i, 'a replication claim'],
   [/-----BEGIN/, 'key material'],
   [/localhost:8080/, 'a development server URL'],
+  [/docs\.accesslink\.store|onrender\.com/, 'a hosting hostname (the site is https://accesslink.store/docs)'],
+  [/atp_live_<your-key>/, 'the old placeholder (use <ACCESSLINK_API_KEY>)'],
 ]
 for (const [re, what] of forbidden) {
   const m = text.match(re)
   if (m) fail(`document contains ${what}: "${m[0]}"`)
 }
 if (!doc.servers?.some((s) => s.url === 'https://api.accesslink.store')) fail('servers must name https://api.accesslink.store')
+// The guide's section order is the product's: what a developer needs first
+// comes first. Enforced by heading order so a rewrite cannot quietly bury the
+// quick start under reference material.
+const wantOrder = ['Quick start', 'Authentication', 'Integration flow', 'Core operations', 'Fingerprint authentication', 'Errors', 'Rate limits', 'Full API reference']
+const headings = [...(doc.info.description ?? '').matchAll(/^## (.+)$/gm)].map((m) => m[1].trim())
+const positions = wantOrder.map((h) => headings.indexOf(h))
+if (positions.some((p) => p < 0)) fail(`guide is missing sections: ${wantOrder.filter((_, i) => positions[i] < 0).join(', ')}`)
+else if (positions.some((p, i) => i > 0 && p < positions[i - 1])) fail(`guide sections are out of order: ${headings.join(' > ')}`)
+if (/(transaction|sync job|actor role|SHA-256|XChaCha|shared store|bigserial|middleware)/i.test(doc.info.description ?? '')) {
+  fail('the guide uses internal implementation language')
+}
 
 // --- report ------------------------------------------------------------------
 if (failures.length > 0) {

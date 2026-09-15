@@ -214,9 +214,11 @@ type APIErrorDetail struct {
 	DocURL string `json:"doc_url,omitempty"`
 }
 
-// APIErrorDocBase is the prefix for doc_url. Not yet a live site; the codes are
-// stable regardless, and a dead link is better than a code nobody can look up.
-const APIErrorDocBase = "https://docs.accesslink.store/errors/"
+// APIErrorDocBase is the prefix for doc_url: the public reference, served
+// from the console's own domain, has one page per code under it. The pages
+// are generated from apidocs/openapi.yaml, and openapi_docs_test.go holds
+// that document's code list equal to APIErrors, so every link resolves.
+const APIErrorDocBase = "https://accesslink.store/docs/errors/"
 
 // NewAPIError builds a response body for a registered code.
 //

@@ -2,9 +2,12 @@
 /*
  * Render check: does the built site actually work in a browser?
  *
- * Serves dist/ on a loopback port, opens it in the locally installed Chrome
- * (playwright-core, channel "chrome" -- the same arrangement web/browser/run.mjs
- * uses, so no browser download), and checks what a reader needs:
+ * Serves the build the way production serves it -- mounted at /docs/ on the
+ * console's origin, behind the console's own catch-all (any path that is not
+ * a real file answers the console's index.html, as Render's SPA rewrite does)
+ * and under the console service's Content-Security-Policy from render.yaml --
+ * opens it in the locally installed Chrome (playwright-core, channel "chrome",
+ * the arrangement web/browser/run.mjs uses), and checks what a reader needs:
  *
  *   - the reference renders: title, every guide section and every operation
  *     summary from openapi.yaml is on the page, grouped as declared;
@@ -15,7 +18,15 @@
  *   - the page loads nothing from a third party (no CDN, no fonts, no proxy);
  *   - a phone-width viewport has no horizontal overflow;
  *   - no console errors;
- *   - /openapi.yaml, /openapi.json, /errors/ and every /errors/<code>/ answer.
+ *   - /docs and /docs/ reach the reference (not the console fallback), and
+ *     /docs/openapi.yaml, /docs/openapi.json, /docs/errors/ and every
+ *     /docs/errors/<code> (with and without a trailing slash) answer;
+ *   - the collapsible reference notes render as real <details> elements.
+ *
+ * DOCS_SITE_ROOT, when set, names a directory to serve as the whole origin --
+ * the console's web/dist after its build, which contains docs/ -- so the very
+ * artefact that is deployed is what gets checked. Without it, dist/ is
+ * mounted at /docs/ under a stub console page.
  *
  * Exit 1 on any failure, with every failure listed.
  */
@@ -27,23 +38,34 @@ import YAML from 'yaml'
 
 const ROOT = resolve(import.meta.dirname, '..')
 const DIST = join(ROOT, 'dist')
+const BASE = '/docs'
 const doc = YAML.parse(readFileSync(join(ROOT, 'openapi.yaml'), 'utf8'))
 
 // The response headers the deployed site will carry, read from render.yaml so
-// what is tested is what is served -- above all the Content-Security-Policy,
-// under which Scalar must still render.
+// what is tested is what is served. The docs are files inside the CONSOLE
+// static site, so the console service's headers -- above all its
+// Content-Security-Policy -- are the ones that apply.
 const render = YAML.parse(readFileSync(join(ROOT, '..', 'render.yaml'), 'utf8'))
-const docsService = render.services.find((svc) => svc.name === 'accesslink-docs')
-if (!docsService) {
-  console.error('render.yaml has no accesslink-docs service')
+const consoleService = render.services.find((svc) => svc.name === 'accesslink-console')
+if (!consoleService) {
+  console.error('render.yaml has no accesslink-console service')
   process.exit(1)
 }
-const deployedHeaders = (docsService.headers ?? [])
+const deployedHeaders = (consoleService.headers ?? [])
   .filter((h) => h.path === '/*')
   .map((h) => [h.name, String(h.value).replace(/\s+/g, ' ').trim()])
 if (!deployedHeaders.some(([name]) => name === 'Content-Security-Policy')) {
-  console.error('render.yaml: accesslink-docs declares no Content-Security-Policy')
+  console.error('render.yaml: accesslink-console declares no Content-Security-Policy')
   process.exit(1)
+}
+// The console's catch-all must not shadow the docs: Render serves a file that
+// exists and rewrites everything else to /index.html, and so does this server.
+const SITE_ROOT = process.env.DOCS_SITE_ROOT ? resolve(process.env.DOCS_SITE_ROOT) : null
+const STUB_CONSOLE = '<!doctype html><title>AccessLink Console</title><div id="root">console shell</div>'
+const resolveFile = (path) => {
+  if (SITE_ROOT) return join(SITE_ROOT, path)
+  if (path === BASE || path.startsWith(BASE + '/')) return join(DIST, path.slice(BASE.length) || '/')
+  return null
 }
 const failures = []
 const check = (ok, msg) => {
@@ -63,16 +85,18 @@ const TYPES = {
   '.woff2': 'font/woff2',
 }
 const server = createServer((req, res) => {
-  // Clean URLs the way a static host resolves them: a directory serves its
-  // index.html, and /errors/<code> (the exact doc_url the API emits) serves
-  // errors/<code>.html.
+  // Clean URLs the way Render resolves them: a directory serves its
+  // index.html (with or without the trailing slash), /docs/errors/<code>
+  // (the exact doc_url the API emits) serves errors/<code>.html, and a path
+  // that is no file at all falls through to the console's index.html.
   let path = decodeURIComponent((req.url ?? '/').split('?')[0])
-  if (path.endsWith('/')) path += 'index.html'
-  else if (!extname(path) && existsSync(join(DIST, path + '.html'))) path += '.html'
-  const file = join(DIST, path)
-  if (!file.startsWith(DIST) || !existsSync(file) || statSync(file).isDirectory()) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' })
-    res.end('not found')
+  let file = resolveFile(path)
+  if (file && existsSync(file) && statSync(file).isDirectory()) file = join(file, 'index.html')
+  if (file && !existsSync(file) && !extname(path) && existsSync(file + '.html')) file += '.html'
+  if (!file || !existsSync(file) || statSync(file).isDirectory()) {
+    const fallback = SITE_ROOT ? join(SITE_ROOT, 'index.html') : null
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Fallback': 'console' })
+    res.end(fallback && existsSync(fallback) ? readFileSync(fallback) : STUB_CONSOLE)
     return
   }
   res.writeHead(200, {
@@ -85,21 +109,34 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r))
 const origin = `http://127.0.0.1:${server.address().port}`
 
 // --- the static files ------------------------------------------------------
+// A docs page is a real file (no X-Fallback); the console shell answers
+// everything else. Both /docs and /docs/ must be the reference itself.
+const isDocs = async (path) => {
+  const res = await fetch(origin + path)
+  const html = await res.text()
+  return res.status === 200 && res.headers.get('x-fallback') !== 'console' && html.includes('AccessLink API reference')
+}
+check(await isDocs(`${BASE}`), `GET ${BASE} did not reach the reference (fell through to the console)`)
+check(await isDocs(`${BASE}/`), `GET ${BASE}/ did not reach the reference (fell through to the console)`)
+const notDocs = await fetch(origin + '/settings/api-credentials')
+check((await notDocs.text()).includes('AccessLink Console') && !SITE_ROOT ? true : notDocs.status === 200, 'a console route no longer falls through to the console')
 const fetchStatus = async (path) => (await fetch(origin + path)).status
-check((await fetchStatus('/')) === 200, 'GET / is not 200')
-check((await fetchStatus('/openapi.yaml')) === 200, 'GET /openapi.yaml is not 200')
-check((await fetchStatus('/openapi.json')) === 200, 'GET /openapi.json is not 200')
-check((await fetchStatus('/errors/')) === 200, 'GET /errors/ is not 200')
-check((await fetchStatus('/sitemap.txt')) === 200, 'GET /sitemap.txt is not 200')
-const json = await (await fetch(origin + '/openapi.json')).json()
-check(json.openapi === doc.openapi, '/openapi.json is not the same document as openapi.yaml')
+check((await fetchStatus(`${BASE}/openapi.yaml`)) === 200, `GET ${BASE}/openapi.yaml is not 200`)
+check((await fetchStatus(`${BASE}/openapi.json`)) === 200, `GET ${BASE}/openapi.json is not 200`)
+check((await fetchStatus(`${BASE}/errors/`)) === 200, `GET ${BASE}/errors/ is not 200`)
+check((await fetchStatus(`${BASE}/sitemap.txt`)) === 200, `GET ${BASE}/sitemap.txt is not 200`)
+const yamlText = await (await fetch(origin + `${BASE}/openapi.yaml`)).text()
+check(yamlText === readFileSync(join(ROOT, 'openapi.yaml'), 'utf8'), `${BASE}/openapi.yaml is not byte-identical to the source`)
+const json = await (await fetch(origin + `${BASE}/openapi.json`)).json()
+check(json.openapi === doc.openapi && json.info?.title === doc.info?.title, `${BASE}/openapi.json is not the same document as openapi.yaml`)
 for (const c of doc['x-accesslink-error-codes']) {
   // Both the API's doc_url form (no slash) and the directory form.
-  for (const path of [`/errors/${c.code}`, `/errors/${c.code}/`]) {
+  for (const path of [`${BASE}/errors/${c.code}`, `${BASE}/errors/${c.code}/`]) {
     const res = await fetch(origin + path)
     const html = res.status === 200 ? await res.text() : ''
-    check(res.status === 200 && html.includes(`<code>${c.code}</code>`) && html.includes(String(c.status)),
+    check(res.status === 200 && res.headers.get('x-fallback') !== 'console' && html.includes(`<code>${c.code}</code>`) && html.includes(String(c.status)),
       `${path} is missing or does not name the code and status`)
+    check(!/docs\.accesslink\.store|onrender\.com/.test(html), `${path} names a hosting hostname`)
   }
 }
 
@@ -118,11 +155,11 @@ try {
   page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`))
   page.on('request', (r) => { if (!r.url().startsWith(origin)) thirdParty.add(new URL(r.url()).host) })
 
-  await page.goto(origin + '/', { waitUntil: 'networkidle' })
+  await page.goto(origin + `${BASE}/`, { waitUntil: 'networkidle' })
   // Scalar renders after the document is fetched and parsed, and renders
   // operation sections lazily as they scroll into view: walk the page once
   // so everything a reader can reach has been drawn before it is checked.
-  await page.waitForSelector('text=Getting started', { timeout: 20_000 })
+  await page.waitForSelector('text=Quick start', { timeout: 20_000 })
   check((await page.title()).includes('AccessLink'), `document title is "${await page.title()}"`)
   await page.evaluate(async () => {
     for (let y = 0; y <= document.documentElement.scrollHeight; y += 600) {
@@ -134,8 +171,20 @@ try {
   await page.waitForTimeout(500)
 
   const text = await page.evaluate(() => document.body.innerText)
-  const guide = ['Getting started', 'Authentication', 'Fingerprint authentication', 'Pagination', 'Idempotency', 'Errors', 'Rate limits', 'Changelog']
+  const guide = ['Quick start', 'Authentication', 'Integration flow', 'Core operations', 'Fingerprint authentication', 'Errors', 'Rate limits', 'Full API reference']
   for (const h of guide) check(text.includes(h), `guide section "${h}" is not rendered`)
+  // The reference notes are collapsible: real <details> elements, closed by
+  // default, whose summaries are readable and which open on click.
+  const details = await page.$$eval('details', (els) => els.map((d) => ({ open: d.open, summary: d.querySelector('summary')?.textContent?.trim() ?? '' })))
+  check(details.length >= 3, `expected the reference notes as <details> elements, found ${details.length}`)
+  check(details.every((d) => !d.open), 'reference notes should start collapsed')
+  check(details.some((d) => /Pagination/.test(d.summary)) && details.some((d) => /Idempotency/.test(d.summary)), 'Pagination and Idempotency notes are not collapsible sections')
+  const summary = page.locator('details summary', { hasText: 'Pagination' }).first()
+  await summary.click()
+  check(await page.$eval('details', (d) => [...document.querySelectorAll('details')].some((x) => x.open)), 'clicking a summary did not open its section')
+  check(text.includes('<ACCESSLINK_API_KEY>'), 'the <ACCESSLINK_API_KEY> placeholder is not shown in the guide')
+  check(text.includes('curl "https://api.accesslink.store/api/public/v1/members?limit=2"'), 'the quick-start curl is not rendered verbatim')
+  check(!/docs\.accesslink\.store|onrender/.test(text), 'a hosting hostname is on the page')
   for (const g of doc['x-tagGroups']) {
     check(text.includes(g.name), `tag group "${g.name}" is not rendered`)
     for (const t of g.tags) check(text.includes(t), `tag "${t}" is not rendered`)
@@ -146,7 +195,7 @@ try {
   }
   for (const s of summaries) check(text.includes(s), `operation "${s}" is not rendered`)
   check(text.includes('/api/public/v1/members'), 'method/path display: the members path is not shown')
-  check(text.includes('atp_live_<your-key>'), 'the placeholder credential is not shown in samples')
+  check(text.includes('<ACCESSLINK_API_KEY>'), 'the placeholder key is not shown in samples')
   check(!/atp_live_[0-9a-f]{16}/.test(text), 'a credential-shaped value appears on the page')
   notes.push(`${summaries.length} operations, ${guide.length} guide sections rendered`)
 
@@ -224,8 +273,8 @@ try {
   // Phone width: no horizontal overflow, and the content is reachable.
   const phone = await context.newPage()
   await phone.setViewportSize({ width: 390, height: 844 })
-  await phone.goto(origin + '/', { waitUntil: 'networkidle' })
-  await phone.waitForSelector('text=Getting started', { timeout: 20_000 })
+  await phone.goto(origin + `${BASE}/`, { waitUntil: 'networkidle' })
+  await phone.waitForSelector('text=Quick start', { timeout: 20_000 })
   const overflow = await phone.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }))
   check(overflow.sw <= overflow.cw + 1, `phone layout scrolls horizontally (${overflow.sw} > ${overflow.cw})`)
   notes.push(`phone 390px: no horizontal overflow`)

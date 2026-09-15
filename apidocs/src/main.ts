@@ -3,7 +3,7 @@ import '@scalar/api-reference/style.css'
 import './theme.css'
 
 /*
- * docs.accesslink.store
+ * https://accesslink.store/docs
  *
  * One OpenAPI document, rendered by Scalar, bundled from npm so the page
  * makes no request to any third party: no CDN script, no Scalar fonts, and no
@@ -14,7 +14,9 @@ import './theme.css'
  * pastes into their own tooling anyway.
  */
 createApiReference('#app', {
-  url: '/openapi.yaml',
+  // Vite's BASE_URL is /docs/ (vite.config.mjs), so this resolves wherever the
+  // build is mounted.
+  url: `${import.meta.env.BASE_URL}openapi.yaml`,
   theme: 'default',
   layout: 'modern',
   showSidebar: true,
@@ -38,7 +40,6 @@ createApiReference('#app', {
   // site publishes a reference, not a transport. The developer toolbar is a
   // localhost convenience that must never show on the public site.
   mcp: { disabled: true },
-  showToolbar: 'never',
   showDeveloperTools: 'never',
   // What the request samples default to; every language is still one click away.
   defaultHttpClient: { targetKey: 'shell', clientKey: 'curl' },
@@ -51,11 +52,11 @@ createApiReference('#app', {
   defaultOpenAllTags: true,
   expandAllModelSections: false,
   orderRequiredPropertiesFirst: true,
-  // The credential shown in samples. Never a real key.
+  // The key shown in every generated sample. Never a real one.
   authentication: {
     preferredSecurityScheme: 'IntegrationCredential',
     securitySchemes: {
-      IntegrationCredential: { token: 'atp_live_<your-key>' },
+      IntegrationCredential: { token: '<ACCESSLINK_API_KEY>' },
     },
   },
   metaData: {

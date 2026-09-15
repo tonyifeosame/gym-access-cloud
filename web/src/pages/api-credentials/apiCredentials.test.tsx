@@ -274,14 +274,16 @@ describe('the API documentation link', () => {
     // The accessible name says where it goes AND that it leaves the page.
     const link = within(note).getByRole('link', { name: /Open the API documentation \(opens in a new tab\)/ })
     expect(link).toHaveAttribute('href', PUBLIC_API_DOCS_URL)
-    expect(link).toHaveAttribute('href', 'https://docs.accesslink.store')
+    expect(link).toHaveAttribute('href', 'https://accesslink.store/docs')
     expect(link).toHaveAttribute('target', '_blank')
     expect(link.getAttribute('rel')?.split(/\s+/).sort()).toEqual(['noopener', 'noreferrer'])
 
-    // The customer address is the destination; no hosting provider's hostname
-    // appears anywhere on the page, as text or as a link.
+    // The reference lives under the console's own domain; no hosting
+    // provider's hostname and no retired docs subdomain appears anywhere on
+    // the page, as text or as a link.
     expect(document.body.innerHTML).not.toContain('onrender')
     expect(document.body.innerHTML).not.toContain('accesslink-doc')
+    expect(document.body.innerHTML).not.toContain('docs.accesslink.store')
   })
 
   it('is present even when the company has no credentials yet', async () => {

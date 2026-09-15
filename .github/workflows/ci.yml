@@ -153,8 +153,21 @@ jobs:
       # The production build is a separate check because `vite build` does
       # things `vitest` never runs: tree-shaking, minification, and the asset
       # pipeline. A console that tests green and does not build is not shippable.
+      # Its postbuild step publishes the API documentation into dist/docs, so
+      # this is also the build Render runs for https://accesslink.store/docs.
       - name: Production build
         run: npm run build
+
+      - name: The documentation is inside the build
+        run: |
+          test -f dist/docs/index.html && test -f dist/docs/openapi.yaml \
+            && test -f dist/docs/errors/resource_not_found.html \
+            || { echo "dist/docs is incomplete"; exit 1; }
+          if grep -rl 'docs\.accesslink\.store\|onrender\.com' dist/docs/; then
+            echo "The documentation names a hosting hostname."
+            exit 1
+          fi
+          echo "dist/docs is complete and names no hosting hostname."
 
       # The console must never carry a machine credential. The site API key is
       # the provisioning secret -- it registers terminals and rotates their
@@ -178,14 +191,19 @@ jobs:
           echo "Bundle carries no machine credentials."
 
   # ---------------------------------------------------------------------------
-  # API documentation (docs.accesslink.store)
+  # API documentation (https://accesslink.store/docs)
   # ---------------------------------------------------------------------------
   #
-  # The public reference is generated from apidocs/openapi.yaml. Its parity with
-  # the router (every documented route mounted, every public route documented,
-  # the error catalogue equal to the server's) is a Go test in the backend job;
-  # this job checks the document itself, builds the site, and opens the build
-  # in a browser under the deployed Content-Security-Policy.
+  # The public reference is generated from apidocs/openapi.yaml and served at
+  # https://accesslink.store/docs from inside the console's static site (the
+  # console build's postbuild step publishes it into web/dist/docs). Parity
+  # with the router -- every documented route mounted, every public route
+  # documented, the error catalogue equal to the server's, and the guide's
+  # curl examples replayed through the real router -- is a Go test in the
+  # backend job. This job checks the document and its examples against the
+  # schemas, builds the site, and opens the build in a browser mounted at
+  # /docs/ behind a console-style SPA fallback, under the console's
+  # Content-Security-Policy.
   docs:
     name: API documentation (OpenAPI + site)
     runs-on: ubuntu-latest
@@ -205,7 +223,7 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Validate the OpenAPI document
+      - name: Validate the OpenAPI document and its examples
         run: npm run validate
 
       - name: Build the site
@@ -214,7 +232,7 @@ jobs:
       # The render check drives the locally installed Chrome (playwright-core,
       # channel "chrome"), exactly as the console's browser sweep does. The
       # ubuntu runner image ships Google Chrome.
-      - name: Render check (navigation, search, links, mobile, CSP)
+      - name: Render check (/docs mount, navigation, search, links, mobile, CSP)
         run: npm run check
 
       # The site must carry no credential of any kind and must load nothing
