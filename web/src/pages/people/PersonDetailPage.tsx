@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { ApiError } from '../../api/client'
 import { can } from '../../auth/permissions'
@@ -53,6 +53,25 @@ export function PersonDetailPage() {
   const [enrolling, setEnrolling] = useState(false)
 
   const mayManage = can(session, 'managePeople')
+
+  /*
+    ?enrol=1 OPENS THE ENROLMENT DIALOG ON ARRIVAL. The assistant hands off
+    here after the operator has approved starting an enrolment, and "open
+    the person, then find and press Enrol" is one step too many when
+    somebody is standing at the terminal. The parameter is consumed once and
+    removed from the address, so a reload or a shared link does not reopen
+    the dialog. It opens nothing for an operator who could not press the
+    button themselves.
+  */
+  const [searchParams, setSearchParams] = useSearchParams()
+  const enrolRequested = searchParams.get('enrol') === '1'
+  useEffect(() => {
+    if (!enrolRequested) return
+    if (mayManage) setEnrolling(true)
+    const next = new URLSearchParams(searchParams)
+    next.delete('enrol')
+    setSearchParams(next, { replace: true })
+  }, [enrolRequested, mayManage, searchParams, setSearchParams])
 
   // The enrolment is read on the page as well as in the dialog, so the
   // credential panel can say WHICH terminal captured the fingerprint and when —

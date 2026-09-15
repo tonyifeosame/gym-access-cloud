@@ -29,8 +29,9 @@ const (
 	// are not credentials by then -- expired and revoked rows authenticate
 	// nothing -- but "who signed in, when, and from where" is a question worth
 	// being able to answer after an incident.
-	defaultSessionRetentionDays = 30
-	defaultSessionPurgeInterval = 6 * time.Hour
+	defaultSessionRetentionDays   = 30
+	defaultAssistantRetentionDays = 30
+	defaultSessionPurgeInterval   = 6 * time.Hour
 
 	// Roster reconciliation. Fifteen minutes is the granularity at which a
 	// permission's validity window takes effect at an OFFLINE terminal -- an
@@ -111,6 +112,11 @@ type Config struct {
 	SessionPurgeInterval time.Duration
 	SessionRetentionDays int
 
+	// AssistantRetentionDays is how long an idle assistant conversation is
+	// kept. Its own setting, shorter than the audit retention: a conversation
+	// is working material, the audit row is the record. Zero disables it.
+	AssistantRetentionDays int
+
 	ReconcileInterval      time.Duration
 	RetentionPurgeInterval time.Duration
 
@@ -128,13 +134,14 @@ type Config struct {
 // LoadConfig reads maintenance settings from the environment
 func LoadConfig() Config {
 	return Config{
-		Enabled:              envBool("MAINTENANCE_ENABLED", true),
-		OfflineAfter:         envDuration("DEVICE_OFFLINE_AFTER_SECONDS", defaultOfflineAfter),
-		SweepInterval:        envDuration("OFFLINE_SWEEP_INTERVAL_SECONDS", defaultSweepInterval),
-		PruneInterval:        envDuration("SYNC_JOB_PRUNE_INTERVAL_SECONDS", defaultPruneInterval),
-		RetentionDays:        envInt("SYNC_JOB_RETENTION_DAYS", defaultRetentionDays),
-		SessionPurgeInterval: envDuration("SESSION_PURGE_INTERVAL_SECONDS", defaultSessionPurgeInterval),
-		SessionRetentionDays: envInt("SESSION_RETENTION_DAYS", defaultSessionRetentionDays),
+		Enabled:                envBool("MAINTENANCE_ENABLED", true),
+		OfflineAfter:           envDuration("DEVICE_OFFLINE_AFTER_SECONDS", defaultOfflineAfter),
+		SweepInterval:          envDuration("OFFLINE_SWEEP_INTERVAL_SECONDS", defaultSweepInterval),
+		PruneInterval:          envDuration("SYNC_JOB_PRUNE_INTERVAL_SECONDS", defaultPruneInterval),
+		RetentionDays:          envInt("SYNC_JOB_RETENTION_DAYS", defaultRetentionDays),
+		SessionPurgeInterval:   envDuration("SESSION_PURGE_INTERVAL_SECONDS", defaultSessionPurgeInterval),
+		SessionRetentionDays:   envInt("SESSION_RETENTION_DAYS", defaultSessionRetentionDays),
+		AssistantRetentionDays: envInt("ASSISTANT_RETENTION_DAYS", defaultAssistantRetentionDays),
 
 		ReconcileInterval: envDuration("ROSTER_RECONCILE_INTERVAL_SECONDS",
 			defaultReconcileInterval),
@@ -283,6 +290,26 @@ func (c Config) Tasks() []Task {
 				}
 				return fmt.Sprintf("purged %d event(s) and %d audit record(s) past retention",
 					events, audits), nil
+			},
+		})
+	}
+
+	// Idle assistant conversations, on the session purge's cadence: nothing
+	// about them is urgent, and a sweep an hour is plenty.
+	if c.AssistantRetentionDays > 0 {
+		tasks = append(tasks, Task{
+			Name:     "assistant_purge",
+			Interval: c.SessionPurgeInterval,
+			Run: func(ctx context.Context) (string, error) {
+				n, err := database.PurgeAssistantConversationsContext(ctx, c.AssistantRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				if n == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("purged %d assistant conversation(s) idle for more than %dd",
+					n, c.AssistantRetentionDays), nil
 			},
 		})
 	}

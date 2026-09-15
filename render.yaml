@@ -48,6 +48,12 @@ services:
       - key: GIN_MODE
         value: release
 
+      # The in-console assistant stays OFF here. Turning it on is a deliberate
+      # dashboard change -- ASSISTANT_ENABLED=true plus ANTHROPIC_API_KEY and
+      # ASSISTANT_CONFIRMATION_SECRET as secrets -- not something a deploy does.
+      - key: ASSISTANT_ENABLED
+        value: "false"
+
       # Trust nobody's X-Forwarded-For.
       #
       # Render terminates TLS at its edge and forwards over addresses this

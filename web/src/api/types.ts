@@ -1883,3 +1883,98 @@ export interface APICredentialUsage {
   last_used_ip?: string
   days: APICredentialUsageDay[]
 }
+
+// ---------------------------------------------------------------------------
+// The in-console assistant
+// ---------------------------------------------------------------------------
+//
+// What the console exchanges with /console/assistant/*. Nothing here carries a
+// credential: the assistant acts as the signed-in operator on the server, and
+// the browser only ever sees the conversation, the events of a turn, and the
+// confirmation token it hands back when the operator approves something.
+
+export interface AssistantCapabilities {
+  enabled: boolean
+  model?: string
+  /** Tool names this operator's role may use, for the panel's "what I can do". */
+  tools?: string[]
+}
+
+export interface AssistantConversation {
+  id: string
+  title: string
+  status: 'OPEN' | 'CLOSED' | 'EXPIRED'
+  model: string
+  turn_count: number
+  created_at: string
+  updated_at: string
+  last_message_at: string
+}
+
+export interface AssistantBlock {
+  type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
+  text?: string
+  id?: string
+  name?: string
+  input?: unknown
+  tool_use_id?: string
+  content?: string
+  is_error?: boolean
+}
+
+export interface AssistantMessage {
+  seq: number
+  role: 'user' | 'assistant'
+  blocks: AssistantBlock[]
+  created_at: string
+}
+
+export interface AssistantConsequence {
+  title: string
+  body: string
+  warnings?: string[]
+}
+
+export interface AssistantHandoff {
+  kind: string
+  route: string
+  label: string
+}
+
+/** One server-sent event of a turn, by type. */
+export type AssistantEvent =
+  | { type: 'turn.started'; turn_id: string; conversation_id: string }
+  | { type: 'assistant.delta'; text: string }
+  | { type: 'assistant.message'; text: string }
+  | { type: 'tool.call'; call_id: string; tool: string; arguments: unknown }
+  | { type: 'tool.result'; call_id: string; tool?: string; status: string; http_status?: number; summary: string }
+  | { type: 'handoff'; call_id: string; kind: string; route: string; label: string }
+  | {
+      type: 'confirmation.required'
+      call_id: string
+      confirmation_id: string
+      token: string
+      tool: string
+      arguments: Record<string, unknown>
+      consequence: AssistantConsequence
+      phrase_required: string
+      expires_at: string
+    }
+  | {
+      type: 'confirmation.settled'
+      confirmation_id: string
+      tool: string
+      /** What became of it on the server: ran, was attempted and failed, or was rejected. */
+      outcome: 'approved' | 'failed' | 'rejected'
+      message?: string
+    }
+  | {
+      type: 'turn.completed'
+      turn_id: string
+      stop_reason: string
+      usage?: unknown
+      replayed?: boolean
+      /** The conversation reached its bound with this turn; the next message needs a new one. */
+      conversation_closed?: boolean
+    }
+  | { type: 'turn.failed'; turn_id?: string; code: string; message: string; retryable: boolean }

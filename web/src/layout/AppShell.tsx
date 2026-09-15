@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 
+import { AssistantPanel } from '../assistant/AssistantPanel'
+import { useAssistantCapabilities } from '../assistant/useAssistantChat'
 import { roleLabel } from '../auth/roles'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { SiteProvider } from '../context/SiteContext'
@@ -18,12 +20,13 @@ import { SiteIndicator } from './SiteSwitcher'
  */
 export function AppShell() {
   const location = useLocation()
+  const [assistantOpen, setAssistantOpen] = useState(false)
 
   return (
     <SiteProvider>
       <div className="shell">
         <SkipToContent />
-        <TopBar />
+        <TopBar assistantOpen={assistantOpen} onToggleAssistant={() => setAssistantOpen((open) => !open)} />
         <div className="shell__body">
           <SideNav />
           {/*
@@ -52,6 +55,12 @@ export function AppShell() {
             </ErrorBoundary>
           </main>
         </div>
+        {/*
+          BESIDE THE PAGE, NOT INSIDE IT. The panel is not routed and survives
+          navigation, which is what lets a hand-off card open a screen while
+          the conversation that led there stays readable.
+        */}
+        <AssistantPanel open={assistantOpen} onClose={() => setAssistantOpen(false)} />
       </div>
     </SiteProvider>
   )
@@ -118,9 +127,19 @@ function SkipToContent() {
   )
 }
 
-function TopBar() {
+function TopBar({
+  assistantOpen,
+  onToggleAssistant,
+}: {
+  assistantOpen: boolean
+  onToggleAssistant: () => void
+}) {
   const session = useAuthenticatedSession()
   const { logout } = useSession()
+  // OFFERED ONLY WHEN THE DEPLOYMENT HAS IT. The capability read answers
+  // enabled=false wherever ASSISTANT_ENABLED is unset, and the button is then
+  // simply absent -- a launcher for a 503 would be a broken button.
+  const capabilities = useAssistantCapabilities()
 
   /*
     NO EXPLICIT NAVIGATION HERE, and that is the whole of it.
@@ -164,6 +183,16 @@ function TopBar() {
       </div>
 
       <div className="topbar__account">
+        {capabilities.data?.enabled ? (
+          <button
+            type="button"
+            className={assistantOpen ? 'button button--quiet topbar__assistant topbar__assistant--open' : 'button button--quiet topbar__assistant'}
+            aria-pressed={assistantOpen}
+            onClick={onToggleAssistant}
+          >
+            Assistant
+          </button>
+        ) : null}
         <span className="topbar__operator">
           {session.operator.full_name}
           <span className="topbar__role">{roleLabel(session.role)}</span>

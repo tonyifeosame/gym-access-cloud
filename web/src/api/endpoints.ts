@@ -1,5 +1,5 @@
-import { ApiError, api } from './client'
-import { setCsrfToken } from './csrf'
+import { ApiError, api, apiUrl, notifyUnauthenticated } from './client'
+import { getCsrfToken, setCsrfToken } from './csrf'
 import type {
   APICredential,
   APICredentialIssued,
@@ -84,6 +84,10 @@ import type {
   UpdateOperatorRequest,
   UpdateSiteRequest,
   WifiRecoveryStatus,
+  AssistantCapabilities,
+  AssistantConversation,
+  AssistantEvent,
+  AssistantMessage,
 } from './types'
 
 /**
@@ -1066,4 +1070,141 @@ export function fetchAPICredentialUsage(
   return api.get<APICredentialUsage>(
     `/api/v1/console/api-credentials/${encodeURIComponent(credentialId)}/usage?days=${encodeURIComponent(days)}`,
   )
+}
+
+// ---------------------------------------------------------------------------
+// The in-console assistant
+// ---------------------------------------------------------------------------
+
+export function fetchAssistantCapabilities(): Promise<AssistantCapabilities> {
+  return api.get<AssistantCapabilities>('/api/v1/console/assistant/capabilities')
+}
+
+export function createAssistantConversation(): Promise<AssistantConversation> {
+  return api.post<AssistantConversation>('/api/v1/console/assistant/conversations', {})
+}
+
+export function fetchAssistantConversation(
+  id: string,
+): Promise<{ conversation: AssistantConversation; messages: AssistantMessage[] }> {
+  return api.get(`/api/v1/console/assistant/conversations/${encodeURIComponent(id)}`)
+}
+
+/**
+ * Streams one turn.
+ *
+ * NOT THROUGH `request()`: a turn is a server-sent event stream, not a JSON
+ * body, and it is read as it arrives. What is kept from `request()` is the
+ * part that matters -- the cookie goes with `credentials: 'include'` and the
+ * CSRF token goes in the header, exactly as every other console write.
+ *
+ * A non-200 before the stream opens (a rate limit, a closed conversation, a
+ * bad confirmation token) is surfaced as an ApiError like any other call.
+ */
+export async function streamAssistantTurn(
+  path: string,
+  body: Record<string, unknown>,
+  onEvent: (event: AssistantEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream',
+    'Content-Type': 'application/json',
+  }
+  const token = getCsrfToken()
+  if (token) headers['X-CSRF-Token'] = token
+
+  const response = await fetch(apiUrl(path), {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (response.status === 401) {
+    notifyUnauthenticated()
+  }
+  if (!response.ok || !response.body) {
+    let message = `Request failed (${response.status})`
+    let code: string | null = null
+    try {
+      const payload = (await response.json()) as { error?: string; code?: string }
+      if (payload.error) message = payload.error
+      if (payload.code) code = payload.code
+    } catch {
+      // A body that is not JSON keeps the generic message.
+    }
+    const retryAfter = Number(response.headers.get('Retry-After'))
+    throw new ApiError(
+      response.status,
+      message,
+      response.headers.get('X-Request-ID'),
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null,
+      code,
+    )
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary >= 0) {
+      const frame = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      const event = parseSSEFrame(frame)
+      if (event) onEvent(event)
+      boundary = buffer.indexOf('\n\n')
+    }
+  }
+}
+
+export function sendAssistantMessage(
+  conversationId: string,
+  text: string,
+  clientMessageId: string,
+  onEvent: (event: AssistantEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamAssistantTurn(
+    `/api/v1/console/assistant/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { text, client_message_id: clientMessageId },
+    onEvent,
+    signal,
+  )
+}
+
+export function settleAssistantConfirmation(
+  conversationId: string,
+  token: string,
+  approve: boolean,
+  phrase: string | undefined,
+  onEvent: (event: AssistantEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamAssistantTurn(
+    `/api/v1/console/assistant/conversations/${encodeURIComponent(conversationId)}/confirmations`,
+    { token, approve, phrase },
+    onEvent,
+    signal,
+  )
+}
+
+/** One `event:`/`data:` frame to an AssistantEvent; comments and blanks are null. */
+export function parseSSEFrame(frame: string): AssistantEvent | null {
+  let type = ''
+  const data: string[] = []
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) type = line.slice(6).trim()
+    else if (line.startsWith('data:')) data.push(line.slice(5).trimStart())
+  }
+  if (!type || data.length === 0) return null
+  try {
+    return { ...(JSON.parse(data.join('\n')) as object), type } as AssistantEvent
+  } catch {
+    return null
+  }
 }

@@ -606,6 +606,24 @@ func NewRouter() *gin.Engine {
 		// Site B" cannot arise -- and the routes naming a site still go through
 		// RequireSiteGrant, which resolves it inside the caller's company and
 		// answers 404 for anybody else's.
+		// The in-console assistant. VIEWER may talk to it: what it can DO is
+		// decided per tool by the routes each tool dispatches to, exactly as
+		// if the operator had pressed the button. Writes carry CSRF like every
+		// other console write, and each operator is rate-limited by session.
+		assistantRoutes := console.Group("/assistant")
+		assistantRoutes.Use(middleware.RequireRole(models.RoleViewer))
+		{
+			assistantRoutes.GET("/capabilities", handlers.AssistantCapabilities)
+			assistantRoutes.GET("/conversations", handlers.AssistantListConversations)
+			assistantRoutes.GET("/conversations/:id", handlers.AssistantGetConversation)
+			assistantRoutes.POST("/conversations", middleware.RequireCSRF(),
+				handlers.AssistantCreateConversation)
+			assistantRoutes.POST("/conversations/:id/messages", middleware.RequireCSRF(),
+				middleware.AssistantRateLimiter(), handlers.AssistantPostMessage)
+			assistantRoutes.POST("/conversations/:id/confirmations", middleware.RequireCSRF(),
+				middleware.AssistantConfirmRateLimiter(), handlers.AssistantSettleConfirmation)
+		}
+
 		admin := console.Group("")
 		admin.Use(middleware.RequireCSRF(), middleware.RequireRole(models.RoleAdmin))
 		{

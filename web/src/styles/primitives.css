@@ -2756,3 +2756,197 @@ textarea.field__input {
     flex-wrap: wrap;
   }
 }
+
+/* ===========================================================================
+ * The assistant panel
+ *
+ * A column pinned to the right edge, above the page and below the top bar.
+ * It is a dialog for assistive technology but not a modal: the console
+ * behind it stays usable, because its hand-off cards point at the screens
+ * that finish what it started. On a phone it takes the whole viewport, as
+ * every other panel does.
+ * ======================================================================== */
+
+.assistant {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+  z-index: 90;
+}
+
+.assistant__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.assistant__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+}
+
+.assistant__header-actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.assistant__list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.assistant__intro,
+.assistant__status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.assistant__entry {
+  display: flex;
+}
+
+.assistant__entry--user {
+  justify-content: flex-end;
+}
+
+.assistant__bubble {
+  margin: 0;
+  max-width: 92%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal, 1.5);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant__bubble--user {
+  background: var(--accent);
+  color: #fff;
+}
+
+.assistant__cursor::after {
+  content: '▍';
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
+.assistant__tool {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.assistant__tool-name {
+  font-weight: 600;
+}
+
+.assistant__card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.assistant__card--confirm {
+  border-inline-start: 3px solid var(--warning);
+}
+
+.assistant__card-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+}
+
+.assistant__card-body,
+.assistant__card-warning,
+.assistant__card-settled {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-snug);
+}
+
+.assistant__card-warning {
+  color: var(--text-muted);
+}
+
+.assistant__card-settled {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.assistant__card-failure {
+  color: var(--text-muted);
+}
+
+.assistant__card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.assistant__composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  align-items: end;
+}
+
+.assistant__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.assistant__input {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+@media (max-width: 680px) {
+  .assistant {
+    width: 100vw;
+    border-left: 0;
+  }
+}
+
+/* The launcher, marked while its panel is open so the state is visible
+   without the panel being in view on a phone. */
+.topbar__assistant--open {
+  background: var(--surface-sunken);
+}
