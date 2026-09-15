@@ -20,7 +20,7 @@ import {
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
 import { failNext, resetServerState, seed, state } from '../../test/server'
 import { ApiCredentialDetailPage } from './ApiCredentialDetailPage'
-import { ApiCredentialsListPage } from './ApiCredentialsListPage'
+import { ApiCredentialsListPage, PUBLIC_API_DOCS_URL } from './ApiCredentialsListPage'
 
 /**
  * Integration credentials in the console.
@@ -254,6 +254,55 @@ describe('credential list', () => {
     renderCredentials()
     expect(await screen.findByText('Failed to retrieve integration credentials')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Try again|Retry/ })).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Documentation link
+// ---------------------------------------------------------------------------
+
+describe('the API documentation link', () => {
+  it('opens the public reference in a new tab, at the published address, without showing the address', async () => {
+    signIn()
+    renderCredentials()
+    await screen.findByText('Roster sync')
+
+    const note = screen.getByRole('heading', { name: 'API documentation' }).closest('.notice') as HTMLElement
+    expect(within(note).getByText(/authentication and credential scopes/i)).toBeInTheDocument()
+    expect(within(note).getByText(/error codes, rate limits, and the full API reference/i)).toBeInTheDocument()
+
+    // The accessible name says where it goes AND that it leaves the page.
+    const link = within(note).getByRole('link', { name: /Open the API documentation \(opens in a new tab\)/ })
+    expect(link).toHaveAttribute('href', PUBLIC_API_DOCS_URL)
+    expect(link).toHaveAttribute('href', 'https://docs.accesslink.store')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel')?.split(/\s+/).sort()).toEqual(['noopener', 'noreferrer'])
+
+    // The customer address is the destination; no hosting provider's hostname
+    // appears anywhere on the page, as text or as a link.
+    expect(document.body.innerHTML).not.toContain('onrender')
+    expect(document.body.innerHTML).not.toContain('accesslink-doc')
+  })
+
+  it('is present even when the company has no credentials yet', async () => {
+    signIn()
+    seed({ apiCredentials: [] })
+    renderCredentials()
+    await screen.findByText('No integration credentials')
+    expect(screen.getByRole('link', { name: /Open the API documentation/ })).toHaveAttribute(
+      'href',
+      PUBLIC_API_DOCS_URL,
+    )
+  })
+
+  it('is shown to an ADMIN and an OWNER alike, and never carries a credential', async () => {
+    signIn('OWNER')
+    renderCredentials()
+    await screen.findByText('Roster sync')
+    const link = screen.getByRole('link', { name: /Open the API documentation/ })
+    expect(link).toHaveAttribute('href', PUBLIC_API_DOCS_URL)
+    expect(link.getAttribute('href')).not.toMatch(SECRET_SHAPE)
+    expect(link.getAttribute('href')).not.toMatch(/[?#]/)
   })
 })
 
