@@ -3758,7 +3758,7 @@ Www-Authenticate: Bearer realm="accesslink"
     "code": "api_credential_missing",
     "message": "No credential was presented. Send Authorization: Bearer <your key>.",
     "request_id": "6e4a99b280eb9e6e",
-    "doc_url": "https://docs.accesslink.store/errors/api_credential_missing"
+    "doc_url": "https://accesslink.store/docs/errors/api_credential_missing"
   }
 }
 ```
@@ -3820,7 +3820,7 @@ A credential issued with `sites:read` only, asking for members:
     "code": "insufficient_scope",
     "message": "This credential does not carry the scope this endpoint requires.",
     "request_id": "d1566e1129a1f7bb",
-    "doc_url": "https://docs.accesslink.store/errors/insufficient_scope"
+    "doc_url": "https://accesslink.store/docs/errors/insufficient_scope"
   }
 }
 ```
@@ -3853,7 +3853,7 @@ Every public error is one object, and the **legacy string rule in
     "message": "No such resource.",
     "param": "member_id",
     "request_id": "7bd8490b23dbdbcc",
-    "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+    "doc_url": "https://accesslink.store/docs/errors/resource_not_found"
   }
 }
 ```
@@ -3865,7 +3865,7 @@ Every public error is one object, and the **legacy string rule in
 | `message` | always | for a human; **not stable, do not parse** |
 | `param` | when there is one | the body field or query parameter at fault |
 | `request_id` | always | the same value as the `X-Request-ID` response header |
-| `doc_url` | when published | `https://docs.accesslink.store/errors/<code>`. The site is not yet live; the codes are stable regardless |
+| `doc_url` | when published | `https://accesslink.store/docs/errors/<code>`. The site is not yet live; the codes are stable regardless |
 
 **Clients branch on `code` and status, never on `message`.** No public message
 is ever built from an internal error string, a validator's field path or a
@@ -4004,7 +4004,7 @@ form, as captured.)
     "code": "rate_limit_exceeded",
     "message": "Rate limit exceeded.",
     "request_id": "5fc50d5d15152eb7",
-    "doc_url": "https://docs.accesslink.store/errors/rate_limit_exceeded"
+    "doc_url": "https://accesslink.store/docs/errors/rate_limit_exceeded"
   }
 }
 ```
@@ -4125,7 +4125,7 @@ A limit outside the bounds:
     "message": "limit must be an integer between 1 and 200.",
     "param": "limit",
     "request_id": "2f54349499400475",
-    "doc_url": "https://docs.accesslink.store/errors/invalid_field"
+    "doc_url": "https://accesslink.store/docs/errors/invalid_field"
   }
 }
 ```
@@ -4141,7 +4141,7 @@ A request that tries to name its tenant:
     "message": "The account is determined by your credential and cannot be supplied in a request.",
     "param": "company_id",
     "request_id": "e6e7d3d987e1531a",
-    "doc_url": "https://docs.accesslink.store/errors/tenant_identity_not_permitted"
+    "doc_url": "https://accesslink.store/docs/errors/tenant_identity_not_permitted"
   }
 }
 ```
@@ -4180,7 +4180,7 @@ curl http://localhost:8080/api/public/v1/members/MEM001 \
     "code": "resource_not_found",
     "message": "No such resource.",
     "request_id": "5cf64ccbac9a0b34",
-    "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+    "doc_url": "https://accesslink.store/docs/errors/resource_not_found"
   }
 }
 ```
@@ -4273,7 +4273,7 @@ second member. Without a key it is `409 member_id_already_exists`:
     "message": "A member with that id already exists.",
     "param": "member_id",
     "request_id": "ed315d247eb6e49a",
-    "doc_url": "https://docs.accesslink.store/errors/member_id_already_exists"
+    "doc_url": "https://accesslink.store/docs/errors/member_id_already_exists"
   }
 }
 ```
@@ -4290,7 +4290,7 @@ accepted:
     "message": "The field fingerprint_template is not recognised.",
     "param": "fingerprint_template",
     "request_id": "9334e2ce31af790b",
-    "doc_url": "https://docs.accesslink.store/errors/unknown_field"
+    "doc_url": "https://accesslink.store/docs/errors/unknown_field"
   }
 }
 ```
@@ -4331,7 +4331,7 @@ curl -X PATCH "http://localhost:8080/api/public/v1/members/MEM042" \
     "message": "member_id identifies the member and cannot be changed.",
     "param": "member_id",
     "request_id": "c8167bf9f5e8329f",
-    "doc_url": "https://docs.accesslink.store/errors/invalid_field"
+    "doc_url": "https://accesslink.store/docs/errors/invalid_field"
   }
 }
 ```
@@ -4528,7 +4528,7 @@ The restricted credential asking for the site it was not issued for:
     "code": "site_not_permitted",
     "message": "This credential is not scoped to that site.",
     "request_id": "433be31abd341a5c",
-    "doc_url": "https://docs.accesslink.store/errors/site_not_permitted"
+    "doc_url": "https://accesslink.store/docs/errors/site_not_permitted"
   }
 }
 ```
@@ -4727,7 +4727,7 @@ curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
     "message": "A timestamp could not be read. Use RFC 3339, for example 2026-09-09T17:00:00Z.",
     "param": "from",
     "request_id": "312d5010d71e231c",
-    "doc_url": "https://docs.accesslink.store/errors/invalid_timestamp"
+    "doc_url": "https://accesslink.store/docs/errors/invalid_timestamp"
   }
 }
 ```

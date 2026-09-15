@@ -19,12 +19,12 @@ function openapiDocument() {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const path = (req.url ?? '').split('?')[0]
-        if (path === '/openapi.yaml') {
+        if (path === `${DOCS_BASE}openapi.yaml`) {
           res.setHeader('Content-Type', 'application/yaml; charset=utf-8')
           res.end(read())
           return
         }
-        if (path === '/openapi.json') {
+        if (path === `${DOCS_BASE}openapi.json`) {
           res.setHeader('Content-Type', 'application/json; charset=utf-8')
           res.end(asJSON(read()))
           return
@@ -40,8 +40,13 @@ function openapiDocument() {
   }
 }
 
+// The site lives under /docs/ on the console's origin (accesslink.store): the
+// console build copies this directory's dist/ to its own dist/docs/ (see
+// web/scripts/build-docs.mjs), so every asset URL is rooted there.
+export const DOCS_BASE = '/docs/'
+
 export default defineConfig({
-  base: '/',
+  base: DOCS_BASE,
   plugins: [openapiDocument()],
   build: {
     outDir: 'dist',

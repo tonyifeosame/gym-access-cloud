@@ -2,7 +2,7 @@
 /*
  * Generate the error-code pages.
  *
- * The API puts `doc_url: https://docs.accesslink.store/errors/<code>` on every
+ * The API puts `doc_url: https://accesslink.store/docs/errors/<code>` on every
  * public error it serves (models/api_errors.go). This turns the registered
  * list in openapi.yaml (x-accesslink-error-codes, held equal to the server's
  * list by openapi_docs_test.go) into one static page per code under
@@ -25,7 +25,10 @@ if (!existsSync(join(DIST, 'index.html'))) {
 
 const doc = YAML.parse(readFileSync(join(ROOT, 'openapi.yaml'), 'utf8'))
 const codes = doc['x-accesslink-error-codes']
-const site = 'https://docs.accesslink.store'
+// The public address of the site and the path it is mounted at. The pages
+// link with absolute paths under BASE so they work wherever dist/ is copied.
+const BASE = '/docs'
+const site = `https://accesslink.store${BASE}`
 
 const escape = (s) =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -49,7 +52,7 @@ const page = ({ title, heading, body, canonical }) => `<!doctype html>
 <meta name="color-scheme" content="light dark">
 <title>${escape(title)}</title>
 <link rel="canonical" href="${canonical}">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="${BASE}/favicon.svg" type="image/svg+xml">
 <style>
   :root { color-scheme: light dark; --accent: #1f5fbf; --muted: #5d6b7b; --line: #d6dde6; --code: #f1f4f8; }
   @media (prefers-color-scheme: dark) { :root { --accent: #8ab8ff; --muted: #97a4b4; --line: #2b3542; --code: #161d27; } }
@@ -74,9 +77,9 @@ const page = ({ title, heading, body, canonical }) => `<!doctype html>
 </head>
 <body>
 <main>
-<nav class="crumbs" aria-label="Breadcrumb"><a href="/">AccessLink API reference</a> › <a href="/errors/">Errors</a>${heading ? ' › ' + escape(heading) : ''}</nav>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="${BASE}/">AccessLink API reference</a> › <a href="${BASE}/errors/">Errors</a>${heading ? ' › ' + escape(heading) : ''}</nav>
 ${body}
-<footer>Generated from <a href="/openapi.yaml">openapi.yaml</a>. Codes are additive only: a code is never renamed, removed or given a different meaning.</footer>
+<footer>Generated from <a href="${BASE}/openapi.yaml">openapi.yaml</a>. Codes are additive only: a code is never renamed, removed or given a different meaning.</footer>
 </main>
 </body>
 </html>
@@ -106,7 +109,7 @@ for (const c of codes) {
 </dl>
 <h2>Example body</h2>
 <pre><code>${escape(JSON.stringify(example, null, 2))}</code></pre>
-<p>See <a href="/#description/errors">Errors</a> in the reference for the full table, and <a href="/#description/rate-limits">Rate limits</a> for the headers a client paces against.</p>
+<p>See <a href="${BASE}/#description/errors">Errors</a> in the reference for the full table, and <a href="${BASE}/#description/rate-limits">Rate limits</a> for the headers a client paces against.</p>
 `
   // Written twice, as errors/<code>/index.html and errors/<code>.html: the
   // API's doc_url has no trailing slash, and static hosts differ on which of
@@ -123,7 +126,7 @@ const rows = [...byType.entries()]
   .map(
     ([type, list]) => `
 <tr><th scope="row"><code>${escape(type)}</code></th><td>${list[0].status}</td><td>${list
-      .map((c) => `<a href="/errors/${c.code}/"><code>${escape(c.code)}</code></a>${c.reserved ? ' <span class="reserved">(reserved)</span>' : ''}`)
+      .map((c) => `<a href="${BASE}/errors/${c.code}"><code>${escape(c.code)}</code></a>${c.reserved ? ' <span class="reserved">(reserved)</span>' : ''}`)
       .join('<br>')}</td></tr>`,
   )
   .join('')

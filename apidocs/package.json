@@ -2,11 +2,11 @@
   "name": "accesslink-apidocs",
   "private": true,
   "version": "1.0.0",
-  "description": "AccessLink public API documentation site (docs.accesslink.store)",
+  "description": "AccessLink public API documentation site (https://accesslink.store/docs)",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "validate": "node scripts/validate.mjs",
+    "validate": "node scripts/validate.mjs && node scripts/validate-examples.mjs",
     "build": "npm run validate && vite build && node scripts/build-errors.mjs",
     "check": "node scripts/check-site.mjs",
     "test": "npm run validate && npm run build && npm run check",
@@ -15,6 +15,8 @@
   "devDependencies": {
     "@apidevtools/swagger-parser": "^10.1.0",
     "@scalar/api-reference": "^1.68.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "playwright-core": "^1.62.1",
     "vite": "^6.0.5",
     "yaml": "^2.6.0"
