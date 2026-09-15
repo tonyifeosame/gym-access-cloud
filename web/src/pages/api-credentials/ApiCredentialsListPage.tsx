@@ -32,11 +32,13 @@ import { IssueCredentialDialog } from './IssueCredentialDialog'
  * they just issued stays on screen beside it. The reference is published under
  * the console's own domain (/docs on accesslink.store, built into this site by
  * scripts/build-docs.mjs); the words on the page do not repeat the address, so
- * a move changes one constant.
+ * a move changes one constant. WITH THE TRAILING SLASH: the static host serves
+ * a directory's index only when the slash is present; the bare /docs is not a
+ * file and would fall into the console's own catch-all.
  */
 
 /** Where the public API reference is published -- the customer-facing address. */
-export const PUBLIC_API_DOCS_URL = 'https://accesslink.store/docs'
+export const PUBLIC_API_DOCS_URL = 'https://accesslink.store/docs/'
 
 export function ApiCredentialsListPage() {
   const navigate = useNavigate()
