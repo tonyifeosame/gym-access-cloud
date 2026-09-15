@@ -29,13 +29,13 @@ import { IssueCredentialDialog } from './IssueCredentialDialog'
  * THE DOCUMENTATION IS LINKED FROM HERE because this is where a credential is
  * issued, and the person issuing one is the person about to write code against
  * the API. The link opens the public reference in a new tab so the credential
- * they just issued stays on screen beside it. The destination is a hosting
- * address; the words on the page never show it, so a move of the site changes
- * one constant and no wording.
+ * they just issued stays on screen beside it. The destination is the public
+ * customer address of the reference, never a hosting provider's hostname; the
+ * words on the page do not repeat it, so a move changes one constant.
  */
 
-/** Where the public API reference is published. */
-export const PUBLIC_API_DOCS_URL = 'https://accesslink-doc.onrender.com'
+/** Where the public API reference is published -- the customer-facing address. */
+export const PUBLIC_API_DOCS_URL = 'https://docs.accesslink.store'
 
 export function ApiCredentialsListPage() {
   const navigate = useNavigate()
