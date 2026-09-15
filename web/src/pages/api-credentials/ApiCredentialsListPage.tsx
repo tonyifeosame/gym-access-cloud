@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import type { APICredential } from '../../api/types'
 import { DataTable, type Column } from '../../components/DataTable'
-import { PageHeader, RefreshingIndicator } from '../../components/states'
+import { InfoNote, PageHeader, RefreshingIndicator } from '../../components/states'
 import { Timestamp } from '../../components/Timestamp'
 import { useAPICredentials } from '../../data/console'
 import { CredentialStatusBadge, ScopeChips, isLive } from './credentialVocabulary'
@@ -25,7 +25,18 @@ import { IssueCredentialDialog } from './IssueCredentialDialog'
  *
  * THIS PAGE NEVER RENDERS A SECRET. The list carries key prefixes only; the
  * secret exists in the issue dialog for as long as its panel is open.
+ *
+ * THE DOCUMENTATION IS LINKED FROM HERE because this is where a credential is
+ * issued, and the person issuing one is the person about to write code against
+ * the API. The link opens the public reference in a new tab so the credential
+ * they just issued stays on screen beside it. The destination is a hosting
+ * address; the words on the page never show it, so a move of the site changes
+ * one constant and no wording.
  */
+
+/** Where the public API reference is published. */
+export const PUBLIC_API_DOCS_URL = 'https://accesslink-doc.onrender.com'
+
 export function ApiCredentialsListPage() {
   const navigate = useNavigate()
   const query = useAPICredentials()
@@ -119,6 +130,25 @@ export function ApiCredentialsListPage() {
           </button>
         }
       />
+
+      <InfoNote title="API documentation">
+        <p>
+          Authentication and credential scopes, every endpoint with request and
+          response examples, error codes, rate limits, and the full API reference —
+          everything your developers need to build against the public API.
+        </p>
+        <p>
+          <a
+            className="button button--primary"
+            href={PUBLIC_API_DOCS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open the API documentation
+            <span className="visually-hidden"> (opens in a new tab)</span>
+          </a>
+        </p>
+      </InfoNote>
 
       <div className="toolbar">
         <label className="checkbox toolbar__toggle">

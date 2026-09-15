@@ -1076,6 +1076,15 @@ textarea.field__input {
   padding-block: 4px;
 }
 
+/* A link dressed as a button is a button to the eye and the thumb: the
+ * button's own vertical padding (not the inline-link padding above) and no
+ * underline, wherever it sits. After the rule above so it wins on order. */
+a.button {
+  display: inline-block;
+  padding-block: var(--space-2);
+  text-decoration: none;
+}
+
 .mono {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
