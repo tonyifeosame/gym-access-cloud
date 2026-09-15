@@ -105,6 +105,15 @@ export class ApiError extends Error {
 type UnauthenticatedHandler = () => void
 let onUnauthenticated: UnauthenticatedHandler | null = null
 
+/**
+ * Tells the session layer a 401 arrived on a path `request()` did not handle
+ * itself -- the assistant's event stream, which reads the response body as a
+ * stream rather than as JSON.
+ */
+export function notifyUnauthenticated(): void {
+  onUnauthenticated?.()
+}
+
 export function setUnauthenticatedHandler(handler: UnauthenticatedHandler | null): void {
   onUnauthenticated = handler
 }

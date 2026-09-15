@@ -157,6 +157,8 @@ const (
 	RateClassClaim         = "claim"
 	RateClassPlatformLogin = "platform_login"
 	RateClassAdopt         = "adopt"
+	RateClassAssistant     = "assistant"
+	RateClassAssistantOK   = "assistant_ok"
 )
 
 // RateStore decides whether a subject may spend a token.
@@ -224,6 +226,24 @@ func AnnounceDeviceRateLimitPerMinute() int {
 func AdoptRateLimitPerMinute() int {
 	return envRateLimit("ADOPT_RATE_LIMIT_PER_MINUTE", defaultAdoptRateLimitPerMinute)
 }
+
+// AssistantRateLimitPerMinute resolves how many messages one operator may
+// send the assistant per minute. Each one is a model call and a handful of
+// internal requests, so the allowance is a fraction of the ordinary console's.
+func AssistantRateLimitPerMinute() int {
+	return envRateLimit("ASSISTANT_RATE_PER_MINUTE", defaultAssistantRateLimitPerMinute)
+}
+
+// AssistantConfirmRateLimitPerMinute resolves how many confirmations one
+// operator may settle per minute.
+func AssistantConfirmRateLimitPerMinute() int {
+	return envRateLimit("ASSISTANT_CONFIRM_RATE_PER_MINUTE", defaultAssistantConfirmRateLimitPerMinute)
+}
+
+const (
+	defaultAssistantRateLimitPerMinute        = 20
+	defaultAssistantConfirmRateLimitPerMinute = 10
+)
 
 func envRateLimit(key string, fallback int) int {
 	if raw := os.Getenv(key); raw != "" {
@@ -463,6 +483,23 @@ func AdoptRateLimiter() gin.HandlerFunc {
 			}
 			return addressSubject(c)
 		}))
+}
+
+// AssistantRateLimiter bounds messages to the assistant, per session.
+func AssistantRateLimiter() gin.HandlerFunc {
+	return mount(newLimiter(RateClassAssistant, AssistantRateLimitPerMinute(), true, sessionSubject))
+}
+
+// AssistantConfirmRateLimiter bounds confirmation settlements, per session.
+func AssistantConfirmRateLimiter() gin.HandlerFunc {
+	return mount(newLimiter(RateClassAssistantOK, AssistantConfirmRateLimitPerMinute(), true, sessionSubject))
+}
+
+func sessionSubject(c *gin.Context) (string, string) {
+	if id := c.GetInt64(ContextSessionID); id != 0 {
+		return RateSubjectCredential, "session:" + strconv.FormatInt(id, 10)
+	}
+	return addressSubject(c)
 }
 
 // AnnounceRateLimiter limits the device provisioning endpoints.

@@ -225,6 +225,11 @@ export const keys = {
     list: () => [ROOT, 'firmware', 'list'] as const,
   },
 
+  assistant: {
+    all: [ROOT, 'assistant'] as const,
+    capabilities: () => [ROOT, 'assistant', 'capabilities'] as const,
+  },
+
   apiCredentials: {
     all: [ROOT, 'api-credentials'] as const,
     list: () => [ROOT, 'api-credentials', 'list'] as const,

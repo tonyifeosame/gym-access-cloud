@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"access-terminal-cloud-api/assistant"
 	"access-terminal-cloud-api/bootstrap"
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/handlers"
@@ -274,6 +275,22 @@ func main() {
 
 	r := NewRouter()
 
+	// The in-console assistant, absent unless every part of it is configured:
+	// ASSISTANT_ENABLED=true, an ANTHROPIC_API_KEY, and a confirmation secret.
+	// It acts through the router it is handed, as the signed-in operator.
+	handlers.SetAssistant(assistant.New(assistant.Options{
+		Router:             r,
+		Model:              assistantModel(),
+		Enabled:            os.Getenv("ASSISTANT_ENABLED") == "true",
+		ConfirmationSecret: []byte(os.Getenv("ASSISTANT_CONFIRMATION_SECRET")),
+		Limits:             assistant.LimitsFromEnv(),
+	}))
+	if handlers.Assistant().Enabled() {
+		log.Printf("assistant: enabled (model %s)", handlers.Assistant().ModelName())
+	} else {
+		log.Printf("assistant: disabled (set ASSISTANT_ENABLED=true, ANTHROPIC_API_KEY and ASSISTANT_CONFIRMATION_SECRET to enable)")
+	}
+
 	// Background maintenance
 	maintCfg := maintenance.LoadConfig()
 	maintCfg.Describe()
@@ -321,4 +338,14 @@ func main() {
 	}
 
 	log.Println("Shutdown complete")
+}
+
+// assistantModel builds the model client, or nil when no key is configured.
+// Typed as the interface so a nil client does not become a non-nil interface.
+func assistantModel() assistant.Model {
+	m := assistant.NewAnthropicModel(os.Getenv("ASSISTANT_MODEL"))
+	if m == nil {
+		return nil
+	}
+	return m
 }

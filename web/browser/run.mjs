@@ -829,6 +829,62 @@ async function main() {
       // with the rest of the unauthenticated screens and as an anonymous
       // visitor — which is what somebody who cannot sign in actually is.
 
+      /* --- the assistant panel, on a page mocked with it enabled --------------
+       *
+       * Off in the sweep's ordinary page, as it is off in every deployment
+       * until enabled. A SECOND PAGE turns it on, opens the panel from the
+       * launcher, sends one message that the mock answers with a tool chip, a
+       * confirmation card and a hand-off card, and measures the result: axe
+       * with contrast, no horizontal overflow, the card's buttons within the
+       * touch floor, and the panel filling the width on a phone. Then the
+       * card is approved and the follow-up drawn.
+       */
+      const withAssistant = await context.newPage()
+      await mockApi(withAssistant, { assistant: true })
+      instrument(withAssistant, `${viewport.name}/assistant`)
+      await withAssistant.goto(`${site.url}/people`, { waitUntil: 'networkidle' })
+      const launcher = withAssistant.locator('button.topbar__assistant')
+      if (check(
+        (await launcher.count()) > 0,
+        `${viewport.name}/assistant: no launcher on a page with the assistant enabled, so the panel was never swept`,
+      )) {
+        await launcher.click()
+        await withAssistant.waitForSelector('[role="dialog"][aria-label="Assistant"]', { timeout: 5000 })
+        await withAssistant.fill('#assistant-input', 'Keep Chukwuemeka out everywhere')
+        await withAssistant.keyboard.press('Enter')
+        await withAssistant.waitForSelector('.assistant__card--confirm', { timeout: 10_000 })
+        const label = `${viewport.name}/assistant panel`
+        await runAxe(withAssistant, label)
+        if (isPhone(viewport)) await checkTargetSize(withAssistant, label)
+
+        const geometry = await withAssistant.evaluate(() => {
+          const panel = document.querySelector('.assistant')
+          const box = panel?.getBoundingClientRect()
+          return {
+            scrollWidth: document.documentElement.scrollWidth,
+            clientWidth: document.documentElement.clientWidth,
+            panelWidth: box ? Math.round(box.width) : null,
+            viewportWidth: window.innerWidth,
+          }
+        })
+        check(
+          geometry.scrollWidth <= geometry.clientWidth + 1,
+          `${label}: the page scrolls horizontally with the panel open (${geometry.scrollWidth} > ${geometry.clientWidth})`,
+        )
+        if (isPhone(viewport)) {
+          check(
+            geometry.panelWidth !== null && geometry.panelWidth >= geometry.viewportWidth - 1,
+            `${label}: the panel is ${geometry.panelWidth}px wide on a ${geometry.viewportWidth}px phone; it should fill the width`,
+          )
+        }
+
+        await withAssistant.locator('.assistant__card--confirm button', { hasText: /^Approve$/ }).click()
+        await withAssistant.waitForSelector('text=Done. The rule is in place.', { timeout: 10_000 })
+        await runAxe(withAssistant, `${label} after approval`)
+        notes.push(`${viewport.name}: assistant panel swept (card, approval)`)
+      }
+      await withAssistant.close()
+
       // --- the focus ring is actually visible -------------------------------
       await page.goto(`${site.url}/people`, { waitUntil: 'networkidle' })
       await page.keyboard.press('Tab')

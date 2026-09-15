@@ -811,11 +811,76 @@ const ROUTES = [
  * module constant whose handlers are shared by every page, so it is the one
  * place a per-page answer cannot live.
  */
+/*
+ * THE ASSISTANT, AS THE SWEEP SEES IT. Off by default, exactly as a
+ * deployment is: /capabilities answers enabled=false and the launcher is
+ * absent. A page mocked with `assistant: true` gets the launcher, a
+ * conversation, and one scripted turn per message -- a tool call, a
+ * confirmation card, a hand-off -- streamed as a server-sent event body, so
+ * the panel and its cards can be drawn and measured at every viewport.
+ */
+function assistantTurn(events) {
+  const frames = [{ type: 'turn.started', turn_id: 't1', conversation_id: 'conv-1' }, ...events,
+    { type: 'turn.completed', turn_id: 't1', stop_reason: 'end_turn' }]
+  return frames
+    .map((event, index) => {
+      const { type, ...data } = event
+      return `event: ${type}
+id: ${index + 1}
+data: ${JSON.stringify(data)}
+
+`
+    })
+    .join('')
+}
+
+const ASSISTANT_SCRIPT = [
+  { type: 'tool.call', call_id: 'c1', tool: 'search_people', arguments: { query: 'Ada' } },
+  { type: 'tool.result', call_id: 'c1', tool: 'search_people', status: 'EXECUTED', summary: 'ok' },
+  { type: 'tool.call', call_id: 'c2', tool: 'grant_access', arguments: { external_id: 'P-0001' } },
+  { type: 'tool.result', call_id: 'c2', tool: 'grant_access', status: 'CONFIRMATION_REQUESTED', summary: 'waiting for your approval' },
+  {
+    type: 'confirmation.required', call_id: 'c2', confirmation_id: 'conf-1', token: 'v1.conf-1.sig', tool: 'grant_access',
+    arguments: { external_id: 'P-0001', effect: 'DENY', scope_type: 'COMPANY' },
+    consequence: {
+      title: 'Keep Chukwuemeka Nwachukwu-Oluwaseun out of everywhere?',
+      body: 'Adds a rule that keeps Chukwuemeka Nwachukwu-Oluwaseun out of everywhere, at any time. Keep out always wins, even if another rule lets them in.',
+      warnings: ['This covers terminals that do not exist yet: A rule for everywhere applies to every terminal you have and every one installed later. That is often what somebody wants for staff, and rarely what they want for a visitor.'],
+    },
+    phrase_required: '', expires_at: '2026-09-15T12:00:00Z',
+  },
+  { type: 'handoff', call_id: 'c1', kind: 'person', route: '/people/P-0001', label: 'Open Chukwuemeka Nwachukwu-Oluwaseun' },
+  { type: 'assistant.message', text: 'I found Chukwuemeka Nwachukwu-Oluwaseun. The keep-out rule is waiting for your approval.' },
+]
+
 export async function mockApi(page, options = {}) {
   const session = 'session' in options ? options.session : SESSION
+  const assistant = Boolean(options.assistant)
 
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
+
+    if (/\/api\/v1\/console\/assistant\//.test(url.pathname)) {
+      if (url.pathname.endsWith('/capabilities')) {
+        return route.fulfill({ status: 200, contentType: 'application/json',
+          body: JSON.stringify(assistant ? { enabled: true, model: 'mock', tools: ['search_people'] } : { enabled: false }) })
+      }
+      if (!assistant) {
+        return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is not enabled.' }) })
+      }
+      if (url.pathname.endsWith('/conversations') && route.request().method() === 'POST') {
+        const now = new Date().toISOString()
+        return route.fulfill({ status: 201, contentType: 'application/json',
+          body: JSON.stringify({ id: 'conv-1', title: '', status: 'OPEN', model: 'mock', turn_count: 0, created_at: now, updated_at: now, last_message_at: now }) })
+      }
+      if (url.pathname.endsWith('/messages') || url.pathname.endsWith('/confirmations')) {
+        const events = url.pathname.endsWith('/messages')
+          ? ASSISTANT_SCRIPT
+          : [{ type: 'tool.result', call_id: 'c2', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done' },
+             { type: 'assistant.message', text: 'Done. The rule is in place.' }]
+        return route.fulfill({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: assistantTurn(events) })
+      }
+    }
 
     /*
       ANONYMOUS IS A 401, NOT AN EMPTY BODY.

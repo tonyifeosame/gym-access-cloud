@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 
 import type {
+  AssistantEvent,
   APICredential,
   APICredentialUsage,
   AuthProviders,
@@ -118,6 +119,14 @@ interface ServerState {
    * every existing screen test sees the login screen it always saw.
    */
   providers: AuthProviders
+  /**
+   * The assistant, as the mock plays it. `assistantEnabled` is what
+   * /capabilities answers; `assistantTurns` is a queue of scripted turns, each
+   * a list of events the next POST /messages or /confirmations streams back.
+   * A turn is consumed per request; an empty queue streams a plain reply.
+   */
+  assistantEnabled: boolean
+  assistantTurns: AssistantEvent[][]
   /** Forces the next matching request to fail, for error-path tests. */
   failNext: Record<string, number>
   requests: { method: string; url: string; headers: Headers }[]
@@ -132,6 +141,8 @@ function initialState(): ServerState {
     terminals: [],
     people: [],
     enrollments: {},
+    assistantEnabled: false,
+    assistantTurns: [],
     operators: [],
     apiCredentials: [],
     apiCredentialUsage: {},
@@ -230,6 +241,26 @@ function record(request: Request): void {
 }
 
 const REQUEST_ID = 'test-request-id'
+
+function streamTurn(events: AssistantEvent[]) {
+  const frames = [{ type: 'turn.started', turn_id: 't1', conversation_id: 'conv-1' }, ...events]
+  const ended = frames.some((e) => e.type === 'turn.completed' || e.type === 'turn.failed')
+  if (!ended) frames.push({ type: 'turn.completed', turn_id: 't1', stop_reason: 'end_turn' })
+  const body = frames
+    .map((event, index) => {
+      const { type, ...data } = event as { type: string } & Record<string, unknown>
+      return `event: ${type}
+id: ${index + 1}
+data: ${JSON.stringify(data)}
+
+`
+    })
+    .join('')
+  return new HttpResponse(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Request-ID': 'test' },
+  })
+}
 
 function json(body: object, status = 200) {
   return HttpResponse.json(body, { status, headers: { 'X-Request-ID': REQUEST_ID } })
@@ -2760,6 +2791,56 @@ export const handlers = [
    * silently wrong the moment a company has more records than fit on one — and
    * an audit trail is the surface where "silently wrong" matters most.
    */
+  // --- the assistant ------------------------------------------------------
+  //
+  // The real thing streams server-sent events; the mock streams the scripted
+  // turn as one text/event-stream body, which the console's reader consumes
+  // frame by frame exactly as it would a live stream.
+
+  http.get('*/api/v1/console/assistant/capabilities', ({ request }) => {
+    record(request)
+    if (!state.session) return unauthorized()
+    if (!state.assistantEnabled) return json({ enabled: false })
+    return json({ enabled: true, model: 'mock-model', tools: ['search_people', 'get_person', 'create_person', 'grant_access'] })
+  }),
+
+  http.post('*/api/v1/console/assistant/conversations', ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    if (!state.assistantEnabled) return json({ error: 'The assistant is not enabled.', code: 'assistant_disabled' }, 503)
+    const now = new Date().toISOString()
+    return json(
+      { id: 'conv-1', title: '', status: 'OPEN', model: 'mock-model', turn_count: 0, created_at: now, updated_at: now, last_message_at: now },
+      201,
+    )
+  }),
+
+  http.post('*/api/v1/console/assistant/conversations/:id/messages', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    const failure = takeFailure('assistant-message')
+    if (failure) return json({ error: 'Too many messages', code: 'rate_limited' }, failure)
+    return streamTurn(state.assistantTurns.shift() ?? [{ type: 'assistant.message', text: 'Done.' }])
+  }),
+
+  http.post('*/api/v1/console/assistant/conversations/:id/confirmations', async ({ request }) => {
+    record(request)
+    const refused = guard(request)
+    if (refused) return refused
+    const body = (await request.json()) as { token?: string; approve?: boolean }
+    if (!body.token) return json({ error: 'A confirmation token is required' }, 400)
+    const failure = takeFailure('assistant-confirm')
+    if (failure) return json({ error: 'That confirmation has expired.' }, failure)
+    return streamTurn(
+      state.assistantTurns.shift() ?? [
+        { type: 'tool.result', call_id: 'c1', tool: 'grant_access', status: body.approve ? 'CONFIRMED_EXECUTED' : 'CONFIRMATION_REJECTED', summary: body.approve ? 'done' : 'rejected' },
+        { type: 'assistant.message', text: body.approve ? 'Done.' : 'Understood, nothing was changed.' },
+      ],
+    )
+  }),
+
   http.get('*/api/v1/console/audit', ({ request }) => {
     record(request)
     if (!state.session) return unauthorized()
