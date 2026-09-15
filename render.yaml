@@ -233,6 +233,71 @@ services:
         name: Strict-Transport-Security
         value: max-age=63072000
 
+  # ---------------------------------------------------------------------------
+  # docs.accesslink.store -- the public API reference.
+  #
+  # A static site rendered from apidocs/openapi.yaml (see apidocs/README.md).
+  # No backend, no environment secrets, nothing the API or the console depends
+  # on: the API already links to https://docs.accesslink.store/errors/<code>
+  # in every public error body, and this is what makes those links resolve.
+  # Creating the service is a dashboard action (Blueprint sync or New -> Static
+  # Site); a push to main does not create it.
+  # ---------------------------------------------------------------------------
+  - name: accesslink-docs
+    type: web
+    runtime: static
+    branch: main
+    autoDeploy: false
+
+    rootDir: apidocs
+    # validate the document, build the reference, generate the error pages
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
+
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+
+    # No SPA rewrite: every URL the site serves is a real file. The reference
+    # is /index.html and navigates by hash; each error code is a file in both
+    # errors/<code>/index.html and errors/<code>.html form, so the API's
+    # doc_url (no trailing slash) resolves however the host treats clean URLs.
+
+    headers:
+      # Scalar is bundled and self-hosted: scripts and the OpenAPI document
+      # come from this origin only. style-src needs 'unsafe-inline' (the
+      # renderer sets element styles); img-src allows data: for its icons.
+      # No connect-src beyond 'self' because the in-page client is disabled --
+      # widen it to https://api.accesslink.store only if "Try it" is turned on
+      # (apidocs/README.md). scripts/check-site.mjs loads the built site under
+      # exactly this policy, so a Scalar upgrade that needs more fails the
+      # build rather than the page.
+      - path: /*
+        name: Content-Security-Policy
+        value: >-
+          default-src 'none'; script-src 'self'; connect-src 'self';
+          img-src 'self' data:; style-src 'self' 'unsafe-inline';
+          font-src 'self'; worker-src 'self' blob:; frame-src 'none';
+          object-src 'none'; base-uri 'none'; form-action 'none';
+          frame-ancestors 'none'
+
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000
+
+      # The document is fetched by tooling as well as by the page.
+      - path: /openapi.yaml
+        name: Cache-Control
+        value: public, max-age=300
+
 databases:
   - name: accesslink-db
     plan: free

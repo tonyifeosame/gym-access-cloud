@@ -1,0 +1,65 @@
+/*
+ * docs.accesslink.store -- the few things the stock theme does not do.
+ *
+ * Scalar's "default" theme carries the layout, sidebar, search and dark mode.
+ * What is set here: the brand accent (the console's blue), a system font
+ * stack (Scalar's own fonts are switched off so the page loads nothing from a
+ * third party), a focus ring that is visible on every interactive element, and
+ * a body colour that keeps text above 7:1 in light mode and 10:1 in dark.
+ */
+
+:root {
+  --scalar-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --scalar-font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* Light */
+.light-mode,
+:root:not(.dark-mode) {
+  --scalar-color-accent: #1f5fbf;
+  --scalar-color-1: #16202b;
+  --scalar-color-2: #3c4a5a;
+  --scalar-color-3: #5d6b7b;
+  --scalar-background-accent: #e8f0fb;
+}
+
+/* Dark */
+.dark-mode {
+  --scalar-color-accent: #8ab8ff;
+  --scalar-color-1: #f2f5f9;
+  --scalar-color-2: #c3ccd8;
+  --scalar-color-3: #97a4b4;
+  --scalar-background-accent: #1a2a44;
+}
+
+/* A focus ring you can see, wherever focus lands. */
+:is(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--scalar-color-accent) !important;
+  outline-offset: 2px;
+}
+
+/* Method badges: keep the colour, add weight so they read at small sizes. */
+.sidebar-heading-type,
+.endpoint-method {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Tables in the guide sections: full width, wrapped cells, readable on a phone. */
+.markdown table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.markdown th,
+.markdown td {
+  vertical-align: top;
+  padding: 0.4rem 0.6rem;
+}
+
+/* Long opaque cursors and keys in samples must never push the page sideways. */
+.markdown code,
+.markdown pre {
+  overflow-wrap: anywhere;
+}

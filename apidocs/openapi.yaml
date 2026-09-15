@@ -1,0 +1,2091 @@
+openapi: 3.1.0
+
+# ---------------------------------------------------------------------------
+# AccessLink API — the public specification behind docs.accesslink.store.
+#
+# THIS FILE DESCRIBES WHAT IS SERVED, NOT WHAT IS PLANNED. Every path here is
+# checked against the router by openapi_docs_test.go (a documented route that
+# the server does not mount fails the build, and so does a mounted public route
+# that is not documented here), and every error code is checked against
+# models.APIErrors. Examples are the ones captured from a running server in
+# API_SPEC.md §18; the cursors in them are opaque tokens from a development
+# database and unlock nothing.
+#
+# Two audiences share this document and are kept apart by tag group:
+#   - the PUBLIC API (/api/public/v1), authenticated by an integration
+#     credential, which is the contract for third parties; and
+#   - a small, clearly marked slice of the CONSOLE API (operator session +
+#     CSRF), included only because fingerprint enrolment is started there and
+#     not through the public tree.
+# Hardware (terminal and site-key) routes are deliberately absent.
+# ---------------------------------------------------------------------------
+
+info:
+  title: AccessLink API
+  version: "2026-09-15"
+  summary: Fingerprint access control for your own systems — members, access rules, sites and events.
+  contact:
+    name: AccessLink
+    url: https://accesslink.store
+  description: |
+    AccessLink runs fingerprint terminals at doors, gates and turnstiles. The
+    **AccessLink Console** (`app.accesslink.store`) is where staff manage people,
+    terminals, sites and access rules. This API is how your own software — a
+    membership platform, a booking system, an HR tool, a reporting job — takes
+    part without a person at the console.
+
+    Everything on this site is generated from a single OpenAPI document,
+    [`openapi.yaml`](/openapi.yaml), which is validated against the running
+    server's routes on every build. If it is documented here, it is served.
+
+    ## Getting started
+
+    1. **Get an integration credential.** In the console, an **Administrator**
+       or **Owner** opens *Settings → API access* and issues a credential with a
+       name, the scopes it needs, and — optionally — the sites it is limited to.
+       The secret is shown **once**, at issue, and is never retrievable again;
+       AccessLink stores only its SHA-256. Credentials expire after a year by
+       default (the console lets you choose otherwise) and can be rotated with a
+       72-hour grace window in which both keys work.
+
+    2. **Call the API with the credential** in the `Authorization` header:
+
+       ```bash
+       curl https://api.accesslink.store/api/public/v1/members?limit=2 \
+         -H "Authorization: Bearer atp_live_<your-key>"
+       ```
+
+    3. **Read the response.** Every list is an object with `data`, `has_more`
+       and `next_cursor`; every error is one object under `error` with a stable
+       `code` (see *Errors*). Every response carries an `X-Request-ID` header —
+       quote it when you contact support.
+
+    The base URL for the public API is `https://api.accesslink.store/api/public/v1`.
+    All requests and responses are `application/json`; timestamps are RFC 3339
+    in UTC (`2026-09-15T13:42:21.606843Z`).
+
+    ### What you can and cannot do
+
+    | You can | You cannot |
+    |---|---|
+    | Create, read, update and remove **members** (the people terminals recognise) | Unlock a door or command a terminal |
+    | Read a member's **access rules** and whether each is in force now | Enrol a fingerprint, or read or write any biometric material |
+    | Read your **sites** | Read terminals (a `terminals:read` scope exists but no route serves it yet) |
+    | Read the **events** trail — every presentation at a door and its outcome | Register webhooks (no route in this version) |
+
+    The console API — the one the AccessLink Console itself uses — can do more,
+    including starting a fingerprint enrolment at a terminal. A small slice of
+    it is documented in *Console API* at the end of the reference, with its
+    different authentication and a weaker compatibility promise.
+
+    ## Authentication
+
+    ### Integration credential (public API)
+
+    ```
+    Authorization: Bearer atp_live_<64 hex characters>
+    ```
+
+    The key names its **environment** — `atp_live_…` or `atp_test_…` — and a
+    deployment accepts exactly one kind (production accepts `live`). The
+    **company is the credential's company and nothing else**: no path segment,
+    query parameter, header or body field names a tenant, and a request that
+    tries (`company_id` or `company` anywhere) is refused with
+    `400 tenant_identity_not_permitted`.
+
+    | Presented | Status | `code` |
+    |---|---|---|
+    | No `Authorization` header, or a scheme other than `Bearer` | `401` | `api_credential_missing` |
+    | A value that is not `atp_<env>_<64 hex>` | `401` | `api_credential_invalid` |
+    | A key of the other environment | `401` | `api_credential_wrong_environment` |
+    | Unknown, revoked, expired, rotated out past its grace window, or an inactive company | `401` | `api_credential_invalid` |
+
+    Every `401` carries `WWW-Authenticate: Bearer realm="accesslink"`. A refused
+    key answers `api_credential_invalid` regardless of why; the
+    `api_credential_expired` and `api_credential_revoked` codes are registered
+    and reserved but not served in this version. A database failure during
+    authentication is `503 service_unavailable` with `Retry-After`, never a `401`.
+
+    ### Credential scopes
+
+    A credential carries a fixed set of scopes chosen at issue. A route names
+    the one scope it requires; a credential without it is refused
+    `403 insufficient_scope` **before any lookup** — even for a resource that
+    does not exist.
+
+    | Scope | Unlocks |
+    |---|---|
+    | `members:read` | reading members |
+    | `members:write` | creating, updating and removing members; **implies `members:read`** |
+    | `access:read` | reading a member's access rules |
+    | `sites:read` | reading sites |
+    | `events:read` | reading the events trail |
+    | `terminals:read`, `webhooks:manage` | registered, but **no route serves them in this version** |
+
+    ### Site restriction
+
+    A credential is issued either for every site in its company or for a named
+    set. A restricted credential lists and reads **only its sites**; a site in
+    the company but outside the set is `403 site_not_permitted`; a site in
+    another company is `404 resource_not_found`, exactly like one that never
+    existed. Events are bounded the same way (an event at a site outside the
+    restriction — or with no site at all — is not visible). **Members are
+    company-wide** and are not narrowed by a site restriction.
+
+    Order of checks: authentication → scope → tenant lookup → site restriction.
+
+    ### Operator session (console API)
+
+    The console endpoints documented at the end of this reference authenticate
+    with the operator's own session: the `__Host-al_session` cookie set by
+    `POST /api/v1/auth/login`, plus the `X-CSRF-Token` header (the `csrf_token`
+    from the login or `/me` body) on every request that is not `GET`. These are
+    the AccessLink Console's own endpoints; they are not covered by the public
+    API's error shape or its additive-only compatibility promise.
+
+    ## Fingerprint authentication
+
+    **The terminal recognises the finger; the platform never does.** A person
+    presents a finger at a terminal, the terminal matches it against the
+    fingerprints it holds, consults the access rules it has synchronised, and
+    admits or refuses. The outcome is reported to AccessLink as an **event**,
+    which is what this API lets you read.
+
+    What that means for an integration:
+
+    - **Members are yours to manage.** Use your own member number as
+      `member_id` — it is what the terminal reads and reports, so an event can
+      be joined straight back to your records. Creating a member through this
+      API puts them on every terminal in the company with the company's
+      default access rule; the terminals pick the change up on their next
+      sync, so allow a short delay before a new member is recognised.
+    - **Enrolment happens at a terminal, started by an operator.** There is no
+      public route that starts a fingerprint enrolment. A console operator
+      (Manager or above) opens the person in the console — or uses the
+      *Enrol* step when adding them — chooses the terminal the person is
+      standing at, and that terminal enters enrolment mode for a bounded
+      window (default 5 minutes). The same operation is exposed to your
+      console-authenticated tooling as `POST /api/v1/console/terminals/{serial}/enrollments`,
+      documented under *Fingerprint enrolment*.
+    - **The fingerprint stays on the terminal that captured it.** AccessLink
+      keeps no copy an integration can read, and this API has no field for a
+      template, image or sample: sending `fingerprint_template` to any member
+      route is refused as `400 unknown_field`. A member who needs to be
+      recognised at another terminal is enrolled there.
+    - **Whether a person *would* be admitted is not a yes/no you can fetch.**
+      The decision is made at a terminal, at a moment, with that terminal's
+      site, timezone and schedules in hand. What you can read is the set of
+      rules that decision draws on (`GET /members/{member_id}/access`, each
+      rule with its `standing` right now) and, afterwards, what actually
+      happened (`GET /events`, with `decision` and `reason`).
+    - **Deactivate versus remove.** `PATCH {"active": false}` keeps the person
+      on every terminal, marked inactive, and refused with reason
+      `PERSON_INACTIVE`; it is reversible. `DELETE` removes them from every
+      terminal's roster and erases the fingerprints held there for them; to let
+      them back in, create them again and enrol them again.
+
+    ## Pagination
+
+    List endpoints page by **opaque cursor**, not by offset.
+
+    | Parameter | Default | Bounds |
+    |---|---|---|
+    | `limit` | `50` | `1`–`200`; anything else is `400 invalid_field` on `limit` (rejected, not clamped) |
+    | `cursor` | — | a value from a previous `next_cursor`, verbatim |
+
+    ```json
+    { "data": [ … ], "has_more": true, "next_cursor": "…" }
+    ```
+
+    `data` is `[]` when empty, never `null`; `next_cursor` is `null` when
+    `has_more` is `false`. Ordering is newest first with a stable tiebreak, so
+    paging visits every row exactly once. A cursor is encrypted and bound to the
+    credential's company and to the query (including filters) it was issued
+    for: presented with a different credential, different filters, or altered
+    in any way it is `400 cursor_invalid`. Do not decode, construct or compare
+    cursors. A cursor pointing past retained data is `410 cursor_expired`;
+    members and events are retained indefinitely in this version, so their
+    cursors do not expire.
+
+    ## Idempotency
+
+    Every write accepts an optional `Idempotency-Key` header (1–255 characters,
+    unique per credential). A repeat of the **same** request under the same key
+    within 24 hours is answered with the **stored** response — original status
+    and body, plus `Idempotent-Replay: true` — and the write does not run
+    again. The same key with a different method, path or body is
+    `409 idempotency_key_reuse`; a repeat while the first attempt is still
+    running is `409 idempotency_in_progress`. A `400` or `409` under a key is
+    stored and replayed too; only a `5xx` releases the key. Recommended on
+    `POST`, where a retry without one can only be told apart from a duplicate by
+    the `409`.
+
+    ## Errors
+
+    Every public-API error is one object under `error`:
+
+    ```json
+    {
+      "error": {
+        "type": "not_found_error",
+        "code": "resource_not_found",
+        "message": "No such resource.",
+        "param": "member_id",
+        "request_id": "7bd8490b23dbdbcc",
+        "doc_url": "https://docs.accesslink.store/errors/resource_not_found"
+      }
+    }
+    ```
+
+    **Branch on `code` and the HTTP status, never on `message`.** A code is
+    always served with the same status; codes are additive only — never
+    renamed, removed or given a different meaning. `param` names the body
+    field or query parameter at fault when there is one; `request_id` is the
+    same value as the `X-Request-ID` response header; `doc_url` points at the
+    page for that code on this site.
+
+    | `type` | Status | Codes |
+    |---|---|---|
+    | `authentication_error` | `401` | `api_credential_missing`, `api_credential_invalid`, `api_credential_wrong_environment` (reserved: `api_credential_expired`, `api_credential_revoked`) |
+    | `permission_error` | `403` | `insufficient_scope`, `site_not_permitted` (reserved: `company_inactive`) |
+    | `invalid_request_error` | `400` | `unknown_parameter`, `unknown_field`, `missing_field`, `invalid_field`, `invalid_timestamp`, `cursor_invalid`, `sort_not_supported`, `tenant_identity_not_permitted`, `member_id_unusable`, `idempotency_key_invalid`, `body_too_large` |
+    | `not_found_error` | `404` | `resource_not_found` |
+    | `conflict_error` | `409` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `idempotency_key_reuse`, `idempotency_in_progress` (reserved: `webhook_limit_reached`) |
+    | `gone_error` | `410` | `cursor_expired` |
+    | `rate_limit_error` | `429` | `rate_limit_exceeded`, with `Retry-After` |
+    | `api_error` | `500` / `503` | `internal_error` / `service_unavailable` (`503` carries `Retry-After`) |
+
+    **Unknown input is refused, not ignored.** A body field this version does
+    not define is `400 unknown_field`; a query parameter it does not define is
+    `400 unknown_parameter`; both name the offender in `param`. Every code has
+    its own page at `https://docs.accesslink.store/errors/<code>`.
+
+    ## Rate limits
+
+    Token-bucket allowances, kept on a shared store so they hold however many
+    servers are answering. **These are defaults, subject to change with
+    notice** — pace against the headers, not the numbers.
+
+    | Bucket | Applies to | Burst | Sustained |
+    |---|---|---|---|
+    | credential | each integration credential | 60 | 300 per minute |
+    | company | all of a company's credentials together | 200 | 900 per minute |
+    | authentication failures | unauthenticated attempts, per client address | 30 | 60 per minute |
+
+    An authenticated request spends one token from the credential bucket and
+    one from the company bucket **whatever the response** — a `404` did the
+    same work as a `200`. A request that fails authentication spends from the
+    authentication-failure bucket only, so a stream of bad keys cannot exhaust
+    an integrator's quota. Writes share the same allowances as reads.
+
+    Every response to an authenticated request carries the credential bucket's
+    state:
+
+    | Header | Meaning |
+    |---|---|
+    | `RateLimit-Limit` | the burst ceiling |
+    | `RateLimit-Remaining` | whole tokens left after this request |
+    | `RateLimit-Reset` | seconds until the bucket is full again |
+    | `RateLimit-Policy` | the sustained allowance, `300;w=60` |
+
+    A refusal is `429 rate_limit_exceeded` with `Retry-After` (whole seconds,
+    at least 1). A refused *unauthenticated* attempt is a `429` in place of the
+    `401` and carries no `WWW-Authenticate`. If the limiter's store cannot
+    answer, the request is refused with `503 service_unavailable` and
+    `Retry-After`; nothing is served unlimited because the limiter was down.
+
+    ## Changelog
+
+    ### 2026-09-15
+
+    - First publication of this reference at `docs.accesslink.store`, generated
+      from the OpenAPI document and validated against the server's routes.
+    - Public API v1: members (list, get, create, update, remove), member
+      access rules, sites (list, get) and events (list) — nine routes.
+    - Console API: operator session (`login`, `me`, `logout`) and fingerprint
+      enrolment (start at a terminal, read a person's enrolment, cancel)
+      documented for console-authenticated tooling.
+    - The error-code pages every `doc_url` points at are live.
+
+servers:
+  - url: https://api.accesslink.store
+    description: Production
+
+x-tagGroups:
+  - name: Public API
+    tags: [Members, Access, Sites, Events]
+  - name: Console API (operator session)
+    tags: [Console session, Fingerprint enrolment]
+
+tags:
+  - name: Members
+    description: |
+      The people the terminals recognise, projected for integrators.
+      **Authentication: integration credential.** A member object is exactly the
+      seven fields shown: there is no internal id and no biometric field of any
+      kind — not omitted when empty, absent from the type.
+
+      `member_id` is the identifier a terminal reads — your own badge, employee
+      or member number. It is unique per company and validated against what a
+      terminal can store: at most 31 characters, printable ASCII (`0x21`–`0x7E`),
+      no spaces. A UUID does not fit. It is stored **as supplied**, never
+      trimmed or normalised.
+
+      All writes run the same path as the console: a create writes the
+      company's default access rule, sync jobs are queued in the same
+      transaction, and every write is recorded in the company's audit trail
+      with the actor role `INTEGRATION` and the credential's non-secret key
+      prefix as the actor. Members are company-wide: a credential's site
+      restriction does not narrow member reads or writes.
+  - name: Access
+    description: |
+      A member's access rules and their standing right now.
+      **Authentication: integration credential, scope `access:read`.**
+
+      **Rules, not a verdict.** Whether a person is admitted is decided at a
+      terminal, at a moment, with that terminal's site, timezone and schedules
+      in hand. This route gives the set of rules that decision draws on, each
+      with whether it is in force **now** — the same reading the console shows
+      an operator. Whether a given presentation was admitted is in *Events*.
+
+      **No credentials.** Which fingerprints a person has enrolled belongs to
+      the platform and is not part of this contract; the object cannot carry it.
+  - name: Sites
+    description: |
+      Your sites — the places terminals stand.
+      **Authentication: integration credential, scope `sites:read`.**
+
+      A site object is exactly the seven fields shown. No provisioning key is
+      ever selected for a public route, and the site's offline policy is an
+      operator safety setting that is not part of the public object.
+  - name: Events
+    description: |
+      The record of what happened at the doors — every presentation a terminal
+      reported, admitted or refused, and why.
+      **Authentication: integration credential, scope `events:read`.**
+
+      Absent from the type, not merely omitted: the credential presented (its
+      type names a biometric modality), the application payload, and every
+      display name — a rename must not rewrite history.
+  - name: Console session
+    description: |
+      Signing an operator in and out of the AccessLink Console API.
+      **These are the console's own endpoints**, documented here because the
+      fingerprint-enrolment routes below require them. They use the console's
+      error shape (`{"error": "…"}`), a session cookie, and a CSRF header, and
+      are not covered by the public API's compatibility promise.
+
+      The login rate limit is per client address and per account; repeated
+      failures lock the account for a period. Use an operator account created
+      for your tooling, with the lowest role that can do the job.
+  - name: Fingerprint enrolment
+    description: |
+      Asking one terminal to capture a person's fingerprint, and following
+      what became of it. **Authentication: operator session + CSRF; the
+      operator must be a Manager or above, with a grant on the terminal's
+      site.**
+
+      Starting an enrolment puts exactly one terminal into enrolment mode for
+      a bounded window (30 seconds to 1 hour; default 5 minutes). The person
+      must be standing at that terminal. The captured fingerprint is stored on
+      that terminal; AccessLink keeps no copy that any API returns. Enrolment
+      states: `PENDING` (the terminal has not yet collected the request),
+      `IN_PROGRESS` (the terminal is showing the prompt), `COMPLETED`,
+      `FAILED` (the terminal's own words are in `error_message`), `EXPIRED`
+      (nobody presented a finger in time) and `CANCELLED`.
+
+components:
+  securitySchemes:
+    IntegrationCredential:
+      type: http
+      scheme: bearer
+      bearerFormat: atp_live_<64 hex>
+      description: |
+        An integration credential issued in the console under *Settings → API
+        access*. Send it as `Authorization: Bearer atp_live_<your-key>`. The
+        route's required scope is listed on each operation.
+    OperatorSession:
+      type: apiKey
+      in: cookie
+      name: __Host-al_session
+      description: |
+        The operator session cookie set by `POST /api/v1/auth/login`
+        (HttpOnly, Secure, SameSite=Lax). Console requests that are not `GET`
+        must also carry the `X-CSRF-Token` header with the `csrf_token` from
+        the session body.
+
+  parameters:
+    limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size, `1`–`200`. Default `50`. Out of bounds or not an integer is `400 invalid_field`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+      example: 2
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      description: The `next_cursor` from the previous page, verbatim. Opaque — do not decode, construct or compare.
+      schema:
+        type: string
+    memberId:
+      name: member_id
+      in: path
+      required: true
+      description: The member's own identifier — the value a terminal reads.
+      schema:
+        type: string
+        maxLength: 31
+      example: MEM001
+    siteId:
+      name: site_id
+      in: path
+      required: true
+      description: The site's public identifier (UUID).
+      schema:
+        type: string
+        format: uuid
+      example: 46e57753-0143-481a-83f6-e93a36cfb9a7
+    idempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional, 1–255 characters, unique per credential. A repeat of the same
+        request under the same key within 24 hours is answered with the stored
+        response and `Idempotent-Replay: true`. See *Idempotency*.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      example: 0f3f1c0e-issue-1
+    externalId:
+      name: external_id
+      in: path
+      required: true
+      description: The person's identifier — the same value the public API calls `member_id`.
+      schema:
+        type: string
+        maxLength: 31
+      example: MEM001
+    serial:
+      name: serial
+      in: path
+      required: true
+      description: The terminal's serial number, as printed on the unit and shown in the console.
+      schema:
+        type: string
+      example: AT-E05A1B38AA38
+
+  headers:
+    X-Request-ID:
+      description: Correlation id for this request; the same value appears as `request_id` in an error body. Quote it to support.
+      schema:
+        type: string
+      example: 7bd8490b23dbdbcc
+    RateLimit-Limit:
+      description: The credential bucket's burst ceiling.
+      schema: { type: integer }
+      example: 60
+    RateLimit-Remaining:
+      description: Whole tokens left in the credential bucket after this request.
+      schema: { type: integer }
+      example: 59
+    RateLimit-Reset:
+      description: Seconds until the credential bucket is full again.
+      schema: { type: integer }
+      example: 12
+    RateLimit-Policy:
+      description: The sustained allowance, as `<requests>;w=<seconds>`.
+      schema: { type: string }
+      example: 300;w=60
+    Retry-After:
+      description: Whole seconds to wait before retrying; never less than 1.
+      schema: { type: integer }
+      example: 1
+    WWW-Authenticate:
+      description: Always `Bearer realm="accesslink"` on a `401`.
+      schema: { type: string }
+      example: Bearer realm="accesslink"
+    Idempotent-Replay:
+      description: Present, as `true`, when the response is the stored answer to an earlier request with the same `Idempotency-Key`.
+      schema: { type: string }
+      example: "true"
+
+  schemas:
+    Error:
+      type: object
+      description: The one error shape every public-API response uses. Branch on `code` and status, never on `message`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, code, message]
+          properties:
+            type:
+              type: string
+              description: Coarse class of the failure.
+              enum:
+                - invalid_request_error
+                - authentication_error
+                - permission_error
+                - not_found_error
+                - conflict_error
+                - gone_error
+                - rate_limit_error
+                - api_error
+            code:
+              type: string
+              description: The stable identifier. Additive only — never renamed, removed or given a different meaning.
+              example: resource_not_found
+            message:
+              type: string
+              description: For a person to read. Not stable; do not parse.
+            param:
+              type: string
+              description: The body field or query parameter at fault, when there is one.
+            request_id:
+              type: string
+              description: The same value as the `X-Request-ID` response header.
+            doc_url:
+              type: string
+              format: uri
+              description: The page for this code on docs.accesslink.store.
+      example:
+        error:
+          type: not_found_error
+          code: resource_not_found
+          message: No such resource.
+          request_id: 5cf64ccbac9a0b34
+          doc_url: https://docs.accesslink.store/errors/resource_not_found
+
+    Member:
+      type: object
+      description: A person the terminals recognise. These seven fields are the whole object.
+      required: [id, member_id, full_name, membership_type, active, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The member's public identifier.
+        member_id:
+          type: string
+          maxLength: 31
+          description: The identifier a terminal reads — your own badge or member number. Unique per company; the path parameter.
+        full_name:
+          type: string
+          maxLength: 200
+        membership_type:
+          type: string
+          maxLength: 50
+          description: Free text. The console calls the same value *category*.
+        active:
+          type: boolean
+          description: An inactive member is refused at every terminal with reason `PERSON_INACTIVE`, whatever their rules say.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      example:
+        id: ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070
+        member_id: MEM001
+        full_name: Ada Lovelace
+        membership_type: ANNUAL
+        active: true
+        created_at: "2026-09-11T10:35:00.289175Z"
+        updated_at: "2026-09-11T10:35:00.289175Z"
+
+    MemberCreate:
+      type: object
+      description: The body of `POST /members`. A field this version does not define — including `fingerprint_template` — is `400 unknown_field`.
+      additionalProperties: false
+      required: [member_id, full_name]
+      properties:
+        member_id:
+          type: string
+          maxLength: 31
+          description: At most 31 printable ASCII characters, no spaces; unique per company. Stored as supplied.
+        full_name:
+          type: string
+          maxLength: 200
+        membership_type:
+          type: string
+          maxLength: 50
+          default: STANDARD
+        active:
+          type: boolean
+          default: true
+      example:
+        member_id: MEM042
+        full_name: Ada Lovelace
+
+    MemberUpdate:
+      type: object
+      description: |
+        The body of `PATCH /members/{member_id}`. Partial: an absent field keeps
+        its value. At least one field is required; an explicitly empty
+        `full_name` or `membership_type` is `400 invalid_field`; `member_id` in
+        the body is `400 invalid_field` because it cannot change.
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        full_name:
+          type: string
+          maxLength: 200
+        membership_type:
+          type: string
+          maxLength: 50
+        active:
+          type: boolean
+      example:
+        active: false
+
+    MemberPage:
+      type: object
+      required: [data, has_more, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Member"
+          description: This page; `[]` when empty, never `null`.
+        has_more:
+          type: boolean
+        next_cursor:
+          type: [string, "null"]
+          description: The cursor for the next page; `null` when `has_more` is `false`.
+
+    AccessRule:
+      type: object
+      required: [id, scope, effect, standing]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The rule's public identifier.
+        scope:
+          type: string
+          enum: [COMPANY, SITE, TERMINAL]
+          description: Where the rule applies.
+        site_id:
+          type: string
+          format: uuid
+          description: Present when `scope` is `SITE`.
+        terminal_serial:
+          type: string
+          description: Present when `scope` is `TERMINAL`.
+        effect:
+          type: string
+          enum: [ALLOW, DENY]
+          description: A `DENY` always wins over an `ALLOW`.
+        application:
+          type: string
+          description: Present when the rule is narrowed to one capability (for example `ACCESS_CONTROL`); absent means every capability.
+        schedule_id:
+          type: string
+          format: uuid
+          description: Present when the rule applies only inside a schedule's windows.
+        starts_at:
+          type: string
+          format: date-time
+          description: Start of the rule's validity window; absent means already started.
+        ends_at:
+          type: string
+          format: date-time
+          description: End of the rule's validity window; absent means no end.
+        standing:
+          type: string
+          enum: [IN_FORCE, NOT_YET, EXPIRED, INACTIVE]
+          description: As of the request — in force, not yet started, ended, or switched off.
+
+    MemberAccess:
+      type: object
+      required: [member_id, active, rules]
+      properties:
+        member_id:
+          type: string
+        active:
+          type: boolean
+          description: The member's own flag. An inactive member is refused everywhere whatever the rules say.
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccessRule"
+          description: Listed whatever the credential's site restriction, because the rules describe the person rather than a site's data.
+      example:
+        member_id: MEM042
+        active: true
+        rules:
+          - id: a30363e0-f216-4b47-83f9-b45bd74ef19f
+            scope: COMPANY
+            effect: ALLOW
+            standing: IN_FORCE
+
+    Site:
+      type: object
+      description: These seven fields are the whole object.
+      required: [id, name, address, timezone, active, terminal_count, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The site's public identifier; the path parameter.
+        name:
+          type: string
+        address:
+          type: string
+          description: Always present; `""` when the site has none.
+        timezone:
+          type: string
+          description: IANA time zone name of where the hardware stands.
+          example: Africa/Lagos
+        active:
+          type: boolean
+        terminal_count:
+          type: integer
+          description: Live (non-retired) terminals at the site.
+        created_at:
+          type: string
+          format: date-time
+      example:
+        id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+        name: Lagos Depot
+        address: 14 Marina Road
+        timezone: Africa/Lagos
+        active: true
+        terminal_count: 0
+        created_at: "2026-09-11T10:34:35.32243Z"
+
+    SiteList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Site"
+          description: Every site the credential reaches, ordered by `name` with `id` as the tiebreak. Not paginated.
+
+    Event:
+      type: object
+      required: [id, event_type, decision, occurred_at, occurred_at_trusted, recorded_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          description: Uppercase token, for example `ACCESS_GRANTED` or `ACCESS_DENIED`. Open — new types may appear.
+        decision:
+          type: string
+          enum: [GRANTED, DENIED, RECORDED, ERROR]
+          description: Closed set.
+        reason:
+          type: string
+          description: Machine-readable, for example `ALLOWED`, `NO_PERMISSION`, `OUTSIDE_SCHEDULE`, `PERSON_INACTIVE`, `PERSON_UNKNOWN`. Absent when the terminal gave none; open.
+        direction:
+          type: string
+          enum: [IN, OUT]
+          description: Absent when not applicable.
+        application:
+          type: string
+          description: The capability that produced the event; absent for platform events.
+        member_id:
+          type: string
+          description: The member the platform matched. **Absent when nobody was matched.**
+        member:
+          type: string
+          format: uuid
+          description: That member's `id`.
+        subject:
+          type: string
+          description: What the terminal read, kept so an unmatched attempt is still traceable.
+        site_id:
+          type: string
+          format: uuid
+          description: Absent for an event with no site.
+        terminal_serial:
+          type: string
+          description: Absent when the terminal is unknown.
+        occurred_at:
+          type: string
+          format: date-time
+          description: When it happened **at the terminal**.
+        occurred_at_trusted:
+          type: boolean
+          description: Whether the terminal's clock was believable; `false` means `occurred_at` is the server's arrival time.
+        recorded_at:
+          type: string
+          format: date-time
+          description: When the server heard about it — hours after `occurred_at` for a queued upload.
+      example:
+        id: b86cbd42-0a1c-40cc-b641-1e01ff7fc58a
+        event_type: ACCESS_DENIED
+        decision: DENIED
+        reason: OUTSIDE_SCHEDULE
+        member_id: P4-EV-001
+        member: 378bddff-8412-41e1-be6e-8a44829c0a69
+        subject: P-AUTH
+        site_id: 96126c0e-0e81-4bbb-81ba-da4fb4b29081
+        terminal_serial: P4-EV-A
+        occurred_at: "2026-09-11T12:14:00Z"
+        occurred_at_trusted: true
+        recorded_at: "2026-09-11T19:20:46.187594Z"
+
+    EventPage:
+      type: object
+      required: [data, has_more, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        has_more:
+          type: boolean
+        next_cursor:
+          type: [string, "null"]
+
+    # --- console API ---------------------------------------------------------
+
+    ConsoleError:
+      type: object
+      description: The console API's error shape — a single sentence for a person to read.
+      required: [error]
+      properties:
+        error:
+          type: string
+      example:
+        error: Person not found
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+      example:
+        email: integrations@example.com
+        password: "<password>"
+
+    Session:
+      type: object
+      description: Returned identically by `login` and `/me`. An object, deliberately — new fields are added without breaking clients.
+      required: [operator, company, role, sites, all_sites, applications, csrf_token, session_expires_at, session_expires_in_seconds]
+      properties:
+        operator:
+          type: object
+          required: [id, email, full_name, role]
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string, format: email }
+            full_name: { type: string }
+            role:
+              type: string
+              enum: [OWNER, ADMIN, MANAGER, VIEWER]
+        company:
+          type: object
+          required: [id, name, slug]
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string }
+            slug: { type: string }
+        role:
+          type: string
+          enum: [OWNER, ADMIN, MANAGER, VIEWER]
+        sites:
+          type: array
+          description: The operator's explicit site grants, possibly empty.
+          items:
+            type: object
+            properties:
+              site_id: { type: string, format: uuid }
+              site_name: { type: string }
+        all_sites:
+          type: boolean
+          description: Whether the operator reaches every site in the company (always true for OWNER and ADMIN, and for anyone holding no grants).
+        applications:
+          type: array
+          description: The capabilities the company has enabled.
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              settings: { type: object }
+        must_change_password:
+          type: boolean
+        csrf_token:
+          type: string
+          description: Send as `X-CSRF-Token` on every console request that is not `GET`.
+        session_expires_at:
+          type: string
+          format: date-time
+        session_expires_in_seconds:
+          type: integer
+          description: Resolved server-side; prefer it over the absolute timestamp when scheduling.
+      example:
+        operator:
+          id: 1f0c2a3e-4d5b-4c6d-8e7f-9a0b1c2d3e4f
+          email: integrations@example.com
+          full_name: Integration Bot
+          role: MANAGER
+        company:
+          id: 9b2a7c1d-0e3f-4a5b-8c6d-7e8f9a0b1c2d
+          name: Acme Fitness
+          slug: acme-fitness
+        role: MANAGER
+        sites: []
+        all_sites: true
+        applications:
+          - code: ACCESS_CONTROL
+            settings: {}
+        must_change_password: false
+        csrf_token: "<csrf-token>"
+        session_expires_at: "2026-09-22T09:12:33Z"
+        session_expires_in_seconds: 604800
+
+    EnrollmentStartRequest:
+      type: object
+      required: [external_id]
+      properties:
+        external_id:
+          type: string
+          maxLength: 31
+          description: The person to enrol — the value the public API calls `member_id`. Must exist in the operator's company.
+        expires_in_seconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+          default: 300
+          description: How long the terminal waits for a finger. Values outside the bounds are clamped to them.
+      example:
+        external_id: MEM042
+        expires_in_seconds: 300
+
+    Enrollment:
+      type: object
+      required: [id, status, external_id, terminal_serial, created_at, biometric_enrolled]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED, FAILED, EXPIRED, CANCELLED]
+        external_id:
+          type: string
+        full_name:
+          type: string
+        terminal_serial:
+          type: string
+        terminal_name:
+          type: string
+        site_name:
+          type: string
+        site_public_id:
+          type: string
+          format: uuid
+        terminal_status:
+          type: string
+          description: The terminal's current health (for example `ONLINE`, `OFFLINE`), so a caller can tell a queued request from one the terminal has seen.
+        error_message:
+          type: string
+          description: The terminal's own words, when `status` is `FAILED`.
+        requested_by_email:
+          type: string
+          format: email
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        biometric_enrolled:
+          type: boolean
+          description: Whether the person now has a fingerprint enrolled. Never the fingerprint itself.
+      example:
+        id: 0d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a
+        status: PENDING
+        external_id: MEM042
+        full_name: Ada Lovelace
+        terminal_serial: AT-E05A1B38AA38
+        terminal_name: Reception
+        site_name: Lagos Depot
+        site_public_id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+        terminal_status: ONLINE
+        requested_by_email: integrations@example.com
+        created_at: "2026-09-15T10:00:00Z"
+        expires_at: "2026-09-15T10:05:00Z"
+        biometric_enrolled: false
+
+    PersonEnrollment:
+      type: object
+      required: [external_id, biometric_enrolled, enrollment]
+      properties:
+        external_id:
+          type: string
+        biometric_enrolled:
+          type: boolean
+          description: Whether the person currently has a fingerprint enrolled.
+        enrollment:
+          oneOf:
+            - $ref: "#/components/schemas/Enrollment"
+            - type: "null"
+          description: The person's most recent enrolment, or `null` when none has ever been started — a different fact from "the last one failed".
+      example:
+        external_id: MEM042
+        biometric_enrolled: false
+        enrollment: null
+
+  responses:
+    Unauthorized:
+      description: No credential, a malformed one, one of the other environment, or one that is unknown, revoked, expired or rotated out.
+      headers:
+        WWW-Authenticate:
+          $ref: "#/components/headers/WWW-Authenticate"
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missing:
+              summary: api_credential_missing
+              value:
+                error:
+                  type: authentication_error
+                  code: api_credential_missing
+                  message: "No credential was presented. Send Authorization: Bearer <your key>."
+                  request_id: 6e4a99b280eb9e6e
+                  doc_url: https://docs.accesslink.store/errors/api_credential_missing
+            invalid:
+              summary: api_credential_invalid
+              value:
+                error:
+                  type: authentication_error
+                  code: api_credential_invalid
+                  message: The credential presented is not valid.
+                  request_id: 1a2b3c4d5e6f7a8b
+                  doc_url: https://docs.accesslink.store/errors/api_credential_invalid
+    Forbidden:
+      description: The credential lacks the scope this route requires (checked before any lookup).
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimit-Remaining"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              type: permission_error
+              code: insufficient_scope
+              message: This credential does not carry the scope this endpoint requires.
+              request_id: d1566e1129a1f7bb
+              doc_url: https://docs.accesslink.store/errors/insufficient_scope
+    NotFound:
+      description: No such resource in this company — the same answer for one that never existed and one that belongs to another company.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              type: not_found_error
+              code: resource_not_found
+              message: No such resource.
+              request_id: 5cf64ccbac9a0b34
+              doc_url: https://docs.accesslink.store/errors/resource_not_found
+    RateLimited:
+      description: The credential's or the company's allowance is spent.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/Retry-After"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimit-Limit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimit-Remaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimit-Reset"
+        RateLimit-Policy:
+          $ref: "#/components/headers/RateLimit-Policy"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              type: rate_limit_error
+              code: rate_limit_exceeded
+              message: Rate limit exceeded.
+              request_id: 5fc50d5d15152eb7
+              doc_url: https://docs.accesslink.store/errors/rate_limit_exceeded
+    ServiceUnavailable:
+      description: A dependency (the database or the rate-limit store) could not be consulted. Retry after `Retry-After`.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/Retry-After"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              type: api_error
+              code: service_unavailable
+              message: A dependency is temporarily unavailable. Please retry.
+              request_id: 0c9d8e7f6a5b4c3d
+              doc_url: https://docs.accesslink.store/errors/service_unavailable
+    ConsoleUnauthorized:
+      description: No session cookie, or an invalid or expired session.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConsoleError"
+          example:
+            error: Authentication required
+    ConsoleForbidden:
+      description: The CSRF token is missing or invalid, the operator's role is below the route's minimum, or the terminal is outside the operator's site grants.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConsoleError"
+          example:
+            error: Insufficient permissions
+
+# Every public error code the server can emit, with the type and status it is
+# always served with. openapi_docs_test.go holds this list equal to
+# models.APIErrors, and scripts/build-errors.mjs turns it into the
+# /errors/<code>/ pages that every doc_url points at.
+x-accesslink-error-codes:
+  - { code: api_credential_missing, type: authentication_error, status: 401, message: "No credential was presented. Send Authorization: Bearer <your key>.", reserved: false }
+  - { code: api_credential_invalid, type: authentication_error, status: 401, message: "The credential presented is not valid.", reserved: false }
+  - { code: api_credential_expired, type: authentication_error, status: 401, message: "This credential has expired. Issue a new one from the console.", reserved: true }
+  - { code: api_credential_revoked, type: authentication_error, status: 401, message: "This credential has been revoked.", reserved: true }
+  - { code: api_credential_wrong_environment, type: authentication_error, status: 401, message: "This credential belongs to a different environment.", reserved: false }
+  - { code: insufficient_scope, type: permission_error, status: 403, message: "This credential does not carry the scope this endpoint requires.", reserved: false }
+  - { code: site_not_permitted, type: permission_error, status: 403, message: "This credential is not scoped to that site.", reserved: false }
+  - { code: company_inactive, type: permission_error, status: 403, message: "This account is not active.", reserved: true }
+  - { code: unknown_parameter, type: invalid_request_error, status: 400, message: "An unrecognised query parameter was supplied.", reserved: false }
+  - { code: unknown_field, type: invalid_request_error, status: 400, message: "An unrecognised field was supplied in the request body.", reserved: false }
+  - { code: missing_field, type: invalid_request_error, status: 400, message: "A required field is missing.", reserved: false }
+  - { code: invalid_field, type: invalid_request_error, status: 400, message: "A field was supplied with a value this endpoint cannot accept.", reserved: false }
+  - { code: invalid_timestamp, type: invalid_request_error, status: 400, message: "A timestamp could not be read. Use RFC 3339, for example 2026-09-09T17:00:00Z.", reserved: false }
+  - { code: cursor_invalid, type: invalid_request_error, status: 400, message: "The pagination cursor is not valid for this request.", reserved: false }
+  - { code: sort_not_supported, type: invalid_request_error, status: 400, message: "That sort order is not supported for this resource.", reserved: false }
+  - { code: tenant_identity_not_permitted, type: invalid_request_error, status: 400, message: "The account is determined by your credential and cannot be supplied in a request.", reserved: false }
+  - { code: member_id_unusable, type: invalid_request_error, status: 400, message: "That member id cannot be stored by a terminal.", reserved: false }
+  - { code: idempotency_key_invalid, type: invalid_request_error, status: 400, message: "Idempotency-Key must be between 1 and 255 characters.", reserved: false }
+  - { code: body_too_large, type: invalid_request_error, status: 400, message: "The request body is larger than this API accepts.", reserved: false }
+  - { code: resource_not_found, type: not_found_error, status: 404, message: "No such resource.", reserved: false }
+  - { code: member_id_already_exists, type: conflict_error, status: 409, message: "A member with that id already exists.", reserved: false }
+  - { code: idempotency_key_reuse, type: conflict_error, status: 409, message: "That Idempotency-Key was already used for a different request.", reserved: false }
+  - { code: idempotency_in_progress, type: conflict_error, status: 409, message: "A request with that Idempotency-Key is still in progress.", reserved: false }
+  - { code: roster_exceeds_terminal_capacity, type: conflict_error, status: 409, message: "A terminal cannot hold the people this change would give it.", reserved: false }
+  - { code: webhook_limit_reached, type: conflict_error, status: 409, message: "This account already has the maximum number of webhook endpoints.", reserved: true }
+  - { code: cursor_expired, type: gone_error, status: 410, message: "That cursor points past the data retained for this account.", reserved: false }
+  - { code: rate_limit_exceeded, type: rate_limit_error, status: 429, message: "Rate limit exceeded.", reserved: false }
+  - { code: internal_error, type: api_error, status: 500, message: "Something went wrong on our side. The request id identifies this failure in our logs.", reserved: false }
+  - { code: service_unavailable, type: api_error, status: 503, message: "A dependency is temporarily unavailable. Please retry.", reserved: false }
+
+paths:
+  # ==========================================================================
+  # PUBLIC API
+  # ==========================================================================
+
+  /api/public/v1/members:
+    get:
+      tags: [Members]
+      operationId: listMembers
+      summary: List members
+      description: |
+        Requires scope `members:read`. Paginated, newest first. No filters in
+        this version — a query parameter other than `limit` and `cursor` is
+        `400 unknown_parameter`.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:read
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+      responses:
+        "200":
+          description: A page of members.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimit-Limit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimit-Reset" }
+            RateLimit-Policy: { $ref: "#/components/headers/RateLimit-Policy" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberPage"
+              examples:
+                firstPage:
+                  summary: First page of two (limit=2)
+                  value:
+                    data:
+                      - id: 94ed94c2-6984-40eb-a19b-7dc752caaa9e
+                        member_id: MEM003
+                        full_name: Alan Turing
+                        membership_type: ANNUAL
+                        active: true
+                        created_at: "2026-09-11T10:35:00.389158Z"
+                        updated_at: "2026-09-11T10:35:00.389158Z"
+                      - id: 30aa0802-c537-4fad-a647-7035d0c5a398
+                        member_id: MEM002
+                        full_name: Grace Hopper
+                        membership_type: MONTHLY
+                        active: true
+                        created_at: "2026-09-11T10:35:00.347723Z"
+                        updated_at: "2026-09-11T10:35:00.347723Z"
+                    has_more: true
+                    next_cursor: AkwiRQG6XwT_h0mx7hNHjFINCEMZ8SszybWW7dDh0ZFrJLn0-v7op9IzDmBk3OXLpfxjtfMg8mUAJ_SawP211X5E-odV1sKaKWmn4z23nOEAmv1YpfVvPWYFRCSTaZLu7FBVd8PJPFVJxYcU8lFJbYDcu6fY
+                lastPage:
+                  summary: The last page — has_more is false and next_cursor is null
+                  value:
+                    data:
+                      - id: ac8f7af9-9fb2-4bcf-97f8-a9ff2f5e0070
+                        member_id: MEM001
+                        full_name: Ada Lovelace
+                        membership_type: ANNUAL
+                        active: true
+                        created_at: "2026-09-11T10:35:00.289175Z"
+                        updated_at: "2026-09-11T10:35:00.289175Z"
+                    has_more: false
+                    next_cursor: null
+        "400":
+          description: "`invalid_field` on `limit`, `unknown_parameter`, `tenant_identity_not_permitted`, or `cursor_invalid`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                limit:
+                  summary: A limit outside 1–200
+                  value:
+                    error:
+                      type: invalid_request_error
+                      code: invalid_field
+                      message: limit must be an integer between 1 and 200.
+                      param: limit
+                      request_id: 2f54349499400475
+                      doc_url: https://docs.accesslink.store/errors/invalid_field
+                tenant:
+                  summary: A request that tries to name its tenant
+                  value:
+                    error:
+                      type: invalid_request_error
+                      code: tenant_identity_not_permitted
+                      message: The account is determined by your credential and cannot be supplied in a request.
+                      param: company_id
+                      request_id: e6e7d3d987e1531a
+                      doc_url: https://docs.accesslink.store/errors/tenant_identity_not_permitted
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "410":
+          description: "`cursor_expired` — the cursor points past retained data. Member cursors do not expire in this version."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      tags: [Members]
+      operationId: createMember
+      summary: Create a member
+      description: |
+        Requires scope `members:write`. Creates the member with the company's
+        default access rule and queues a `CREATE` sync job to every terminal in
+        the same transaction; terminals apply it on their next sync. Recorded in
+        the company's audit trail with actor role `INTEGRATION`.
+
+        `membership_type` defaults to `STANDARD` and `active` to `true`. The
+        body must be a single JSON object of at most 64 KiB; a field this
+        version does not define — including `fingerprint_template` — is
+        `400 unknown_field`. Send an `Idempotency-Key` so a retried request
+        cannot create a duplicate.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemberCreate"
+            examples:
+              minimal:
+                summary: Only the required fields
+                value:
+                  member_id: MEM042
+                  full_name: Ada Lovelace
+              full:
+                summary: Every field
+                value:
+                  member_id: MEM042
+                  full_name: Ada Lovelace
+                  membership_type: ANNUAL
+                  active: true
+      responses:
+        "201":
+          description: "Created. Replayed under the same `Idempotency-Key` with `Idempotent-Replay: true`."
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            Idempotent-Replay: { $ref: "#/components/headers/Idempotent-Replay" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+              example:
+                id: 0cae6469-6671-4611-9ca4-012a199c0fc8
+                member_id: MEM042
+                full_name: Ada Lovelace
+                membership_type: STANDARD
+                active: true
+                created_at: "2026-09-11T19:20:46.204475Z"
+                updated_at: "2026-09-11T19:20:46.204475Z"
+        "400":
+          description: "`missing_field`, `member_id_unusable`, `invalid_field`, `unknown_field`, `idempotency_key_invalid` or `body_too_large`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unknownField:
+                  summary: The one field that must never be accepted
+                  value:
+                    error:
+                      type: invalid_request_error
+                      code: unknown_field
+                      message: The field fingerprint_template is not recognised.
+                      param: fingerprint_template
+                      request_id: 9334e2ce31af790b
+                      doc_url: https://docs.accesslink.store/errors/unknown_field
+                missing:
+                  summary: A required field is absent
+                  value:
+                    error:
+                      type: invalid_request_error
+                      code: missing_field
+                      message: A required field is missing.
+                      param: full_name
+                      request_id: 4f1e2d3c4b5a6978
+                      doc_url: https://docs.accesslink.store/errors/missing_field
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "`member_id_already_exists`, `roster_exceeds_terminal_capacity`, `idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: conflict_error
+                  code: member_id_already_exists
+                  message: A member with that id already exists.
+                  param: member_id
+                  request_id: ed315d247eb6e49a
+                  doc_url: https://docs.accesslink.store/errors/member_id_already_exists
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/members/{member_id}:
+    parameters:
+      - $ref: "#/components/parameters/memberId"
+    get:
+      tags: [Members]
+      operationId: getMember
+      summary: Get a member
+      description: Requires scope `members:read`. A member that is unknown, removed, or in another company is `404 resource_not_found` — one answer for all three.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:read
+      responses:
+        "200":
+          description: The member.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    patch:
+      tags: [Members]
+      operationId: updateMember
+      summary: Update a member
+      description: |
+        Requires scope `members:write`. **Partial**: any of `full_name`,
+        `membership_type`, `active` — at least one; an absent field keeps its
+        value. `member_id` cannot change and is `400 invalid_field` in the body.
+        Queues an `UPDATE` sync job and writes an audit record.
+
+        `{"active": false}` **deactivates**: reversible; the person stays on
+        every terminal, marked inactive, and is refused with reason
+        `PERSON_INACTIVE`. Whitespace around `full_name` and `membership_type`
+        is trimmed.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemberUpdate"
+            example:
+              active: false
+      responses:
+        "200":
+          description: The updated member.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            Idempotent-Replay: { $ref: "#/components/headers/Idempotent-Replay" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+              example:
+                id: 0cae6469-6671-4611-9ca4-012a199c0fc8
+                member_id: MEM042
+                full_name: Ada Lovelace
+                membership_type: STANDARD
+                active: false
+                created_at: "2026-09-11T19:20:46.204475Z"
+                updated_at: "2026-09-11T19:20:46.244582Z"
+        "400":
+          description: "`invalid_field` (including `member_id` in the body, an empty `full_name`, or nothing to change), `unknown_field`, `idempotency_key_invalid` or `body_too_large`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: invalid_request_error
+                  code: invalid_field
+                  message: member_id identifies the member and cannot be changed.
+                  param: member_id
+                  request_id: c8167bf9f5e8329f
+                  doc_url: https://docs.accesslink.store/errors/invalid_field
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`roster_exceeds_terminal_capacity`, `idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    delete:
+      tags: [Members]
+      operationId: deleteMember
+      summary: Remove a member
+      description: |
+        Requires scope `members:write`. **Revokes** the person: they are
+        soft-deleted, removed from every terminal's roster and the fingerprints
+        held there for them are erased. Not reversible from this API — to let
+        them back in, create them again and enrol them again.
+
+        Idempotent: `204` with no body whether the member was removed by this
+        call, had already been removed, never existed, or belongs to another
+        company. Only an actual removal queues a `DELETE` job and writes an
+        audit record.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      responses:
+        "204":
+          description: Removed, or already absent.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+        "400":
+          description: "`idempotency_key_invalid`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "`idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/members/{member_id}/access:
+    parameters:
+      - $ref: "#/components/parameters/memberId"
+    get:
+      tags: [Access]
+      operationId: getMemberAccess
+      summary: Get a member's access rules
+      description: |
+        Requires scope `access:read`. No query parameters — any is
+        `400 unknown_parameter`. Rules are listed whatever the credential's site
+        restriction. A member created through this API carries the company's
+        default rule (a company-wide `ALLOW` unless the company's default policy
+        says otherwise), which is why a fresh member has one rule here.
+      security:
+        - IntegrationCredential: []
+      x-scope: access:read
+      responses:
+        "200":
+          description: The member's rules and standing.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberAccess"
+              examples:
+                default:
+                  summary: A fresh member with the company-wide default rule
+                  value:
+                    member_id: MEM042
+                    active: true
+                    rules:
+                      - id: a30363e0-f216-4b47-83f9-b45bd74ef19f
+                        scope: COMPANY
+                        effect: ALLOW
+                        standing: IN_FORCE
+                scheduled:
+                  summary: A site rule inside a schedule, not yet started
+                  value:
+                    member_id: MEM042
+                    active: true
+                    rules:
+                      - id: a30363e0-f216-4b47-83f9-b45bd74ef19f
+                        scope: SITE
+                        site_id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+                        effect: ALLOW
+                        schedule_id: 7c1d0e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f
+                        starts_at: "2026-10-01T00:00:00Z"
+                        standing: NOT_YET
+        "400":
+          description: "`unknown_parameter`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/sites:
+    get:
+      tags: [Sites]
+      operationId: listSites
+      summary: List sites
+      description: |
+        Requires scope `sites:read`. **Not paginated** — every live site the
+        credential reaches, ordered by `name`; `[]` when there are none. A
+        site-restricted credential sees only the sites in its set.
+      security:
+        - IntegrationCredential: []
+      x-scope: sites:read
+      responses:
+        "200":
+          description: The sites.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteList"
+              examples:
+                unrestricted:
+                  summary: An unrestricted credential in a company with two sites
+                  value:
+                    data:
+                      - id: 3e2550b2-d1cd-4d0a-915d-dd79c68120e5
+                        name: Abuja Studio
+                        address: ""
+                        timezone: Africa/Lagos
+                        active: true
+                        terminal_count: 0
+                        created_at: "2026-09-11T10:34:35.327588Z"
+                      - id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+                        name: Lagos Depot
+                        address: 14 Marina Road
+                        timezone: Africa/Lagos
+                        active: true
+                        terminal_count: 0
+                        created_at: "2026-09-11T10:34:35.32243Z"
+                restricted:
+                  summary: The same company, a credential restricted to one site
+                  value:
+                    data:
+                      - id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+                        name: Lagos Depot
+                        address: 14 Marina Road
+                        timezone: Africa/Lagos
+                        active: true
+                        terminal_count: 0
+                        created_at: "2026-09-11T10:34:35.32243Z"
+        "400":
+          description: "`unknown_parameter`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/sites/{site_id}:
+    parameters:
+      - $ref: "#/components/parameters/siteId"
+    get:
+      tags: [Sites]
+      operationId: getSite
+      summary: Get a site
+      description: |
+        Requires scope `sites:read`. A site that is not in this company,
+        retired, or whose id is malformed is `404 resource_not_found`; a site in
+        this company but outside the credential's site restriction is
+        `403 site_not_permitted`.
+      security:
+        - IntegrationCredential: []
+      x-scope: sites:read
+      responses:
+        "200":
+          description: The site.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "`insufficient_scope`, or `site_not_permitted` for a site outside the credential's restriction."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: permission_error
+                  code: site_not_permitted
+                  message: This credential is not scoped to that site.
+                  request_id: 433be31abd341a5c
+                  doc_url: https://docs.accesslink.store/errors/site_not_permitted
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/events:
+    get:
+      tags: [Events]
+      operationId: listEvents
+      summary: List events
+      description: |
+        Requires scope `events:read`. Paginated, **newest `occurred_at` first**.
+        The filters are part of the cursor: a `next_cursor` presented with
+        different filters is `400 cursor_invalid`.
+
+        **A filter that names something the credential cannot see is an empty
+        page, not an error.** A `member_id` or `site_id` in another company, a
+        site outside the credential's restriction, or a malformed `site_id` all
+        return `"data": []`. A site-restricted credential sees only events at
+        its sites; an event with no site is not visible to it.
+      security:
+        - IntegrationCredential: []
+      x-scope: events:read
+      parameters:
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: member_id
+          in: query
+          required: false
+          description: Only events matched to this member.
+          schema:
+            type: string
+        - name: site_id
+          in: query
+          required: false
+          description: Only events at this site (public UUID).
+          schema:
+            type: string
+            format: uuid
+        - name: decision
+          in: query
+          required: false
+          description: Only this outcome. Case-insensitive; any other value is `400 invalid_field`.
+          schema:
+            type: string
+            enum: [GRANTED, DENIED, RECORDED, ERROR]
+        - name: from
+          in: query
+          required: false
+          description: "`occurred_at >= from`, RFC 3339. Not parseable is `400 invalid_timestamp`."
+          schema:
+            type: string
+            format: date-time
+          example: "2026-09-11T00:00:00Z"
+        - name: to
+          in: query
+          required: false
+          description: "`occurred_at < to`, RFC 3339. Must be later than `from`, else `400 invalid_field`."
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: A page of events.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Limit: { $ref: "#/components/headers/RateLimit-Limit" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+            RateLimit-Reset: { $ref: "#/components/headers/RateLimit-Reset" }
+            RateLimit-Policy: { $ref: "#/components/headers/RateLimit-Policy" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+              example:
+                data:
+                  - id: 97f97eca-921e-4522-9ecd-7bafac6b181d
+                    event_type: ACCESS_DENIED
+                    decision: DENIED
+                    reason: PERSON_UNKNOWN
+                    subject: P-AUTH
+                    site_id: 96126c0e-0e81-4bbb-81ba-da4fb4b29081
+                    terminal_serial: P4-EV-A
+                    occurred_at: "2026-09-11T14:14:00Z"
+                    occurred_at_trusted: true
+                    recorded_at: "2026-09-11T19:20:46.189826Z"
+                  - id: b86cbd42-0a1c-40cc-b641-1e01ff7fc58a
+                    event_type: ACCESS_DENIED
+                    decision: DENIED
+                    reason: OUTSIDE_SCHEDULE
+                    member_id: P4-EV-001
+                    member: 378bddff-8412-41e1-be6e-8a44829c0a69
+                    subject: P-AUTH
+                    site_id: 96126c0e-0e81-4bbb-81ba-da4fb4b29081
+                    terminal_serial: P4-EV-A
+                    occurred_at: "2026-09-11T12:14:00Z"
+                    occurred_at_trusted: true
+                    recorded_at: "2026-09-11T19:20:46.187594Z"
+                has_more: true
+                next_cursor: Ao7gOw6Tc1Tkea7RH3Rea183EU0WTJc8emJQwQZobSl7pcOwbG2gfPfZNKG2rNm-ttNdbRGJ0TXbRs3Gb33MqhXSvxBtFenXRTdBLx5pw0WfhYnRi33_0ML_vaBj9VXFSslqspthqGJsPeQPCP8
+        "400":
+          description: "`invalid_field` (`limit`, `decision`, `to`), `invalid_timestamp` (`from`, `to`), `unknown_parameter`, `tenant_identity_not_permitted` or `cursor_invalid`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: invalid_request_error
+                  code: invalid_timestamp
+                  message: A timestamp could not be read. Use RFC 3339, for example 2026-09-09T17:00:00Z.
+                  param: from
+                  request_id: 312d5010d71e231c
+                  doc_url: https://docs.accesslink.store/errors/invalid_timestamp
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "410":
+          description: "`cursor_expired`. Event cursors do not expire in this version."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  # ==========================================================================
+  # CONSOLE API (operator session) — the slice fingerprint enrolment needs
+  # ==========================================================================
+
+  /api/v1/auth/login:
+    post:
+      tags: [Console session]
+      operationId: consoleLogin
+      summary: Sign in
+      description: |
+        Exchanges an operator's email and password for a session. The body
+        **must** be `application/json` (a form-encoded body is refused — that
+        is the endpoint's CSRF defence). On success the session cookie is set
+        and the session body — including the `csrf_token` every later write
+        needs — is returned. Rate-limited per client address; repeated failures
+        lock the account for a period.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Signed in. The `Set-Cookie` header carries the session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          description: The body is not JSON or is missing a field.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+        "401":
+          description: Invalid email or password.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+              example:
+                error: Invalid email or password
+        "429":
+          description: Too many attempts from this address or for this account. Wait for `Retry-After`.
+          headers:
+            Retry-After: { $ref: "#/components/headers/Retry-After" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+
+  /api/v1/auth/me:
+    get:
+      tags: [Console session]
+      operationId: consoleMe
+      summary: Read the current session
+      description: The same body `login` returned, for the session the cookie names — including a fresh `csrf_token`.
+      security:
+        - OperatorSession: []
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401": { $ref: "#/components/responses/ConsoleUnauthorized" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Console session]
+      operationId: consoleLogout
+      summary: Sign out
+      description: Revokes the session and clears the cookie. Requires the `X-CSRF-Token` header. A copy of the cookie is worthless afterwards.
+      security:
+        - OperatorSession: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Signed out.
+        "401": { $ref: "#/components/responses/ConsoleUnauthorized" }
+        "403": { $ref: "#/components/responses/ConsoleForbidden" }
+
+  /api/v1/console/terminals/{serial}/enrollments:
+    parameters:
+      - $ref: "#/components/parameters/serial"
+    post:
+      tags: [Fingerprint enrolment]
+      operationId: consoleStartEnrollment
+      summary: Start a fingerprint enrolment at a terminal
+      description: |
+        Asks **one** terminal to capture the named person's fingerprint. The
+        operator must be a **Manager** or above with a grant on the terminal's
+        site; the person must exist in the operator's company; the terminal must
+        be provisioned, enabled and not retired. The person must be standing at
+        the terminal — it enters enrolment mode for `expires_in_seconds`
+        (default 300, clamped to 30–3600) and returns to normal service when the
+        capture completes, fails, or the window closes.
+
+        The captured fingerprint is stored on that terminal. No route returns it.
+        Follow progress with *Read a person's enrolment*.
+      security:
+        - OperatorSession: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentStartRequest"
+      responses:
+        "201":
+          description: The enrolment, in state `PENDING` until the terminal collects it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "400":
+          description: The body is missing `external_id` or is not JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+        "401": { $ref: "#/components/responses/ConsoleUnauthorized" }
+        "403": { $ref: "#/components/responses/ConsoleForbidden" }
+        "404":
+          description: The person, or the terminal, is not in the operator's company. (A terminal in the company but outside the operator's site grants is `403`.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+              example:
+                error: Person not found
+        "409":
+          description: The terminal cannot run an enrolment — it is disabled, retired, or has never been provisioned with a credential of its own.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+              example:
+                error: That terminal cannot run an enrolment. It is disabled, retired, or has never been provisioned with a credential of its own.
+
+  /api/v1/console/people/{external_id}/enrollment:
+    parameters:
+      - $ref: "#/components/parameters/externalId"
+    get:
+      tags: [Fingerprint enrolment]
+      operationId: consoleGetPersonEnrollment
+      summary: Read a person's enrolment
+      description: |
+        The person's most recent enrolment and whether they currently have a
+        fingerprint enrolled, in one response. `enrollment` is `null` when none
+        has ever been started. Poll this while an enrolment is `PENDING` or
+        `IN_PROGRESS`; a couple of seconds between reads is plenty.
+      security:
+        - OperatorSession: []
+      responses:
+        "200":
+          description: The person's enrolment state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonEnrollment"
+              examples:
+                never:
+                  summary: Never enrolled
+                  value:
+                    external_id: MEM042
+                    biometric_enrolled: false
+                    enrollment: null
+                completed:
+                  summary: A capture that succeeded
+                  value:
+                    external_id: MEM042
+                    biometric_enrolled: true
+                    enrollment:
+                      id: 0d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a
+                      status: COMPLETED
+                      external_id: MEM042
+                      full_name: Ada Lovelace
+                      terminal_serial: AT-E05A1B38AA38
+                      terminal_name: Reception
+                      site_name: Lagos Depot
+                      site_public_id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+                      terminal_status: ONLINE
+                      requested_by_email: integrations@example.com
+                      created_at: "2026-09-15T10:00:00Z"
+                      expires_at: "2026-09-15T10:05:00Z"
+                      started_at: "2026-09-15T10:00:12Z"
+                      completed_at: "2026-09-15T10:00:41Z"
+                      biometric_enrolled: true
+        "401": { $ref: "#/components/responses/ConsoleUnauthorized" }
+        "404":
+          description: The person is not in the operator's company.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+    delete:
+      tags: [Fingerprint enrolment]
+      operationId: consoleCancelEnrollment
+      summary: Cancel a person's enrolment
+      description: |
+        Stops whatever enrolment is live for the person, whichever terminal it
+        was sent to, and returns it in state `CANCELLED`. Manager or above, with
+        the `X-CSRF-Token` header.
+      security:
+        - OperatorSession: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The cancelled enrolment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enrollment"
+        "401": { $ref: "#/components/responses/ConsoleUnauthorized" }
+        "403": { $ref: "#/components/responses/ConsoleForbidden" }
+        "404":
+          description: The person is not in the operator's company.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+        "409":
+          description: There is no enrolment in progress for this person.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleError"
+              example:
+                error: There is no enrolment in progress for this person

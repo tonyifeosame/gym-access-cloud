@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="AccessLink API reference: members, access rules, sites and events for fingerprint access control, with authentication, errors and rate limits." />
+    <meta name="robots" content="index, follow" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="canonical" href="https://docs.accesslink.store/" />
+    <title>AccessLink API reference</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <!--
+      THE WHOLE SITE IS ONE OPENAPI DOCUMENT. src/main.ts mounts the Scalar
+      reference here and points it at /openapi.yaml, which is copied into the
+      build unchanged; there is no page content that is not derived from it.
+      The <noscript> is what a crawler or a text browser sees.
+    -->
+    <div id="app"></div>
+    <noscript>
+      <main style="max-width: 44rem; margin: 3rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; line-height: 1.5">
+        <h1>AccessLink API reference</h1>
+        <p>
+          This reference is rendered from
+          <a href="/openapi.yaml">openapi.yaml</a>, which you can read directly or load into any OpenAPI tool.
+          Error-code pages are at <code>/errors/&lt;code&gt;/</code>.
+        </p>
+      </main>
+    </noscript>
+  </body>
+</html>
