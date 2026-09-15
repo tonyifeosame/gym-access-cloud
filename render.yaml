@@ -195,20 +195,29 @@ services:
 
     # THE PUBLIC API DOCUMENTATION LIVES HERE TOO, at /docs. The console build
     # publishes ../apidocs into dist/docs/ (web/scripts/build-docs.mjs, run as
-    # its postbuild hook), so https://accesslink.store/docs/... are real files
-    # -- and Render serves a file that exists before it consults any rule
-    # below, which is what keeps the docs out of the console's SPA rewrite.
-    # The one rule the docs need is the bare /docs: sent to /docs/ so the
-    # directory index answers rather than the console shell.
+    # its postbuild hook), so https://accesslink.store/docs/... are real files,
+    # which Render serves before it consults any rule below.
     #
     # src/router.tsx uses createBrowserRouter with real paths. Without the
     # rewrite, /sites/:siteId and /redeem 404 on refresh and on any shared deep
     # link. REWRITE and not redirect: the URL has to survive so the router can
     # read it.
+    # VERIFIED AGAINST PRODUCTION (2026-09-15): with a catch-all rewrite in
+    # place, Render serves exactly two things before consulting rules -- a
+    # file that exists, and a directory requested WITH a trailing slash (its
+    # index.html). It does not resolve /docs to /docs/index.html or
+    # /docs/errors/<code> to <code>.html or <code>/index.html; both fell
+    # through to the console shell. Hence the two rules above the catch-all:
+    # the bare /docs is sent to /docs/, and the API's doc_url form
+    # /docs/errors/<code> is rewritten to the page that exists. Order matters:
+    # rules are evaluated top-down and /* would swallow both.
     routes:
       - type: redirect
         source: /docs
         destination: /docs/
+      - type: rewrite
+        source: /docs/errors/*
+        destination: /docs/errors/*/index.html
       - type: rewrite
         source: /*
         destination: /index.html

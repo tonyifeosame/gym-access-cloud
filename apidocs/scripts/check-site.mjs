@@ -3,11 +3,11 @@
  * Render check: does the built site actually work in a browser?
  *
  * Serves the build the way production serves it -- mounted at /docs/ on the
- * console's origin, behind the console's own catch-all (any path that is not
- * a real file answers the console's index.html, as Render's SPA rewrite does)
- * and under the console service's Content-Security-Policy from render.yaml --
- * opens it in the locally installed Chrome (playwright-core, channel "chrome",
- * the arrangement web/browser/run.mjs uses), and checks what a reader needs:
+ * console's origin, behind the console's own routing rules from render.yaml
+ * (the /docs redirect, the /docs/errors/* rewrite, then the SPA catch-all)
+ * and under the console service's Content-Security-Policy -- opens it in the
+ * locally installed Chrome (playwright-core, channel "chrome", the
+ * arrangement web/browser/run.mjs uses), and checks what a reader needs:
  *
  *   - the reference renders: title, every guide section and every operation
  *     summary from openapi.yaml is on the page, grouped as declared;
@@ -58,9 +58,32 @@ if (!deployedHeaders.some(([name]) => name === 'Content-Security-Policy')) {
   console.error('render.yaml: accesslink-console declares no Content-Security-Policy')
   process.exit(1)
 }
-// The console's catch-all must not shadow the docs: Render serves a file that
-// exists and rewrites everything else to /index.html, and so does this server.
+// THE ROUTING IS RENDER'S, AS OBSERVED IN PRODUCTION, NOT AS ONE MIGHT HOPE.
+// With a catch-all rewrite present, Render answers exactly two things before
+// it consults the rules: a file that exists, and a directory requested WITH
+// its trailing slash (its index.html). It does NOT resolve /docs to
+// /docs/index.html, nor /docs/errors/<code> to <code>.html or
+// <code>/index.html -- both fell through to the console shell on
+// 2026-09-15. Then the rules run top-down (first match wins): a redirect
+// answers 301, a rewrite serves its destination if that is a file, and the
+// last rule, /* -> /index.html, catches everything else. This server does
+// precisely that, with the rules read from render.yaml, so the check fails
+// for exactly the URLs production would fail for.
 const SITE_ROOT = process.env.DOCS_SITE_ROOT ? resolve(process.env.DOCS_SITE_ROOT) : null
+const routes = consoleService.routes ?? []
+if (routes.length === 0 || routes[routes.length - 1].source !== '/*') {
+  console.error('render.yaml: accesslink-console must end its routes with the /* catch-all')
+  process.exit(1)
+}
+// A Render rule: `*` in the source matches any string from that position on;
+// `*` in the destination is replaced by what the source's `*` captured.
+const matchRule = (rule, path) => {
+  const star = rule.source.indexOf('*')
+  if (star < 0) return rule.source === path ? '' : null
+  const prefix = rule.source.slice(0, star)
+  return path.startsWith(prefix) ? path.slice(prefix.length) : null
+}
+const applyRule = (rule, captured) => rule.destination.replace('*', captured)
 const STUB_CONSOLE = '<!doctype html><title>AccessLink Console</title><div id="root">console shell</div>'
 const resolveFile = (path) => {
   if (SITE_ROOT) return join(SITE_ROOT, path)
@@ -84,19 +107,53 @@ const TYPES = {
   '.txt': 'text/plain; charset=utf-8',
   '.woff2': 'font/woff2',
 }
+// What exists: an exact file, or a directory's index.html when the request
+// carries the trailing slash. Nothing else.
+const existingResource = (path) => {
+  const file = resolveFile(path)
+  if (!file || !existsSync(file)) return null
+  if (statSync(file).isDirectory()) {
+    if (!path.endsWith('/')) return null
+    const index = join(file, 'index.html')
+    return existsSync(index) ? index : null
+  }
+  return file
+}
 const server = createServer((req, res) => {
-  // Clean URLs the way Render resolves them: a directory serves its
-  // index.html (with or without the trailing slash), /docs/errors/<code>
-  // (the exact doc_url the API emits) serves errors/<code>.html, and a path
-  // that is no file at all falls through to the console's index.html.
-  let path = decodeURIComponent((req.url ?? '/').split('?')[0])
-  let file = resolveFile(path)
-  if (file && existsSync(file) && statSync(file).isDirectory()) file = join(file, 'index.html')
-  if (file && !existsSync(file) && !extname(path) && existsSync(file + '.html')) file += '.html'
-  if (!file || !existsSync(file) || statSync(file).isDirectory()) {
-    const fallback = SITE_ROOT ? join(SITE_ROOT, 'index.html') : null
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Fallback': 'console' })
-    res.end(fallback && existsSync(fallback) ? readFileSync(fallback) : STUB_CONSOLE)
+  const path = decodeURIComponent((req.url ?? '/').split('?')[0])
+  let file = existingResource(path)
+  if (!file) {
+    for (const rule of routes) {
+      const captured = matchRule(rule, path)
+      if (captured === null) continue
+      const destination = applyRule(rule, captured)
+      if (rule.type === 'redirect') {
+        res.writeHead(301, { Location: destination })
+        res.end()
+        return
+      }
+      if (rule.type === 'rewrite') {
+        if (rule.source === '/*') {
+          // The SPA catch-all: the console's shell, whatever the path.
+          const fallback = SITE_ROOT ? join(SITE_ROOT, 'index.html') : null
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Fallback': 'console' })
+          res.end(fallback && existsSync(fallback) ? readFileSync(fallback) : STUB_CONSOLE)
+          return
+        }
+        file = existingResource(destination)
+        if (!file) {
+          res.writeHead(404, { 'Content-Type': 'text/plain', 'X-Rewrite-Miss': destination })
+          res.end('not found')
+          return
+        }
+        res.setHeader('X-Rewritten-To', destination)
+        break
+      }
+    }
+  }
+  if (!file) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' })
+    res.end('not found')
     return
   }
   res.writeHead(200, {
@@ -110,16 +167,23 @@ const origin = `http://127.0.0.1:${server.address().port}`
 
 // --- the static files ------------------------------------------------------
 // A docs page is a real file (no X-Fallback); the console shell answers
-// everything else. Both /docs and /docs/ must be the reference itself.
+// everything else. The bare /docs must be redirected to /docs/ (production
+// does not resolve it to the directory index), and /docs/ must be the
+// reference itself.
 const isDocs = async (path) => {
   const res = await fetch(origin + path)
   const html = await res.text()
   return res.status === 200 && res.headers.get('x-fallback') !== 'console' && html.includes('AccessLink API reference')
 }
-check(await isDocs(`${BASE}`), `GET ${BASE} did not reach the reference (fell through to the console)`)
+const bare = await fetch(origin + BASE, { redirect: 'manual' })
+check(bare.status === 301 && bare.headers.get('location') === `${BASE}/`,
+  `GET ${BASE} must redirect to ${BASE}/ (got ${bare.status} ${bare.headers.get('location') ?? ''}); the bare path is not a file and would fall into the console`)
+check(await isDocs(`${BASE}`), `GET ${BASE} (following the redirect) did not reach the reference`)
 check(await isDocs(`${BASE}/`), `GET ${BASE}/ did not reach the reference (fell through to the console)`)
 const notDocs = await fetch(origin + '/settings/api-credentials')
-check((await notDocs.text()).includes('AccessLink Console') && !SITE_ROOT ? true : notDocs.status === 200, 'a console route no longer falls through to the console')
+check(notDocs.status === 200 && notDocs.headers.get('x-fallback') === 'console', 'a console route no longer falls through to the console shell')
+const bogus = await fetch(`${origin}${BASE}/errors/no_such_code`)
+check(bogus.status === 404, `an unknown error code answered ${bogus.status}; the rewrite must not fall into the console shell or invent a page`)
 const fetchStatus = async (path) => (await fetch(origin + path)).status
 check((await fetchStatus(`${BASE}/openapi.yaml`)) === 200, `GET ${BASE}/openapi.yaml is not 200`)
 check((await fetchStatus(`${BASE}/openapi.json`)) === 200, `GET ${BASE}/openapi.json is not 200`)
@@ -130,7 +194,8 @@ check(yamlText === readFileSync(join(ROOT, 'openapi.yaml'), 'utf8'), `${BASE}/op
 const json = await (await fetch(origin + `${BASE}/openapi.json`)).json()
 check(json.openapi === doc.openapi && json.info?.title === doc.info?.title, `${BASE}/openapi.json is not the same document as openapi.yaml`)
 for (const c of doc['x-accesslink-error-codes']) {
-  // Both the API's doc_url form (no slash) and the directory form.
+  // The API's exact doc_url form (no slash -- reachable only through the
+  // /docs/errors/* rewrite) and the directory form (an existing resource).
   for (const path of [`${BASE}/errors/${c.code}`, `${BASE}/errors/${c.code}/`]) {
     const res = await fetch(origin + path)
     const html = res.status === 200 ? await res.text() : ''

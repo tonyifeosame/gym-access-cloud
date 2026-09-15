@@ -274,7 +274,11 @@ describe('the API documentation link', () => {
     // The accessible name says where it goes AND that it leaves the page.
     const link = within(note).getByRole('link', { name: /Open the API documentation \(opens in a new tab\)/ })
     expect(link).toHaveAttribute('href', PUBLIC_API_DOCS_URL)
-    expect(link).toHaveAttribute('href', 'https://accesslink.store/docs')
+    expect(link).toHaveAttribute('href', 'https://accesslink.store/docs/')
+    // The slash is load-bearing: the static host serves the directory index
+    // only when it is present; the bare path falls into the console's own
+    // catch-all and shows "Page not found".
+    expect(link.getAttribute('href')?.endsWith('/docs/')).toBe(true)
     expect(link).toHaveAttribute('target', '_blank')
     expect(link.getAttribute('rel')?.split(/\s+/).sort()).toEqual(['noopener', 'noreferrer'])
 
