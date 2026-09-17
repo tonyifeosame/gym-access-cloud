@@ -59,6 +59,13 @@ func TestEveryWriteDeclaresDomainsAndNoReadDoes(t *testing.T) {
 		"cancel_enrollment":  {DomainPeople, DomainAudit},
 		"resync_terminal":    {DomainTerminals, DomainAudit},
 		"request_diagnostic": {DomainTerminals, DomainAudit},
+
+		// Phase 2b.
+		"delete_schedule":          {DomainSchedules, DomainPermissions, DomainAudit},
+		"run_device_test":          {DomainTerminals, DomainAudit},
+		"withdraw_command":         {DomainTerminals, DomainAudit},
+		"approve_pending_terminal": {DomainPendingTerminals, DomainTerminals, DomainSites, DomainAudit},
+		"reject_pending_terminal":  {DomainPendingTerminals, DomainAudit},
 	}
 	for name, domains := range want {
 		if got := strings.Join(r.Domains(name), ","); got != strings.Join(domains, ",") {
@@ -67,6 +74,9 @@ func TestEveryWriteDeclaresDomainsAndNoReadDoes(t *testing.T) {
 	}
 	if r.Domains("evaluate_access") != nil || r.Domains("explain_denial") != nil {
 		t.Errorf("the evaluation preview must not be treated as a write")
+	}
+	if r.Domains("list_audit") != nil {
+		t.Errorf("the audit trail must not be treated as a write")
 	}
 	// A VIEWER's map is empty: they see no write.
 	if len(r.Effects(models.RoleViewer)) != 0 {
@@ -327,12 +337,17 @@ func TestDiagnosticProjectionDropsNetworkIdentifiers(t *testing.T) {
 func TestProjectionFieldListsNameNoSecretOrInfrastructure(t *testing.T) {
 	forbidden := []string{"pairing_code", "api_key", "first_seen_ip", "last_seen_ip", "adopted_by", "ip_address",
 		"hardware_revision", "template", "digest", "key_id", "slot", "locator", "vendor", "settings", "password",
-		"requested_by_email", "params", "member_capacity", "provisioned_via"}
+		"requested_by_email", "params", "member_capacity", "provisioned_via",
+		// Phase 2b. `changes` is the audit trail's free-form column, which
+		// carries key and code prefixes and announcement addresses; the
+		// capabilities blob and announce token belong to the pending row.
+		"changes", "announce_token", "capabilities", "approved_by", "rejected_by_email"}
 	lists := map[string][]string{
 		"person": personFields, "rule": ruleFields, "enrol": enrolFields, "terminal": terminalFields,
 		"site": siteFields, "schedule": scheduleFields, "event": eventFields, "credential": credentialFields,
 		"command": commandFields, "offer": commandOfferFields, "pending": pendingTerminalFields,
 		"siteSettings": siteSettingsFields, "decision": decisionFields,
+		"audit": auditFields, "pendingDecision": pendingDecisionFields,
 	}
 	for name, fields := range lists {
 		for _, f := range fields {
