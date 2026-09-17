@@ -122,6 +122,12 @@ const TOOL_LABELS: Record<string, string> = {
   wait_for_command: 'Waited for the terminal',
   resync_terminal: 'Resynced a terminal',
   list_pending_terminals: 'Checked terminals waiting to be set up',
+  list_audit: 'Read who changed what',
+  withdraw_command: 'Cancelled a command',
+  run_device_test: 'Hardware test',
+  delete_schedule: 'Removed a schedule',
+  approve_pending_terminal: 'Terminal set-up',
+  reject_pending_terminal: 'Terminal set-up',
 }
 
 export function describeTool(tool: string): string {

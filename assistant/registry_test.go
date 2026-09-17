@@ -13,8 +13,8 @@ import (
 // list is fixed and role-filtered, and nothing secret-shaped passes the
 // result guard.
 
-// phase1Tools and phase2aTools are the two approved catalogues. The union
-// is what the registry holds; nothing else may appear.
+// phase1Tools, phase2aTools and phase2bTools are the three approved
+// catalogues. The union is what the registry holds; nothing else may appear.
 var (
 	phase1Tools = []string{
 		"create_person", "get_fleet_summary", "get_person", "get_person_enrollment", "get_site",
@@ -28,39 +28,50 @@ var (
 		"request_diagnostic", "resync_terminal", "set_person_active", "update_person",
 		"update_schedule", "wait_for_command",
 	}
+	// Phase 2b: one read, one safe write, four that ask first.
+	phase2bTools = []string{
+		"approve_pending_terminal", "delete_schedule", "list_audit", "reject_pending_terminal",
+		"run_device_test", "withdraw_command",
+	}
 	// Named in the audit as later, high-risk or never: none may be registered.
-	notInPhase2a = []string{
+	// Phase 2b's six have moved out of this list and into phase2bTools; what
+	// remains is what the assistant still must not be able to do.
+	notInPhase2b = []string{
 		"delete_person", "set_terminal_mode", "set_terminal_enabled", "move_terminal", "request_wifi_recovery",
-		"revoke_terminal_credential", "retire_terminal", "release_terminal", "approve_pending_terminal",
-		"reject_pending_terminal", "adopt_terminal", "issue_claim_code", "create_site", "update_site",
+		"revoke_terminal_credential", "retire_terminal", "release_terminal", "cancel_terminal_release",
+		"force_terminal_release", "adopt_terminal", "issue_claim_code", "create_site", "update_site",
 		"retire_site", "rotate_site_key", "set_site_offline_policy", "list_operators", "create_operator",
-		"set_operator_sites", "list_firmware", "publish_firmware", "set_application", "list_audit",
-		"run_device_test", "withdraw_command", "delete_schedule", "summarise_events",
+		"update_operator", "delete_operator", "set_operator_sites", "invite_operator", "reset_operator_password",
+		"list_firmware", "publish_firmware", "set_current_firmware", "set_application",
+		"list_api_credentials", "create_api_credential", "rotate_api_credential", "revoke_api_credential",
+		"issue_command", "run_command", "call_endpoint", "summarise_events",
 	}
 )
 
 func TestCatalogueIsExactlyWhatWasApproved(t *testing.T) {
 	r := NewRegistry()
 	registerTools(r)
-	want := append(append([]string{}, phase1Tools...), phase2aTools...)
+	want := append(append(append([]string{}, phase1Tools...), phase2aTools...), phase2bTools...)
 	sort.Strings(want)
 	got := r.Names(models.RoleOwner)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("catalogue = %v\nwant       %v", got, want)
 	}
-	for _, name := range notInPhase2a {
+	for _, name := range notInPhase2b {
 		if _, ok := r.Get(name); ok {
-			t.Errorf("%s is registered but is outside Phase 2a", name)
+			t.Errorf("%s is registered but is outside Phase 2b", name)
 		}
 	}
 	// Consequential tools all confirm; read tools never do.
-	for _, name := range []string{"grant_access", "revoke_access", "start_enrollment", "set_person_active", "update_schedule"} {
+	for _, name := range []string{"grant_access", "revoke_access", "start_enrollment", "set_person_active",
+		"update_schedule", "delete_schedule", "run_device_test", "approve_pending_terminal", "reject_pending_terminal"} {
 		if tool, _ := r.Get(name); tool.Confirm == nil {
 			t.Errorf("%s does not require confirmation", name)
 		}
 	}
 	// Safe writes run without a card.
-	for _, name := range []string{"create_person", "update_person", "create_schedule", "resync_terminal", "cancel_enrollment", "request_diagnostic"} {
+	for _, name := range []string{"create_person", "update_person", "create_schedule", "resync_terminal",
+		"cancel_enrollment", "request_diagnostic", "withdraw_command"} {
 		if tool, _ := r.Get(name); tool.Confirm != nil {
 			t.Errorf("%s requires confirmation but is a safe write", name)
 		}
@@ -86,18 +97,37 @@ func TestRegistryHidesByRoleButKeepsOrderStable(t *testing.T) {
 	registerTools(r)
 	viewer := r.Names(models.RoleViewer)
 	for _, hidden := range []string{"create_person", "grant_access", "revoke_access", "start_enrollment",
-		"update_person", "set_person_active", "create_schedule", "update_schedule", "resync_terminal",
-		"cancel_enrollment", "request_diagnostic", "evaluate_access", "explain_denial", "list_pending_terminals"} {
-		for _, name := range viewer {
-			if name == hidden {
-				t.Errorf("VIEWER sees %s", hidden)
-			}
+		"update_person", "set_person_active", "create_schedule", "update_schedule", "delete_schedule",
+		"resync_terminal", "cancel_enrollment", "request_diagnostic", "run_device_test", "withdraw_command",
+		"evaluate_access", "explain_denial", "list_pending_terminals", "list_audit",
+		"approve_pending_terminal", "reject_pending_terminal"} {
+		if contains(viewer, hidden) {
+			t.Errorf("VIEWER sees %s", hidden)
 		}
 	}
+	// PHASE 2B SPLITS MANAGER FROM ADMIN, which Phase 2a did not. The audit
+	// trail names colleagues and the two terminal decisions authorise
+	// hardware: all three are ADMIN on their routes, so a MANAGER is not
+	// shown them and a MANAGER who called one anyway gets the route's 403.
 	manager := r.Names(models.RoleManager)
+	for _, hidden := range []string{"list_audit", "approve_pending_terminal", "reject_pending_terminal"} {
+		if contains(manager, hidden) {
+			t.Errorf("MANAGER sees %s", hidden)
+		}
+	}
+	for _, shown := range []string{"delete_schedule", "run_device_test", "withdraw_command"} {
+		if !contains(manager, shown) {
+			t.Errorf("MANAGER is not shown %s", shown)
+		}
+	}
+	admin := r.Names(models.RoleAdmin)
 	owner := r.Names(models.RoleOwner)
-	if strings.Join(manager, ",") != strings.Join(owner, ",") {
-		t.Fatalf("MANAGER and OWNER see different tools: %v vs %v", manager, owner)
+	if strings.Join(admin, ",") != strings.Join(owner, ",") {
+		t.Fatalf("ADMIN and OWNER see different tools: %v vs %v", admin, owner)
+	}
+	if len(owner) != len(manager)+3 {
+		t.Fatalf("ADMIN sees %d tools and MANAGER %d; the difference should be the three ADMIN ones",
+			len(owner), len(manager))
 	}
 	if again := r.Names(models.RoleOwner); strings.Join(again, ",") != strings.Join(owner, ",") {
 		t.Fatalf("tool order is not stable between calls")

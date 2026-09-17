@@ -204,7 +204,7 @@ func registerTerminalTools(r *Registry) {
 	})
 }
 
-// registerTools is the whole catalogue: Phase 1 and Phase 2a.
+// registerTools is the whole catalogue: Phase 1, Phase 2a and Phase 2b.
 func registerTools(r *Registry) {
 	registerPeopleTools(r)
 	registerEnrollmentTools(r)
@@ -212,4 +212,6 @@ func registerTools(r *Registry) {
 	registerAccessTools(r)
 	registerScheduleTools(r)
 	registerFleetTools(r)
+	registerAuditTools(r)
+	registerAnnouncementTools(r)
 }

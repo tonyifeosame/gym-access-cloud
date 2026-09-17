@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -127,6 +128,59 @@ func registerScheduleTools(r *Registry) {
 			return succeeded(resp, object{
 				"schedule": pick(m, scheduleFields...),
 				"note":     "Changed. Terminals apply it on their next sync.",
+			})
+		},
+	})
+
+	r.Register(&Tool{
+		Name: "delete_schedule",
+		Description: "Remove a schedule. Only one that no access rule uses can be removed; the platform " +
+			"refuses while any rule still refers to it, and says how many. The operator must approve.",
+		Params: []Param{
+			{Name: "schedule_id", Type: "string", Description: "The schedule's id, from list_schedules.", Required: true, MaxLen: 64, Identifier: true},
+		},
+		Destructive: true, Idempotent: false,
+		MinRole: models.RoleManager,
+		// PERMISSIONS IS DECLARED EVEN THOUGH A SUCCESSFUL DELETE CHANGES NO
+		// RULE. A cached rules view carries each rule's schedule_name, and
+		// the safe direction to be wrong in is a refresh nobody needed
+		// rather than a screen naming a schedule that no longer exists.
+		Domains: []string{DomainSchedules, DomainPermissions, DomainAudit},
+		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
+			schedule, err := findSchedule(t, a.String("schedule_id"))
+			if err != nil {
+				return nil, err
+			}
+			if dependents := num(schedule, "permission_count"); dependents > 0 {
+				// REFUSED HERE RATHER THAN ASKED. The route answers 409 while
+				// any rule refers to the schedule, so a card for this would be
+				// asking the operator to approve something that cannot happen.
+				// The count is what they need to act on, so it is in the
+				// refusal.
+				return nil, errText(fmt.Sprintf("%s cannot be deleted: %s still use it. "+
+					"Change or remove those rules first, or pause the schedule with update_schedule "+
+					"active=false, which stops it admitting anybody without deleting it.",
+					str(schedule, "name"), fmtCount(dependents, "access rule")))
+			}
+			return &ConfirmationPlan{
+				Consequence: deleteScheduleConsequence(str(schedule, "name"), 0),
+			}, nil
+		},
+		Run: func(t *Turn, a Args) Outcome {
+			id := a.String("schedule_id")
+			schedule, err := findSchedule(t, id)
+			if err != nil {
+				return Outcome{IsError: true, Status: models.ToolCallNotFound, Result: err.Error()}
+			}
+			name := str(schedule, "name")
+			_, resp, fail := post(t, http.MethodDelete, consoleSchedules+"/"+Segment(id), nil)
+			if fail != nil {
+				return *fail
+			}
+			return succeeded(resp, object{
+				"deleted":  true,
+				"note":     "Deleted. No access rule referred to it, so nobody's access changed.",
+				"schedule": object{"id": id, "name": name},
 			})
 		},
 	})

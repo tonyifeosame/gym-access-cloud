@@ -17,11 +17,24 @@ import (
 // (ConsoleResyncTerminal), GET /console/terminal-announcements
 // (ConsoleListPendingTerminals), GET /console/sites/:id/settings (GetSiteSettings).
 //
-// ONE COMMAND IS ISSUABLE FROM HERE: DIAGNOSTIC_SNAPSHOT, a read of the
-// terminal's own state. The registry (models.CommandSpecs) gates it on the
-// terminal's reported capability and on MANAGER, and the route enforces
-// both; the tool adds nothing. DEVICE_TEST, which makes a noise in a room,
-// is not offered in this phase. Nothing that stops a door is here at all.
+// TWO COMMANDS ARE ISSUABLE FROM HERE, EACH BY ITS OWN NAMED TOOL:
+// DIAGNOSTIC_SNAPSHOT, a read of the terminal's own state, and DEVICE_TEST,
+// which exercises one piece of hardware. There is no tool that takes a
+// command type: the type is written into the tool, and DEVICE_TEST's only
+// argument is a target from models.DeviceTestTargets -- a closed set that
+// does not contain the relay and must not. The registry (models.CommandSpecs)
+// gates both on the terminal's reported capability and on MANAGER, and the
+// route enforces both; the tools add nothing to that.
+//
+// A DEVICE TEST ASKS FIRST. It is not ReadOnly in the registry and the
+// reason is physical: somebody in the room hears a tone or sees a panel
+// light, and an operator who did not intend it sends a technician looking
+// for a fault. A diagnostic, which nobody can perceive, does not ask.
+//
+// WITHDRAWING IS SAFE AND SO DOES NOT ASK. It makes the terminal do LESS
+// than it was already going to, the route refuses anything already
+// collected, and the result says which it was. Nothing that stops a door is
+// reachable from here at all.
 
 func registerFleetTools(r *Registry) {
 	r.Register(&Tool{
@@ -108,6 +121,95 @@ func registerFleetTools(r *Registry) {
 				note = "A diagnostic was already waiting for this terminal; that one is returned. Use wait_for_command with its id."
 			}
 			out := succeeded(resp, object{"command": commandView(m), "note": note})
+			out.Handoff = handoffTerminal(serial, serial)
+			return out
+		},
+	})
+
+	r.Register(&Tool{
+		Name: "run_device_test",
+		Description: "Ask a terminal to exercise one piece of its hardware and report what happened: the " +
+			"buzzer, the display, or a self-test of both. Somebody standing at the terminal will hear " +
+			"or see it, so the operator is asked to approve first. It cannot open a door. Use " +
+			"wait_for_command to collect the result.",
+		Params: []Param{
+			{Name: "serial", Type: "string", Description: "The terminal's serial number.", Required: true, MaxLen: 64, Identifier: true},
+			{Name: "target", Type: "string", Description: "What to exercise: buzzer sounds a tone, display lights the panel, self_test runs both.", Required: true, Enum: models.DeviceTestTargets},
+			{Name: "reason", Type: "string", Description: "Optional: the operator's own words on why.", MaxLen: 200},
+		},
+		// NOT Destructive, AND IT STILL ASKS. The MCP annotation says whether
+		// an operation destroys state, and this destroys none: no roster
+		// changes, no rule changes, nothing is stored. It asks because it is
+		// PERCEPTIBLE -- the two are different properties and the registry
+		// treats them as such.
+		Destructive: false, Idempotent: false,
+		MinRole: models.RoleManager,
+		Domains: []string{DomainTerminals, DomainAudit},
+		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
+			// The card names the terminal and the place, which is what makes
+			// "somebody will hear this" a fact the operator can check rather
+			// than a warning about a serial number.
+			terminal, _, fail := get(t, consoleTerminals+"/"+Segment(a.String("serial")))
+			if fail != nil {
+				return nil, failError(fail)
+			}
+			return &ConfirmationPlan{
+				Consequence: deviceTestConsequence(terminalLabel(terminal), str(terminal, "site_name"),
+					a.String("target"), str(terminal, "status")),
+			}, nil
+		},
+		Run: func(t *Turn, a Args) Outcome {
+			serial, target := a.String("serial"), a.String("target")
+			// Checked again here, not because the schema's enum could be
+			// bypassed, but because the enum is built from the model
+			// registry's own list: if that list ever grew a target this tool
+			// should not offer, the tool would start offering it silently.
+			if !contains(models.DeviceTestTargets, target) {
+				return Outcome{IsError: true, Status: models.ToolCallInvalid,
+					Result: "That is not a test this platform runs."}
+			}
+			m, resp, fail := post(t, http.MethodPost, consoleTerminals+"/"+Segment(serial)+"/commands", object{
+				"type":   models.CommandDeviceTest,
+				"params": object{"target": target},
+				"reason": assistantReason(a.String("reason")),
+			})
+			if fail != nil {
+				return *fail
+			}
+			note := "Queued. The terminal runs it on its next poll, and it lapses if it is not collected " +
+				"within five minutes; use wait_for_command with this command id."
+			if boolOf(m, "already_pending") {
+				note = "A test was already waiting for this terminal; that one is returned. Use wait_for_command with its id."
+			}
+			out := succeeded(resp, object{"command": commandView(m), "note": note})
+			out.Handoff = handoffTerminal(serial, serial)
+			return out
+		},
+	})
+
+	r.Register(&Tool{
+		Name: "withdraw_command",
+		Description: "Cancel a command that is still waiting to be collected, so the terminal never runs " +
+			"it. A command the terminal has already collected cannot be recalled and the platform " +
+			"refuses rather than pretending.",
+		Params: []Param{
+			{Name: "serial", Type: "string", Description: "The terminal's serial number.", Required: true, MaxLen: 64, Identifier: true},
+			{Name: "command_id", Type: "string", Description: "The command's id, from list_terminal_commands.", Required: true, MaxLen: 64, Identifier: true},
+		},
+		Idempotent: true,
+		MinRole:    models.RoleManager,
+		Domains:    []string{DomainTerminals, DomainAudit},
+		Run: func(t *Turn, a Args) Outcome {
+			serial := a.String("serial")
+			m, resp, fail := post(t, http.MethodDelete, consoleTerminals+"/"+Segment(serial)+"/commands/"+
+				Segment(a.String("command_id")), nil)
+			if fail != nil {
+				return *fail
+			}
+			out := succeeded(resp, object{
+				"command": commandView(m),
+				"note":    "Withdrawn. The terminal will never be offered it.",
+			})
 			out.Handoff = handoffTerminal(serial, serial)
 			return out
 		},

@@ -134,6 +134,21 @@ var (
 
 	// An access decision.
 	decisionFields = []string{"granted", "reason", "person_name", "external_id", "application", "matched_permission", "decided_at"}
+
+	// Phase 2b.
+
+	// One operator action. WHO, WHAT, AGAINST WHAT, WHEN -- and nothing else.
+	// NOT ip_address, which is infrastructure, and NOT changes, which is a
+	// free-form column each writing handler fills as it likes and which
+	// carries key and code prefixes and announcement addresses. See
+	// tools_audit.go.
+	auditFields = []string{"id", "action", "actor_email", "actor_role", "target_type", "target_id", "target_label", "occurred_at"}
+
+	// A terminal waiting to be set up, AFTER a decision has been made about
+	// it: the pending list's fields plus where it was sent and what it is
+	// called, which is the whole of what approving or rejecting changes.
+	// Still no pairing code, no address, no adopter, no capabilities.
+	pendingDecisionFields = append(append([]string{}, pendingTerminalFields...), "site_name", "device_name")
 )
 
 // diagnosticResult projects a DIAGNOSTIC_SNAPSHOT's result: every section
