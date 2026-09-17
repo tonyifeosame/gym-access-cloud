@@ -2,6 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { setupServer } from 'msw/node'
 
 import type {
+  AssistantDomain,
   AssistantEvent,
   APICredential,
   APICredentialUsage,
@@ -127,6 +128,8 @@ interface ServerState {
    */
   assistantEnabled: boolean
   assistantTurns: AssistantEvent[][]
+  /** What /capabilities says each write tool changes; the console's fallback map. */
+  assistantEffects: Record<string, AssistantDomain[]>
   /** Forces the next matching request to fail, for error-path tests. */
   failNext: Record<string, number>
   requests: { method: string; url: string; headers: Headers }[]
@@ -143,6 +146,7 @@ function initialState(): ServerState {
     enrollments: {},
     assistantEnabled: false,
     assistantTurns: [],
+    assistantEffects: {},
     operators: [],
     apiCredentials: [],
     apiCredentialUsage: {},
@@ -2801,7 +2805,21 @@ export const handlers = [
     record(request)
     if (!state.session) return unauthorized()
     if (!state.assistantEnabled) return json({ enabled: false })
-    return json({ enabled: true, model: 'mock-model', tools: ['search_people', 'get_person', 'create_person', 'grant_access'] })
+    // The Phase 1 writes' effects, as the server declares them, under
+    // whatever a test adds: the console's fallback when a result names none.
+    const effects: Record<string, AssistantDomain[]> = {
+      create_person: ['people', 'onboarding', 'audit'],
+      grant_access: ['permissions', 'onboarding', 'audit'],
+      revoke_access: ['permissions', 'onboarding', 'audit'],
+      start_enrollment: ['people', 'audit'],
+      ...state.assistantEffects,
+    }
+    return json({
+      enabled: true,
+      model: 'mock-model',
+      tools: ['search_people', 'get_person', ...Object.keys(effects)],
+      effects,
+    })
   }),
 
   http.post('*/api/v1/console/assistant/conversations', ({ request }) => {

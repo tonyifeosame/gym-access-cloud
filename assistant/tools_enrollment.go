@@ -12,13 +12,14 @@ import (
 // THE CAPTURE HAPPENS IN THE CONSOLE'S OWN SCREEN, NOT HERE. What the
 // assistant can do is ask one terminal to enter enrolment mode -- after the
 // operator has approved which terminal, with the person standing at it --
-// and then follow the state. Every result carries a hand-off to the person's
-// page with the enrolment dialog open (?enrol=1), where the existing
-// EnrollmentWorkflow shows the live states, cancels, and retries. Nothing
-// about the hardware interaction is reproduced in the agent.
+// and then follow the state, or stop it. Every result carries a hand-off to
+// the person's page with the enrolment dialog open (?enrol=1), where the
+// existing EnrollmentWorkflow shows the live states, cancels, and retries.
+// Nothing about the hardware interaction is reproduced in the agent.
 //
 // Routes: POST /console/terminals/:serial/enrollments (ConsoleStartEnrollment),
-// GET /console/people/:id/enrollment (ConsoleGetPersonEnrollment).
+// GET /console/people/:id/enrollment (ConsoleGetPersonEnrollment),
+// DELETE /console/people/:id/enrollment (ConsoleCancelEnrollment).
 
 func registerEnrollmentTools(r *Registry) {
 	r.Register(&Tool{
@@ -33,12 +34,13 @@ func registerEnrollmentTools(r *Registry) {
 		},
 		Destructive: false, Idempotent: false,
 		MinRole: models.RoleManager,
+		Domains: []string{DomainPeople, DomainAudit},
 		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
 			person, _, fail := get(t, consolePeople+"/"+Segment(a.String("external_id")))
 			if fail != nil {
 				return nil, failError(fail)
 			}
-			term, _, fail := get(t, "/api/v1/console/terminals/"+Segment(a.String("serial")))
+			term, _, fail := get(t, consoleTerminals+"/"+Segment(a.String("serial")))
 			if fail != nil {
 				return nil, failError(fail)
 			}
@@ -48,7 +50,7 @@ func registerEnrollmentTools(r *Registry) {
 		},
 		Run: func(t *Turn, a Args) Outcome {
 			m, resp, fail := post(t, http.MethodPost,
-				"/api/v1/console/terminals/"+Segment(a.String("serial"))+"/enrollments",
+				consoleTerminals+"/"+Segment(a.String("serial"))+"/enrollments",
 				object{"external_id": a.String("external_id")})
 			if fail != nil {
 				return *fail
@@ -58,7 +60,7 @@ func registerEnrollmentTools(r *Registry) {
 				"note": "The terminal has been asked to capture the fingerprint. The operator can follow it " +
 					"in the enrolment screen; use wait_for_enrollment to check the outcome.",
 			})
-			out.Handoff = enrollmentHandoff(a.String("external_id"), personLabel(object{"full_name": str(m, "full_name"), "external_id": a.String("external_id")}))
+			out.Handoff = handoffEnrolment(a.String("external_id"), personLabel(object{"full_name": str(m, "full_name"), "external_id": a.String("external_id")}))
 			return out
 		},
 	})
@@ -70,19 +72,19 @@ func registerEnrollmentTools(r *Registry) {
 			"state at the timeout if it is still in progress.",
 		Params: []Param{
 			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
-			{Name: "timeout_s", Type: "integer", Description: "Seconds to wait (1-60).", Min: intPtr(1), Max: intPtr(60)},
+			{Name: "timeout_s", Type: "integer", Description: "Seconds to wait (1-60).", Min: intPtr(1), Max: intPtr(maxWaitSeconds)},
 		},
 		ReadOnly: true, Idempotent: true,
 		MinRole:     models.RoleViewer,
-		MaxDuration: 65 * time.Second,
+		MaxDuration: (maxWaitSeconds + 5) * time.Second,
 		Run: func(t *Turn, a Args) Outcome {
 			timeout := a.Int("timeout_s")
 			if timeout == 0 {
 				timeout = 30
 			}
 			id := a.String("external_id")
-			out := waitFor(t, time.Duration(timeout)*time.Second, 2*time.Second, func() (Outcome, bool) {
-				o := enrollmentState(t, id)
+			out := pollUntil(t, time.Duration(timeout)*time.Second, 2*time.Second, func(p *Turn) (Outcome, bool) {
+				o := enrollmentState(p, id)
 				if o.IsError {
 					return o, true
 				}
@@ -97,17 +99,34 @@ func registerEnrollmentTools(r *Registry) {
 				return o, false
 			})
 			if !out.IsError {
-				out.Handoff = enrollmentHandoff(id, id)
+				out.Handoff = handoffEnrolment(id, id)
 			}
 			return out
 		},
 	})
-}
 
-func enrollmentHandoff(externalID, label string) *models.AssistantHandoff {
-	return &models.AssistantHandoff{
-		Kind:  "enrolment",
-		Route: "/people/" + Segment(externalID) + "?enrol=1",
-		Label: "Open the enrolment screen for " + label,
-	}
+	r.Register(&Tool{
+		Name: "cancel_enrollment",
+		Description: "Stop a person's in-progress fingerprint enrolment, whichever terminal it was sent to. " +
+			"Fails if none is in progress.",
+		Params: []Param{
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+		},
+		Idempotent: true,
+		MinRole:    models.RoleManager,
+		Domains:    []string{DomainPeople, DomainAudit},
+		Run: func(t *Turn, a Args) Outcome {
+			id := a.String("external_id")
+			m, resp, fail := post(t, http.MethodDelete, consolePeople+"/"+Segment(id)+"/enrollment", nil)
+			if fail != nil {
+				return *fail
+			}
+			out := succeeded(resp, object{
+				"enrollment": pick(m, enrolFields...),
+				"note":       "Cancelled. The terminal leaves enrolment mode on its next poll.",
+			})
+			out.Handoff = handoffPerson(id, id)
+			return out
+		},
+	})
 }

@@ -885,6 +885,77 @@ async function main() {
       }
       await withAssistant.close()
 
+      /* --- the multi-step request (Phase 2a) ----------------------------------
+       *
+       * One message, three server turns: a safe step that runs, a card, a
+       * second card only once the first has been approved, then a hand-off
+       * into the console's own enrolment screen. Each card is drawn and
+       * measured in turn, and the hand-off is followed: the person page
+       * must open with the enrolment dialog, which is where the capture
+       * actually happens.
+       */
+      const workflow = await context.newPage()
+      await mockApi(workflow, { assistant: 'workflow' })
+      instrument(workflow, `${viewport.name}/assistant-workflow`)
+      await workflow.goto(`${site.url}/people`, { waitUntil: 'networkidle' })
+      const workflowLauncher = workflow.locator('button.topbar__assistant')
+      if (check(
+        (await workflowLauncher.count()) > 0,
+        `${viewport.name}/assistant-workflow: no launcher, so the multi-step request was never swept`,
+      )) {
+        const label = `${viewport.name}/assistant workflow`
+        await workflowLauncher.click()
+        await workflow.waitForSelector('[role="dialog"][aria-label="Assistant"]', { timeout: 5000 })
+        await workflow.fill('#assistant-input', 'Create John Okafor with ID 4471, give him Reception access, and start fingerprint enrollment.')
+        await workflow.keyboard.press('Enter')
+
+        // The first card, and only the first: the enrolment must not have
+        // been asked for yet.
+        const ruleCard = workflow.getByRole('region', { name: 'Let John Okafor in at Reception?' })
+        const enrolCard = workflow.getByRole('region', { name: /^Ready to start fingerprint/ })
+        await ruleCard.waitFor({ timeout: 10_000 })
+        check(
+          (await enrolCard.count()) === 0,
+          `${label}: the enrolment card appeared before the rule was approved`,
+        )
+        check(
+          (await workflow.locator('.assistant__tool', { hasText: 'Added a person' }).count()) > 0
+            || (await workflow.getByText('Added a person').count()) > 0,
+          `${label}: the safe step (adding the person) is not shown as done`,
+        )
+        await runAxe(workflow, `${label} first card`)
+        if (isPhone(viewport)) await checkTargetSize(workflow, `${label} first card`)
+
+        await ruleCard.getByRole('button', { name: 'Approve' }).click()
+        await enrolCard.waitFor({ timeout: 10_000 })
+        check(
+          (await ruleCard.getByText('Approved').count()) > 0,
+          `${label}: the first card does not read Approved after the server said it ran`,
+        )
+        await runAxe(workflow, `${label} second card`)
+
+        await enrolCard.getByRole('button', { name: 'Approve' }).click()
+        const handoff = workflow.locator('a', { hasText: 'Open the enrolment screen for John Okafor' })
+        await handoff.waitFor({ timeout: 10_000 })
+        check(
+          (await handoff.getAttribute('href')) === '/people/P-0001?enrol=1',
+          `${label}: the hand-off points at ${await handoff.getAttribute('href')}, not the enrolment screen`,
+        )
+        await runAxe(workflow, `${label} hand-off`)
+
+        // Following it lands on the person's page with the enrolment dialog
+        // open -- the capture continues in the console, not in the panel.
+        await handoff.click()
+        await workflow.getByRole('dialog', { name: /Enrol a fingerprint/ }).waitFor({ timeout: 10_000 })
+        check(
+          !workflow.url().includes('enrol=1'),
+          `${label}: ?enrol=1 was not consumed from the address after opening the dialog`,
+        )
+        await runAxe(workflow, `${label} enrolment dialog`)
+        notes.push(`${viewport.name}: assistant multi-step request swept (two cards in order, hand-off, enrolment dialog)`)
+      }
+      await workflow.close()
+
       // --- the focus ring is actually visible -------------------------------
       await page.goto(`${site.url}/people`, { waitUntil: 'networkidle' })
       await page.keyboard.press('Tab')

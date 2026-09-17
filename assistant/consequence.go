@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"access-terminal-cloud-api/models"
 )
@@ -82,6 +83,41 @@ func enrollmentConsequence(personLabel, terminalLabel, siteLabel string) models.
 			"AccessLink never keeps a copy. The enrolment screen opens next so you can follow the capture.",
 			personLabel, where),
 	}
+}
+
+// deactivateConsequence is the confirmation for set_person_active(false).
+// The words are PersonDetailPage's Deactivate dialog.
+func deactivateConsequence(personLabel string) models.AssistantConsequence {
+	return models.AssistantConsequence{
+		Title: fmt.Sprintf("Deactivate %s?", personLabel),
+		Body: "Every terminal in your company will be told to stop admitting them. " +
+			"The record and any enrolled credential are kept.",
+		Warnings: []string{"Reversible — you can activate them again from this same screen. " +
+			"Terminals apply the change on their next sync, so it is not instant on hardware that is currently offline."},
+	}
+}
+
+// scheduleChangeConsequence is the confirmation for update_schedule when
+// rules depend on the schedule. The words are SchedulesPage's warning.
+func scheduleChangeConsequence(name string, dependents int, summary string) models.AssistantConsequence {
+	return models.AssistantConsequence{
+		Title: fmt.Sprintf("Change %s?", name),
+		Body:  summary,
+		Warnings: []string{fmt.Sprintf("This changes every rule that uses it: %s refer to this schedule. "+
+			"Widening a window widens all of them at once, everywhere.", fmtCount(dependents, "access rule"))},
+	}
+}
+
+// assistantReason marks a reason the assistant sends on the operator's
+// behalf. The audit trail already records the User-Agent
+// (AccessLink-Assistant/1 ...); the reason field is the human-readable
+// mark, and it keeps the operator's own words when they gave any.
+func assistantReason(operatorWords string) string {
+	words := strings.TrimSpace(operatorWords)
+	if words == "" {
+		return "assistant"
+	}
+	return "assistant: " + words
 }
 
 // newRequestID mints the id an internal request carries -- the same shape

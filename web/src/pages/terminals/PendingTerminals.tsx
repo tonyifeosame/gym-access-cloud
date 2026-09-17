@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import type { PendingTerminal } from '../../api/types'
 import { Badge } from '../../components/Badge'
@@ -53,6 +54,30 @@ export function PendingTerminals({ canApprove }: { canApprove: boolean }) {
   const [rejecting, setRejecting] = useState<PendingTerminal | null>(null)
 
   const rows = pending.data?.pending ?? []
+
+  /*
+    ?pending=1 BRINGS THIS PANEL INTO VIEW ON ARRIVAL. The assistant hands off
+    here when it has found terminals waiting, and "open the fleet page, then
+    scroll" is one step too many for somebody standing next to the unit. The
+    parameter is consumed once the list has loaded and removed from the
+    address, so a reload does not jump again. It does nothing for a viewer,
+    who is never shown the panel.
+  */
+  const [searchParams, setSearchParams] = useSearchParams()
+  const focusRequested = searchParams.get('pending') === '1'
+  const heading = useRef<HTMLHeadingElement>(null)
+  const loaded = !mayView || !pending.isPending
+  useEffect(() => {
+    if (!focusRequested || !loaded) return
+    if (rows.length > 0) {
+      heading.current?.scrollIntoView?.({ block: 'start' })
+      heading.current?.focus()
+    }
+    const next = new URLSearchParams(searchParams)
+    next.delete('pending')
+    setSearchParams(next, { replace: true })
+  }, [focusRequested, loaded, rows.length, searchParams, setSearchParams])
+
   // Nothing to show, and for a viewer nothing was ever asked for. Either way the
   // panel is absent rather than empty: a permanent empty box trains people to
   // stop seeing it, and one that says "you may not see this" would be telling a
@@ -61,7 +86,7 @@ export function PendingTerminals({ canApprove }: { canApprove: boolean }) {
 
   return (
     <section className="panel pending-terminals" aria-labelledby="pending-terminals-title">
-      <h2 className="panel__title" id="pending-terminals-title">
+      <h2 className="panel__title" id="pending-terminals-title" ref={heading} tabIndex={-1}>
         Waiting to be set up
       </h2>
       <p className="card__detail">

@@ -7,7 +7,8 @@ import (
 	"access-terminal-cloud-api/models"
 )
 
-// Terminals, sites, schedules and events -- all read-only.
+// Terminals, sites, schedules and events -- all read-only. The fleet writes
+// and the command plane are in tools_fleet.go.
 //
 // Routes: GET /console/terminals (ConsoleListTerminals), GET /console/terminals/:serial
 // (ConsoleGetTerminal), GET /console/terminals/summary (ConsoleTerminalSummary),
@@ -160,6 +161,10 @@ func registerTerminalTools(r *Registry) {
 			{Name: "serial", Type: "string", Description: "Only events at this terminal.", MaxLen: 64, Identifier: true},
 			{Name: "site_id", Type: "string", Description: "Only events at this site.", MaxLen: 64, Identifier: true},
 			{Name: "decision", Type: "string", Description: "Only this outcome.", Enum: []string{"GRANTED", "DENIED", "RECORDED", "ERROR"}},
+			{Name: "event_type", Type: "string", Description: "Only this kind of event, e.g. ACCESS_DENIED, CREDENTIAL_ENROLLED, TERMINAL_OFFLINE.", MaxLen: 64, Identifier: true},
+			{Name: "application", Type: "string", Description: "Only events from this feature.", MaxLen: 64, Identifier: true},
+			{Name: "direction", Type: "string", Description: "Only entries or exits.", Enum: []string{"IN", "OUT"}},
+			{Name: "query", Type: "string", Description: "Free text over names and serials.", MaxLen: 100},
 			{Name: "from", Type: "string", Description: "Only events at or after this instant (RFC 3339, e.g. 2026-09-15T00:00:00Z).", MaxLen: 40},
 			{Name: "to", Type: "string", Description: "Only events before this instant (RFC 3339).", MaxLen: 40},
 			{Name: "limit", Type: "integer", Description: "Rows per page (1-100).", Min: intPtr(1), Max: intPtr(100)},
@@ -177,6 +182,10 @@ func registerTerminalTools(r *Registry) {
 				"serial":      a.String("serial"),
 				"site_id":     a.String("site_id"),
 				"decision":    strings.ToUpper(a.String("decision")),
+				"event_type":  a.String("event_type"),
+				"application": a.String("application"),
+				"direction":   a.String("direction"),
+				"q":           a.String("query"),
 				"from":        a.String("from"),
 				"to":          a.String("to"),
 				"limit":       strconv.Itoa(limit),
@@ -195,9 +204,12 @@ func registerTerminalTools(r *Registry) {
 	})
 }
 
-// registerPhase1Tools is the whole Phase 1 catalogue.
-func registerPhase1Tools(r *Registry) {
+// registerTools is the whole catalogue: Phase 1 and Phase 2a.
+func registerTools(r *Registry) {
 	registerPeopleTools(r)
 	registerEnrollmentTools(r)
 	registerTerminalTools(r)
+	registerAccessTools(r)
+	registerScheduleTools(r)
+	registerFleetTools(r)
 }

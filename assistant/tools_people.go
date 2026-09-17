@@ -3,7 +3,6 @@ package assistant
 import (
 	"net/http"
 	"strconv"
-	"time"
 
 	"access-terminal-cloud-api/models"
 )
@@ -99,6 +98,7 @@ func registerPeopleTools(r *Registry) {
 		},
 		Idempotent: false,
 		MinRole:    models.RoleManager,
+		Domains:    []string{DomainPeople, DomainOnboarding, DomainAudit},
 		Run: func(t *Turn, a Args) Outcome {
 			body := object{"external_id": a.String("external_id"), "full_name": a.String("full_name")}
 			if c := a.String("category"); c != "" {
@@ -112,11 +112,7 @@ func registerPeopleTools(r *Registry) {
 				"person": pick(person, personFields...),
 				"note":   "Added. They have no access rules yet and no fingerprint enrolled.",
 			})
-			out.Handoff = &models.AssistantHandoff{
-				Kind:  "person",
-				Route: "/people/" + Segment(str(person, "external_id")),
-				Label: "Open " + personLabel(person),
-			}
+			out.Handoff = handoffPerson(str(person, "external_id"), personLabel(person))
 			return out
 		},
 	})
@@ -139,6 +135,7 @@ func registerPeopleTools(r *Registry) {
 		},
 		Destructive: true, Idempotent: false,
 		MinRole: models.RoleManager,
+		Domains: []string{DomainPermissions, DomainOnboarding, DomainAudit},
 		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
 			person, _, fail := get(t, consolePeople+"/"+Segment(a.String("external_id")))
 			if fail != nil {
@@ -206,6 +203,7 @@ func registerPeopleTools(r *Registry) {
 		},
 		Destructive: true, Idempotent: true,
 		MinRole: models.RoleManager,
+		Domains: []string{DomainPermissions, DomainOnboarding, DomainAudit},
 		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
 			person, rule, err := findRule(t, a.String("external_id"), a.String("rule_id"))
 			if err != nil {
@@ -227,6 +225,132 @@ func registerPeopleTools(r *Registry) {
 				return *fail
 			}
 			return succeeded(resp, object{"removed": true, "note": "Removed. Terminals apply it on their next sync."})
+		},
+	})
+	r.Register(&Tool{
+		Name: "update_person",
+		Description: "Correct a person's name or category. Only the fields given change; the ID number " +
+			"cannot change and any fingerprint is kept.",
+		Params: []Param{
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+			{Name: "full_name", Type: "string", Description: "The corrected full name.", MaxLen: 100},
+			{Name: "category", Type: "string", Description: "The new category, e.g. staff, contractor, student.", MaxLen: 50},
+		},
+		Idempotent: true,
+		MinRole:    models.RoleManager,
+		Domains:    []string{DomainPeople, DomainAudit},
+		Run: func(t *Turn, a Args) Outcome {
+			if a.String("full_name") == "" && a.String("category") == "" {
+				return Outcome{IsError: true, Status: models.ToolCallInvalid, Result: "Give a full_name or a category to change."}
+			}
+			id := a.String("external_id")
+			// READ, MERGE, WRITE. The route requires the full name and treats
+			// an absent category as "keep"; sending the existing values for
+			// whatever the operator did not mention is what makes a one-field
+			// correction a one-field change. The route itself preserves the
+			// credential and refuses to change the ID number.
+			existing, _, fail := get(t, consolePeople+"/"+Segment(id))
+			if fail != nil {
+				return *fail
+			}
+			body := object{"full_name": str(existing, "full_name"), "category": str(existing, "category")}
+			if v := a.String("full_name"); v != "" {
+				body["full_name"] = v
+			}
+			if v := a.String("category"); v != "" {
+				body["category"] = v
+			}
+			person, resp, fail := post(t, http.MethodPut, consolePeople+"/"+Segment(id), body)
+			if fail != nil {
+				return *fail
+			}
+			changes := object{}
+			if str(person, "full_name") != str(existing, "full_name") {
+				changes["full_name"] = object{"from": str(existing, "full_name"), "to": str(person, "full_name")}
+			}
+			if str(person, "category") != str(existing, "category") {
+				changes["category"] = object{"from": str(existing, "category"), "to": str(person, "category")}
+			}
+			out := succeeded(resp, object{"person": pick(person, personFields...), "changes": changes})
+			out.Handoff = handoffPerson(id, personLabel(person))
+			return out
+		},
+	})
+
+	r.Register(&Tool{
+		Name: "set_person_active",
+		Description: "Deactivate a person (every terminal stops admitting them; record and fingerprint kept) " +
+			"or activate them again. Deactivating needs the operator's approval.",
+		Params: []Param{
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+			{Name: "active", Type: "boolean", Description: "false to deactivate, true to activate.", Required: true},
+		},
+		Destructive: true, Idempotent: true,
+		MinRole: models.RoleManager,
+		Domains: []string{DomainPeople, DomainOnboarding, DomainAudit},
+		Confirm: func(t *Turn, a Args) (*ConfirmationPlan, error) {
+			person, _, fail := get(t, consolePeople+"/"+Segment(a.String("external_id")))
+			if fail != nil {
+				return nil, failError(fail)
+			}
+			if boolOf(person, "active") == a.Bool("active") {
+				if a.Bool("active") {
+					return nil, errText(personLabel(person) + " is already active.")
+				}
+				return nil, errText(personLabel(person) + " is already inactive.")
+			}
+			if a.Bool("active") {
+				// Reactivating restores what was; it runs without a card,
+				// as the console's own dialog carries no danger tone for it.
+				return nil, nil
+			}
+			return &ConfirmationPlan{Consequence: deactivateConsequence(personLabel(person))}, nil
+		},
+		Run: func(t *Turn, a Args) Outcome {
+			id := a.String("external_id")
+			existing, _, fail := get(t, consolePeople+"/"+Segment(id))
+			if fail != nil {
+				return *fail
+			}
+			if boolOf(existing, "active") == a.Bool("active") {
+				state := "inactive"
+				if a.Bool("active") {
+					state = "active"
+				}
+				return Outcome{IsError: true, Status: models.ToolCallInvalid, Result: personLabel(existing) + " is already " + state + "."}
+			}
+			// The same read-merge-write as update_person: the route needs
+			// the name, and nothing but `active` may move.
+			body := object{
+				"full_name": str(existing, "full_name"),
+				"category":  str(existing, "category"),
+				"active":    a.Bool("active"),
+			}
+			person, resp, fail := post(t, http.MethodPut, consolePeople+"/"+Segment(id), body)
+			if fail != nil {
+				return *fail
+			}
+			note := "Deactivated. Terminals stop admitting them on their next sync."
+			if a.Bool("active") {
+				note = "Activated. Terminals admit them again on their next sync, subject to their access rules."
+			}
+			out := succeeded(resp, object{"person": pick(person, personFields...), "note": note})
+			out.Handoff = handoffPerson(id, personLabel(person))
+			return out
+		},
+	})
+
+	r.Register(&Tool{
+		Name: "list_person_credentials",
+		Description: "Where a person's fingerprint is enrolled: each credential's state and the terminal " +
+			"that holds it. A fingerprint works only at the terminal that captured it.",
+		Params: []Param{
+			{Name: "external_id", Type: "string", Description: "The person's ID number.", Required: true, MaxLen: 50, Identifier: true},
+		},
+		ReadOnly: true, Idempotent: true, ParallelSafe: true,
+		MinRole: models.RoleViewer,
+		Run: func(t *Turn, a Args) Outcome {
+			return personCredentials(t, a.String("external_id"))
 		},
 	})
 }
@@ -292,6 +416,35 @@ func enrollmentState(t *Turn, externalID string) Outcome {
 	return succeeded(resp, out)
 }
 
+// personCredentials is the projected credential list: state and place only.
+// The route's SELECT list already carries no biometric material; the
+// allow-list here is the second boundary.
+func personCredentials(t *Turn, externalID string) Outcome {
+	m, resp, fail := get(t, consolePeople+"/"+Segment(externalID)+"/credentials")
+	if fail != nil {
+		return *fail
+	}
+	creds := []object{}
+	items, _ := m["credentials"].([]any)
+	for _, item := range items {
+		c, ok := item.(object)
+		if !ok {
+			continue
+		}
+		out := pick(c, credentialFields...)
+		if term, ok := c["enrolled_at_terminal"].(object); ok {
+			out["terminal"] = pick(term, "serial_number", "device_name", "site_name")
+		}
+		creds = append(creds, out)
+	}
+	return succeeded(resp, object{
+		"external_id":      externalID,
+		"count":            num(m, "count"),
+		"enrolment_source": str(m, "enrolment_source"),
+		"credentials":      creds,
+	})
+}
+
 type textError string
 
 func (e textError) Error() string { return string(e) }
@@ -304,20 +457,4 @@ func failError(o *Outcome) error {
 		return textError(s)
 	}
 	return textError("that could not be looked up")
-}
-
-// waitFor polls fn until it reports done or the deadline passes.
-func waitFor(t *Turn, timeout time.Duration, every time.Duration, fn func() (Outcome, bool)) Outcome {
-	deadline := time.Now().Add(timeout)
-	for {
-		o, done := fn()
-		if done || o.IsError || time.Now().After(deadline) {
-			return o
-		}
-		select {
-		case <-t.ctx.Done():
-			return o
-		case <-time.After(every):
-		}
-	}
 }

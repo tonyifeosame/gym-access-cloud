@@ -108,6 +108,29 @@ type Outcome struct {
 	Handoff *models.AssistantHandoff
 }
 
+// Domains name what a write changes, in the console's own vocabulary: each
+// one is a query-key root in web/src/data/keys.ts, and the console drops
+// that cache when a tool naming it has run. A write tool must declare at
+// least one; a read tool declares none. The registry refuses anything else,
+// so a new write cannot leave a screen stale by omission.
+const (
+	DomainPeople           = "people"
+	DomainPermissions      = "permissions"
+	DomainSchedules        = "schedules"
+	DomainOnboarding       = "onboarding"
+	DomainAudit            = "audit"
+	DomainTerminals        = "terminals"
+	DomainSites            = "sites"
+	DomainPendingTerminals = "pending_terminals"
+	DomainEvents           = "events"
+)
+
+var knownDomains = map[string]bool{
+	DomainPeople: true, DomainPermissions: true, DomainSchedules: true, DomainOnboarding: true,
+	DomainAudit: true, DomainTerminals: true, DomainSites: true, DomainPendingTerminals: true,
+	DomainEvents: true,
+}
+
 // Tool is one operation the model may call.
 type Tool struct {
 	Name        string
@@ -118,6 +141,10 @@ type Tool struct {
 	ReadOnly    bool
 	Destructive bool
 	Idempotent  bool
+
+	// Domains is what a successful run changes (see the Domain constants).
+	// Required for a write, refused on a read.
+	Domains []string
 
 	// MinRole is the lowest role shown this tool. VISIBILITY ONLY: the route
 	// the tool dispatches to enforces the real gate, and a tool run by a role
@@ -140,12 +167,14 @@ type Tool struct {
 	ParallelSafe bool
 }
 
-// Definition is the tool as the model sees it.
+// Definition is the tool as the model sees it. Domains is carried for the
+// console, not the model: model.go copies name, description and schema only.
 type Definition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"input_schema"`
 	ReadOnly    bool           `json:"read_only"`
+	Domains     []string       `json:"domains,omitempty"`
 }
 
 // Registry holds the tools, in a fixed order.
@@ -180,6 +209,17 @@ func (r *Registry) Register(t *Tool) {
 	}
 	if t.ReadOnly && (t.Destructive || t.Confirm != nil) {
 		panic(fmt.Sprintf("assistant: tool %q is read-only but destructive or confirmed", t.Name))
+	}
+	if t.ReadOnly && len(t.Domains) > 0 {
+		panic(fmt.Sprintf("assistant: tool %q is read-only but declares domains", t.Name))
+	}
+	if !t.ReadOnly && len(t.Domains) == 0 {
+		panic(fmt.Sprintf("assistant: tool %q writes but declares no domains", t.Name))
+	}
+	for _, d := range t.Domains {
+		if !knownDomains[d] {
+			panic(fmt.Sprintf("assistant: tool %q declares unknown domain %q", t.Name, d))
+		}
 	}
 	for _, p := range t.Params {
 		switch p.Type {
@@ -216,6 +256,7 @@ func (r *Registry) ForRole(role string) []Definition {
 			Description: t.Description,
 			InputSchema: t.schema(),
 			ReadOnly:    t.ReadOnly,
+			Domains:     append([]string(nil), t.Domains...),
 		})
 	}
 	return out
@@ -229,6 +270,28 @@ func (r *Registry) Names(role string) []string {
 		names = append(names, d.Name)
 	}
 	return names
+}
+
+// Effects maps each visible write tool to the domains it changes, for the
+// capabilities response: the console's fallback when a tool.result event
+// reaches it without domains (a replay, say).
+func (r *Registry) Effects(role string) map[string][]string {
+	out := map[string][]string{}
+	for _, d := range r.ForRole(role) {
+		if len(d.Domains) > 0 {
+			out[d.Name] = d.Domains
+		}
+	}
+	return out
+}
+
+// Domains reports what a tool changes, or nil for a read or an unknown name.
+func (r *Registry) Domains(name string) []string {
+	t, ok := r.tools[name]
+	if !ok || t.ReadOnly {
+		return nil
+	}
+	return append([]string(nil), t.Domains...)
 }
 
 func (t *Tool) schema() map[string]any {

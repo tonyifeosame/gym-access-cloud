@@ -853,9 +853,63 @@ const ASSISTANT_SCRIPT = [
   { type: 'assistant.message', text: 'I found Chukwuemeka Nwachukwu-Oluwaseun. The keep-out rule is waiting for your approval.' },
 ]
 
+/*
+ * THE MULTI-STEP REQUEST, AS THE SWEEP SEES IT (Phase 2a). "Create John,
+ * give him Reception access, and start fingerprint enrollment" is one
+ * message and three server turns: the safe step runs and the first
+ * consequential one pauses; approving it runs it and pauses the next;
+ * approving that starts the enrolment and hands off to the console. Each
+ * settlement is answered in order, so the sweep can draw two cards, one
+ * after the other, and the hand-off, and measure all three.
+ */
+const WORKFLOW_TURNS = [
+  [
+    { type: 'tool.call', call_id: 'w1', tool: 'create_person', arguments: { external_id: '4471', full_name: 'John Okafor' } },
+    { type: 'tool.result', call_id: 'w1', tool: 'create_person', status: 'EXECUTED', summary: 'ok', domains: ['people', 'onboarding', 'audit'] },
+    { type: 'tool.call', call_id: 'w2', tool: 'grant_access', arguments: { external_id: '4471', effect: 'ALLOW', scope_type: 'SITE' } },
+    { type: 'tool.result', call_id: 'w2', tool: 'grant_access', status: 'CONFIRMATION_REQUESTED', summary: 'waiting for your approval' },
+    {
+      type: 'confirmation.required', call_id: 'w2', confirmation_id: 'conf-grant', token: 'v1.conf-grant.sig', tool: 'grant_access',
+      arguments: { external_id: '4471', effect: 'ALLOW', scope_type: 'SITE', site_id: 'site-1' },
+      consequence: {
+        title: 'Let John Okafor in at Reception?',
+        body: 'Adds a rule that lets John Okafor in at Reception (every terminal there, including ones installed later), at any time. A Keep out rule elsewhere still wins over it.',
+      },
+      phrase_required: '', expires_at: '2026-09-17T12:00:00Z',
+    },
+    { type: 'assistant.message', text: 'Added John Okafor. Approve the Reception rule to continue.' },
+  ],
+  [
+    { type: 'tool.result', call_id: 'conf-grant', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done', domains: ['permissions', 'onboarding', 'audit'] },
+    { type: 'confirmation.settled', confirmation_id: 'conf-grant', tool: 'grant_access', outcome: 'approved' },
+    { type: 'tool.call', call_id: 'w3', tool: 'start_enrollment', arguments: { external_id: '4471', serial: 'AT-1' } },
+    { type: 'tool.result', call_id: 'w3', tool: 'start_enrollment', status: 'CONFIRMATION_REQUESTED', summary: 'waiting for your approval' },
+    {
+      type: 'confirmation.required', call_id: 'w3', confirmation_id: 'conf-enrol', token: 'v1.conf-enrol.sig', tool: 'start_enrollment',
+      arguments: { external_id: '4471', serial: 'AT-1' },
+      consequence: {
+        title: 'Ready to start fingerprint enrollment at Reception (Lagos)?',
+        body: 'John Okafor must be standing at Reception (Lagos). Only that terminal will enter enrolment mode; no other terminal is affected. Their fingerprint is stored on that terminal only — AccessLink never keeps a copy. The enrolment screen opens next so you can follow the capture.',
+      },
+      phrase_required: '', expires_at: '2026-09-17T12:00:00Z',
+    },
+    { type: 'assistant.message', text: 'The rule is in. Approve the enrolment when John is standing at Reception.' },
+  ],
+  [
+    { type: 'tool.result', call_id: 'conf-enrol', tool: 'start_enrollment', status: 'CONFIRMED_EXECUTED', summary: 'done', domains: ['people', 'audit'] },
+    { type: 'confirmation.settled', confirmation_id: 'conf-enrol', tool: 'start_enrollment', outcome: 'approved' },
+    { type: 'handoff', call_id: 'conf-enrol', kind: 'enrolment', route: '/people/P-0001?enrol=1', label: 'Open the enrolment screen for John Okafor' },
+    { type: 'assistant.message', text: 'Reception is waiting for his finger.' },
+  ],
+]
+
 export async function mockApi(page, options = {}) {
   const session = 'session' in options ? options.session : SESSION
   const assistant = Boolean(options.assistant)
+  // 'workflow' plays WORKFLOW_TURNS in order across the message and the two
+  // settlements; anything else truthy plays the single scripted turn.
+  const workflow = options.assistant === 'workflow'
+  let workflowTurn = 0
 
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
@@ -863,7 +917,10 @@ export async function mockApi(page, options = {}) {
     if (/\/api\/v1\/console\/assistant\//.test(url.pathname)) {
       if (url.pathname.endsWith('/capabilities')) {
         return route.fulfill({ status: 200, contentType: 'application/json',
-          body: JSON.stringify(assistant ? { enabled: true, model: 'mock', tools: ['search_people'] } : { enabled: false }) })
+          body: JSON.stringify(assistant
+            ? { enabled: true, model: 'mock', tools: ['search_people', 'create_person', 'grant_access', 'start_enrollment'],
+                effects: { create_person: ['people', 'onboarding', 'audit'], grant_access: ['permissions', 'onboarding', 'audit'], start_enrollment: ['people', 'audit'] } }
+            : { enabled: false }) })
       }
       if (!assistant) {
         return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'The assistant is not enabled.' }) })
@@ -874,11 +931,17 @@ export async function mockApi(page, options = {}) {
           body: JSON.stringify({ id: 'conv-1', title: '', status: 'OPEN', model: 'mock', turn_count: 0, created_at: now, updated_at: now, last_message_at: now }) })
       }
       if (url.pathname.endsWith('/messages') || url.pathname.endsWith('/confirmations')) {
-        const events = url.pathname.endsWith('/messages')
-          ? ASSISTANT_SCRIPT
-          : [{ type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done' },
-             { type: 'confirmation.settled', confirmation_id: 'conf-1', tool: 'grant_access', outcome: 'approved' },
-             { type: 'assistant.message', text: 'Done. The rule is in place.' }]
+        let events
+        if (workflow) {
+          events = WORKFLOW_TURNS[Math.min(workflowTurn, WORKFLOW_TURNS.length - 1)]
+          workflowTurn += 1
+        } else {
+          events = url.pathname.endsWith('/messages')
+            ? ASSISTANT_SCRIPT
+            : [{ type: 'tool.result', call_id: 'conf-1', tool: 'grant_access', status: 'CONFIRMED_EXECUTED', summary: 'done', domains: ['permissions', 'onboarding', 'audit'] },
+               { type: 'confirmation.settled', confirmation_id: 'conf-1', tool: 'grant_access', outcome: 'approved' },
+               { type: 'assistant.message', text: 'Done. The rule is in place.' }]
+        }
         return route.fulfill({ status: 200, contentType: 'text/event-stream; charset=utf-8', body: assistantTurn(events) })
       }
     }

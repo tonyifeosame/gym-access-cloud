@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 
@@ -12,22 +13,56 @@ import (
 // list is fixed and role-filtered, and nothing secret-shaped passes the
 // result guard.
 
-func TestPhase1CatalogueIsExactlyWhatWasApproved(t *testing.T) {
-	r := NewRegistry()
-	registerPhase1Tools(r)
-	want := []string{
+// phase1Tools and phase2aTools are the two approved catalogues. The union
+// is what the registry holds; nothing else may appear.
+var (
+	phase1Tools = []string{
 		"create_person", "get_fleet_summary", "get_person", "get_person_enrollment", "get_site",
 		"get_terminal", "grant_access", "list_events", "list_schedules", "list_sites",
 		"list_terminals", "revoke_access", "search_people", "start_enrollment", "wait_for_enrollment",
 	}
+	phase2aTools = []string{
+		"cancel_enrollment", "create_schedule", "evaluate_access", "explain_denial", "get_command",
+		"get_site_settings", "get_terminal_capabilities", "list_pending_terminals",
+		"list_people_without_access", "list_person_credentials", "list_terminal_commands",
+		"request_diagnostic", "resync_terminal", "set_person_active", "update_person",
+		"update_schedule", "wait_for_command",
+	}
+	// Named in the audit as later, high-risk or never: none may be registered.
+	notInPhase2a = []string{
+		"delete_person", "set_terminal_mode", "set_terminal_enabled", "move_terminal", "request_wifi_recovery",
+		"revoke_terminal_credential", "retire_terminal", "release_terminal", "approve_pending_terminal",
+		"reject_pending_terminal", "adopt_terminal", "issue_claim_code", "create_site", "update_site",
+		"retire_site", "rotate_site_key", "set_site_offline_policy", "list_operators", "create_operator",
+		"set_operator_sites", "list_firmware", "publish_firmware", "set_application", "list_audit",
+		"run_device_test", "withdraw_command", "delete_schedule", "summarise_events",
+	}
+)
+
+func TestCatalogueIsExactlyWhatWasApproved(t *testing.T) {
+	r := NewRegistry()
+	registerTools(r)
+	want := append(append([]string{}, phase1Tools...), phase2aTools...)
+	sort.Strings(want)
 	got := r.Names(models.RoleOwner)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("catalogue = %v\nwant       %v", got, want)
 	}
+	for _, name := range notInPhase2a {
+		if _, ok := r.Get(name); ok {
+			t.Errorf("%s is registered but is outside Phase 2a", name)
+		}
+	}
 	// Consequential tools all confirm; read tools never do.
-	for _, name := range []string{"grant_access", "revoke_access", "start_enrollment"} {
+	for _, name := range []string{"grant_access", "revoke_access", "start_enrollment", "set_person_active", "update_schedule"} {
 		if tool, _ := r.Get(name); tool.Confirm == nil {
 			t.Errorf("%s does not require confirmation", name)
+		}
+	}
+	// Safe writes run without a card.
+	for _, name := range []string{"create_person", "update_person", "create_schedule", "resync_terminal", "cancel_enrollment", "request_diagnostic"} {
+		if tool, _ := r.Get(name); tool.Confirm != nil {
+			t.Errorf("%s requires confirmation but is a safe write", name)
 		}
 	}
 	for _, d := range r.ForRole(models.RoleOwner) {
@@ -48,9 +83,11 @@ func TestPhase1CatalogueIsExactlyWhatWasApproved(t *testing.T) {
 
 func TestRegistryHidesByRoleButKeepsOrderStable(t *testing.T) {
 	r := NewRegistry()
-	registerPhase1Tools(r)
+	registerTools(r)
 	viewer := r.Names(models.RoleViewer)
-	for _, hidden := range []string{"create_person", "grant_access", "revoke_access", "start_enrollment"} {
+	for _, hidden := range []string{"create_person", "grant_access", "revoke_access", "start_enrollment",
+		"update_person", "set_person_active", "create_schedule", "update_schedule", "resync_terminal",
+		"cancel_enrollment", "request_diagnostic", "evaluate_access", "explain_denial", "list_pending_terminals"} {
 		for _, name := range viewer {
 			if name == hidden {
 				t.Errorf("VIEWER sees %s", hidden)
@@ -60,7 +97,7 @@ func TestRegistryHidesByRoleButKeepsOrderStable(t *testing.T) {
 	manager := r.Names(models.RoleManager)
 	owner := r.Names(models.RoleOwner)
 	if strings.Join(manager, ",") != strings.Join(owner, ",") {
-		t.Fatalf("MANAGER and OWNER see different Phase 1 tools: %v vs %v", manager, owner)
+		t.Fatalf("MANAGER and OWNER see different tools: %v vs %v", manager, owner)
 	}
 	if again := r.Names(models.RoleOwner); strings.Join(again, ",") != strings.Join(owner, ",") {
 		t.Fatalf("tool order is not stable between calls")
@@ -69,7 +106,7 @@ func TestRegistryHidesByRoleButKeepsOrderStable(t *testing.T) {
 
 func TestValidateArgsRefusesWhatTheSchemaDoesNotAllow(t *testing.T) {
 	r := NewRegistry()
-	registerPhase1Tools(r)
+	registerTools(r)
 	grant, _ := r.Get("grant_access")
 	cases := map[string]string{
 		`{"external_id":"P-1","effect":"MAYBE","scope_type":"SITE","site_id":"s"}`:       "effect must be one of",
@@ -138,7 +175,7 @@ func TestIdentifierArgumentsRefusePathDelimiters(t *testing.T) {
 	// change which route the path reaches. The router decodes %2F before it
 	// matches, so an escaped slash is as good as a bare one.
 	r := NewRegistry()
-	registerPhase1Tools(r)
+	registerTools(r)
 	for _, tool := range []string{"get_person", "get_person_enrollment", "create_person", "grant_access", "revoke_access", "start_enrollment", "wait_for_enrollment", "list_events"} {
 		def, _ := r.Get(tool)
 		for _, p := range def.Params {

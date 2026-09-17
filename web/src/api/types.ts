@@ -1898,7 +1898,28 @@ export interface AssistantCapabilities {
   model?: string
   /** Tool names this operator's role may use, for the panel's "what I can do". */
   tools?: string[]
+  /**
+   * What each write tool changes, by the console's own cache domains
+   * (`AssistantDomain`). The fallback for a tool.result that arrives without
+   * `domains`, such as a replay.
+   */
+  effects?: Record<string, AssistantDomain[]>
 }
+
+/**
+ * The console data an assistant tool can change. Each is a root in
+ * data/keys.ts; the server names them on every write's result.
+ */
+export type AssistantDomain =
+  | 'people'
+  | 'permissions'
+  | 'schedules'
+  | 'onboarding'
+  | 'audit'
+  | 'terminals'
+  | 'sites'
+  | 'pending_terminals'
+  | 'events'
 
 export interface AssistantConversation {
   id: string
@@ -1947,7 +1968,16 @@ export type AssistantEvent =
   | { type: 'assistant.delta'; text: string }
   | { type: 'assistant.message'; text: string }
   | { type: 'tool.call'; call_id: string; tool: string; arguments: unknown }
-  | { type: 'tool.result'; call_id: string; tool?: string; status: string; http_status?: number; summary: string }
+  | {
+      type: 'tool.result'
+      call_id: string
+      tool?: string
+      status: string
+      http_status?: number
+      summary: string
+      /** Present on a write that ran: the caches to drop. */
+      domains?: AssistantDomain[]
+    }
   | { type: 'handoff'; call_id: string; kind: string; route: string; label: string }
   | {
       type: 'confirmation.required'
