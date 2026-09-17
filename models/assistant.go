@@ -175,6 +175,9 @@ type AssistantCapabilities struct {
 	// Tools this operator's role can see, by name, so the console can say what
 	// the assistant is able to do for them.
 	Tools []string `json:"tools,omitempty"`
+	// Effects maps each write tool to the console data it changes, so the
+	// console can refresh the right screens after a tool has run.
+	Effects map[string][]string `json:"effects,omitempty"`
 }
 
 // AssistantMessageRequest is one user turn.

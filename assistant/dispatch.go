@@ -44,6 +44,14 @@ type Turn struct {
 
 	// calls counts internal requests made in this turn, for the cap.
 	calls int
+
+	// polls counts the requests a wait tool made while following a state
+	// (poll.go). They are charged to their own cap rather than to calls, so a
+	// wait that follows an enrolment for a minute cannot spend the budget the
+	// steps after it need -- and cannot be used to widen that budget either.
+	polls int
+	// polling marks a Turn copy whose requests are polls.
+	polling bool
 }
 
 // Response is what a tool sees of an internal request.
@@ -83,10 +91,20 @@ func (t *Turn) Call(method, path string, body any) (Response, error) {
 	if !strings.HasPrefix(path, "/api/v1/console/") {
 		return Response{}, fmt.Errorf("assistant: %s is outside the console API", path)
 	}
-	if t.calls >= maxInternalCallsPerTurn {
-		return Response{}, fmt.Errorf("assistant: too many requests in one turn")
+	if t.polling {
+		if method != http.MethodGet {
+			return Response{}, fmt.Errorf("assistant: a poll may only read")
+		}
+		if t.polls >= maxPollCallsPerTurn {
+			return Response{}, errPollBudget
+		}
+		t.polls++
+	} else {
+		if t.calls >= maxInternalCallsPerTurn {
+			return Response{}, fmt.Errorf("assistant: too many requests in one turn")
+		}
+		t.calls++
 	}
-	t.calls++
 
 	var reader *bytes.Reader
 	if body != nil {
@@ -151,6 +169,13 @@ func routeWithoutQuery(path string) string {
 // maxInternalCallsPerTurn bounds the requests one turn may make, however the
 // model combines tools.
 const maxInternalCallsPerTurn = 48
+
+// maxPollCallsPerTurn bounds the reads wait tools may make in one turn: two
+// full-length waits at their fastest cadence (60 s at 2 s), after which a
+// wait returns the current state at once and says so.
+const maxPollCallsPerTurn = 60
+
+var errPollBudget = fmt.Errorf("assistant: the turn's polling budget is spent")
 
 // --- running one tool -----------------------------------------------------------
 
@@ -280,6 +305,7 @@ func (s *Service) Execute(t *Turn, name string, raw json.RawMessage, approved *m
 	inner.ctx = ctx
 	outcome := tool.Run(&inner, args)
 	t.calls = inner.calls
+	t.polls = inner.polls
 
 	if outcome.Status == "" {
 		outcome.Status = models.ToolCallExecuted

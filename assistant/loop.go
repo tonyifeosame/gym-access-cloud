@@ -130,7 +130,7 @@ func New(opts Options) *Service {
 		log.Printf("assistant: ASSISTANT_CONFIRMATION_SECRET is missing or too short; the assistant stays disabled")
 		s.enabled = false
 	}
-	registerPhase1Tools(s.registry)
+	registerTools(s.registry)
 	return s
 }
 
@@ -161,7 +161,23 @@ func (s *Service) Capabilities(role string) models.AssistantCapabilities {
 		Enabled: true,
 		Model:   s.model.Name(),
 		Tools:   s.registry.Names(role),
+		Effects: s.registry.Effects(role),
 	}
+}
+
+// toolResultEvent is the tool.result payload. It names the domains a
+// successful write changed, so the console refreshes exactly those screens.
+func (s *Service) toolResultEvent(callID, tool string, r toolResult) map[string]any {
+	data := map[string]any{
+		"call_id": callID, "tool": tool, "status": r.Status,
+		"http_status": r.HTTPStatus, "summary": summarise(tool, r),
+	}
+	if r.Status == models.ToolCallExecuted || r.Status == models.ToolCallConfirmedExecuted {
+		if domains := s.registry.Domains(tool); len(domains) > 0 {
+			data["domains"] = domains
+		}
+	}
+	return data
 }
 
 // BeginTurn claims the one-turn-at-a-time slot for an operator. The returned
@@ -421,10 +437,7 @@ rounds:
 			results = append(results, models.AssistantBlock{
 				Type: "tool_result", ToolUseID: block.ID, Content: r.Content, IsError: r.IsError,
 			})
-			emit.Emit(EventToolResult, map[string]any{
-				"call_id": block.ID, "tool": block.Name, "status": r.Status,
-				"http_status": r.HTTPStatus, "summary": summarise(block.Name, r),
-			})
+			emit.Emit(EventToolResult, s.toolResultEvent(block.ID, block.Name, r))
 			if r.Handoff != nil {
 				emit.Emit(EventHandoff, map[string]any{
 					"call_id": block.ID, "kind": r.Handoff.Kind, "route": r.Handoff.Route, "label": r.Handoff.Label,
@@ -577,10 +590,7 @@ func (s *Service) Settle(parent context.Context, in TurnInput, token string, app
 	var note string
 	if approve {
 		r := s.Execute(t, row.ToolName, row.Arguments, row)
-		emit.Emit(EventToolResult, map[string]any{
-			"call_id": row.TokenID, "tool": row.ToolName, "status": r.Status,
-			"http_status": r.HTTPStatus, "summary": summarise(row.ToolName, r),
-		})
+		emit.Emit(EventToolResult, s.toolResultEvent(row.TokenID, row.ToolName, r))
 		if r.Handoff != nil {
 			emit.Emit(EventHandoff, map[string]any{
 				"call_id": row.TokenID, "kind": r.Handoff.Kind, "route": r.Handoff.Route, "label": r.Handoff.Label,
@@ -628,6 +638,9 @@ func (s *Service) replay(conversationID int64, fromSeq int, turnID string, emit 
 			"message": "The conversation could not be read.", "retryable": true})
 		return
 	}
+	// Which tool each call was, so a replayed result can name it and the
+	// console can refresh what it changed.
+	toolByCall := map[string]string{}
 	for _, m := range transcript {
 		if m.Seq <= fromSeq {
 			continue
@@ -639,6 +652,7 @@ func (s *Service) replay(conversationID int64, fromSeq int, turnID string, emit 
 					emit.Emit(EventAssistantMessage, map[string]any{"text": b.Text})
 				}
 			case "tool_use":
+				toolByCall[b.ID] = b.Name
 				emit.Emit(EventToolCall, map[string]any{"call_id": b.ID, "tool": b.Name,
 					"arguments": json.RawMessage(nonEmpty(b.Input))})
 			case "tool_result":
@@ -646,7 +660,14 @@ func (s *Service) replay(conversationID int64, fromSeq int, turnID string, emit 
 				if b.IsError {
 					status = models.ToolCallFailed
 				}
-				emit.Emit(EventToolResult, map[string]any{"call_id": b.ToolUseID, "status": status, "summary": "replayed"})
+				data := map[string]any{"call_id": b.ToolUseID, "tool": toolByCall[b.ToolUseID], "status": status, "summary": "replayed"}
+				// A result that only asked for confirmation changed nothing.
+				if !b.IsError && !strings.Contains(b.Content, `"status":"confirmation_required"`) {
+					if domains := s.registry.Domains(toolByCall[b.ToolUseID]); len(domains) > 0 {
+						data["domains"] = domains
+					}
+				}
+				emit.Emit(EventToolResult, data)
 			}
 		}
 	}

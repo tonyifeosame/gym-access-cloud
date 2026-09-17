@@ -8,7 +8,7 @@ import {
   sendAssistantMessage,
   settleAssistantConfirmation,
 } from '../api/endpoints'
-import type { AssistantConsequence, AssistantEvent } from '../api/types'
+import type { AssistantCapabilities, AssistantConsequence, AssistantDomain, AssistantEvent } from '../api/types'
 import { keys } from '../data/keys'
 
 /**
@@ -22,10 +22,17 @@ import { keys } from '../data/keys'
  * assistant endpoints.
  *
  * WHEN A TOOL CHANGES SOMETHING, THE SCREENS BEHIND THE PANEL REFRESH. The
- * same rule as every other write in this console (see data/console.ts): a
- * person added, a rule granted or removed, an enrolment started -- the
+ * same rule as every other write in this console (see data/console.ts): the
  * caches those screens read are invalidated the moment the tool result says
  * it ran, so closing the panel lands on the new state, not the old one.
+ *
+ * WHICH CACHES IS THE SERVER'S CALL, NOT A LIST KEPT HERE. Every write tool
+ * declares the domains it changes (the registry refuses one that does not),
+ * the tool.result event names them, and `domainKeys` maps each to a root in
+ * data/keys.ts. A new write on the server refreshes the right screens
+ * without this file changing; a hand-written set of tool names here would
+ * go stale the day one was added. The capabilities response carries the
+ * same map as a fallback for a result that arrives without domains.
  *
  * A CONFIRMATION CARD SETTLES ON THE SERVER'S WORD, NOT ON THE CLICK. Sending
  * an approval marks the card pending; only the confirmation.settled event --
@@ -56,25 +63,65 @@ export type ChatItem =
   | { kind: 'handoff'; id: string; label: string; route: string; handoffKind: string }
   | { kind: 'failure'; id: string; code: string; message: string; retryable: boolean }
 
-/** Tools whose success changes what other screens show. */
-const WRITE_TOOLS = new Set(['create_person', 'grant_access', 'revoke_access', 'start_enrollment'])
+/** The cache root each server-named domain invalidates. One line per domain, all of them. */
+const domainKeys: Record<AssistantDomain, readonly unknown[]> = {
+  people: keys.people.all,
+  permissions: keys.permissions.all,
+  schedules: keys.schedules.all,
+  onboarding: keys.onboarding.all,
+  audit: keys.audit.all,
+  terminals: keys.terminals.all,
+  sites: keys.sites.all,
+  pending_terminals: keys.pendingTerminals.all,
+  events: keys.events.all,
+}
+
+/**
+ * The domains a tool result says it changed, or the capabilities map's word
+ * for that tool when the event carries none. Exported for the tests.
+ */
+export function domainsFor(
+  tool: string,
+  event: { domains?: AssistantDomain[] },
+  capabilities: AssistantCapabilities | undefined,
+): AssistantDomain[] {
+  if (event.domains && event.domains.length > 0) return event.domains
+  return capabilities?.effects?.[tool] ?? []
+}
 
 const TOOL_LABELS: Record<string, string> = {
   search_people: 'Searched people',
   get_person: 'Looked up a person',
   get_person_enrollment: 'Checked an enrolment',
+  list_person_credentials: 'Checked where a fingerprint is enrolled',
   list_terminals: 'Listed terminals',
   get_terminal: 'Looked up a terminal',
+  get_terminal_capabilities: 'Checked what a terminal can do',
   get_fleet_summary: 'Checked terminal health',
   list_sites: 'Listed sites',
   get_site: 'Looked up a site',
+  get_site_settings: "Read a site's offline policy",
   list_schedules: 'Listed schedules',
   list_events: 'Read recent events',
+  list_people_without_access: 'Counted people with no access',
+  evaluate_access: 'Checked whether they would get in',
+  explain_denial: 'Looked into a refusal',
   create_person: 'Added a person',
+  update_person: 'Corrected a person',
+  set_person_active: 'Person active or not',
   grant_access: 'Access rule',
   revoke_access: 'Access rule',
+  create_schedule: 'Added a schedule',
+  update_schedule: 'Schedule change',
   start_enrollment: 'Fingerprint enrolment',
   wait_for_enrollment: 'Waited for the enrolment',
+  cancel_enrollment: 'Cancelled an enrolment',
+  list_terminal_commands: "Read a terminal's command history",
+  get_command: 'Checked a command',
+  request_diagnostic: 'Asked a terminal for a diagnostic',
+  wait_for_command: 'Waited for the terminal',
+  resync_terminal: 'Resynced a terminal',
+  list_pending_terminals: 'Checked terminals waiting to be set up',
 }
 
 export function describeTool(tool: string): string {
@@ -99,6 +146,7 @@ function makeId(prefix: string): string {
 
 export function useAssistantChat() {
   const queryClient = useQueryClient()
+  const capabilities = useAssistantCapabilities().data
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [items, setItems] = useState<ChatItem[]>([])
   const [busy, setBusy] = useState(false)
@@ -118,15 +166,13 @@ export function useAssistantChat() {
   }, [])
 
   const refreshAfter = useCallback(
-    (tool: string) => {
-      if (!WRITE_TOOLS.has(tool)) return
-      void queryClient.invalidateQueries({ queryKey: keys.people.all })
-      void queryClient.invalidateQueries({ queryKey: keys.permissions.all })
-      void queryClient.invalidateQueries({ queryKey: keys.schedules.all })
-      void queryClient.invalidateQueries({ queryKey: keys.onboarding.all })
-      void queryClient.invalidateQueries({ queryKey: keys.audit.all })
+    (tool: string, event: { domains?: AssistantDomain[] }) => {
+      for (const domain of domainsFor(tool, event, capabilities)) {
+        const queryKey = domainKeys[domain]
+        if (queryKey) void queryClient.invalidateQueries({ queryKey })
+      }
     },
-    [queryClient],
+    [capabilities, queryClient],
   )
 
   const settleCard = useCallback(
@@ -191,7 +237,7 @@ export function useAssistantChat() {
               : [...current, { kind: 'tool', id, tool, summary: event.summary, status: event.status, pending: false }],
           )
           if (event.status === 'EXECUTED' || event.status === 'CONFIRMED_EXECUTED') {
-            refreshAfter(tool)
+            refreshAfter(tool, event)
           }
           break
         }

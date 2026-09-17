@@ -109,9 +109,70 @@ var (
 	enrolFields    = []string{"status", "terminal_serial", "terminal_name", "site_name", "terminal_status", "error_message", "expires_at", "completed_at", "created_at"}
 	terminalFields = []string{"serial_number", "device_name", "site_public_id", "site_name", "status", "active", "last_heartbeat_at", "last_sync_at", "firmware_version", "firmware_outdated", "application_mode", "effective_applications"}
 	siteFields     = []string{"id", "name", "address", "timezone", "active", "terminal_count", "offline_policy", "offline_grace_minutes"}
-	scheduleFields = []string{"id", "name", "timezone", "windows", "permission_count"}
-	eventFields    = []string{"id", "occurred_at", "occurred_at_trusted", "event_type", "decision", "reason", "person_name", "subject_external_id", "device_serial", "device_name", "site_name"}
+	scheduleFields = []string{"id", "name", "description", "timezone", "active", "windows", "permission_count"}
+	eventFields    = []string{"id", "occurred_at", "occurred_at_trusted", "event_type", "decision", "reason", "person_name", "subject_external_id", "device_serial", "device_name", "site_name", "application", "direction"}
+
+	// Phase 2a. Each list is the whole of what its tool may say.
+
+	// A credential's state and place. No template, no digest, no key, no slot,
+	// no locator, no vendor: the route carries none and this names none.
+	credentialFields = []string{"id", "type", "state", "enrolled_at", "usable_at_terminal_count"}
+
+	// A command: what was asked, where it got to, and what came back. The
+	// `result` payload is projected separately (diagnosticResult) because it
+	// is the terminal's own document and carries network detail.
+	commandFields = []string{"id", "type", "state", "reason", "already_pending", "queued_at", "delivered_at",
+		"acknowledged_at", "expires_at", "result_code", "error", "attempts", "terminal_status", "online"}
+	commandOfferFields = []string{"type", "supported", "read_only", "repeatable", "min_role"}
+
+	// A terminal waiting to be set up. NOT pairing_code, first_seen_ip,
+	// last_seen_ip, adopted_by, hardware_revision or capabilities.
+	pendingTerminalFields = []string{"id", "serial_number", "state", "verdict", "firmware_version", "announced_at", "last_seen_at"}
+
+	// The effective offline policy. Not the free-form settings blob.
+	siteSettingsFields = []string{"offline_policy", "offline_grace_minutes", "settings_version"}
+
+	// An access decision.
+	decisionFields = []string{"granted", "reason", "person_name", "external_id", "application", "matched_permission", "decided_at"}
 )
+
+// diagnosticResult projects a DIAGNOSTIC_SNAPSHOT's result: every section
+// the firmware reports, less the network identifiers (ssid, ip). Signal
+// strength and whether it is associated are what an operator needs to hear;
+// the network's name and address are infrastructure and stay in the console.
+func diagnosticResult(raw any) object {
+	m, ok := raw.(object)
+	if !ok {
+		return nil
+	}
+	out := object{}
+	if net, ok := m["network"].(object); ok {
+		out["network"] = pick(net, "associated", "rssi_dbm")
+	}
+	if q, ok := m["outbound_queue"].(object); ok {
+		out["outbound_queue"] = pick(q, "enrolments", "access_logs", "dropped_access_logs")
+	}
+	if w, ok := m["worklist"].(object); ok {
+		out["worklist"] = pick(w, "missing")
+	}
+	if s, ok := m["storage"].(object); ok {
+		out["storage"] = pick(s, "members", "capacity", "orphaned_slots", "write_failed", "fallback_store")
+	}
+	return out
+}
+
+// commandView projects one command row, with its result through the
+// diagnostic allow-list when it is a snapshot and dropped otherwise (the
+// only other issuable command, a device test, returns nothing to show).
+func commandView(c object) object {
+	out := pick(c, commandFields...)
+	if str(c, "type") == "DIAGNOSTIC_SNAPSHOT" {
+		if r := diagnosticResult(c["result"]); r != nil {
+			out["result"] = r
+		}
+	}
+	return out
+}
 
 func personLabel(p object) string {
 	if name := str(p, "full_name"); name != "" {
