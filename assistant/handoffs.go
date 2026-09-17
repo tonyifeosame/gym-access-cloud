@@ -9,8 +9,9 @@ import (
 // FIVE ROUTES, AND ONLY THESE. A hand-off is built here from an identifier
 // the tool already validated (registry.go's Identifier rule, then Segment),
 // never from a route the model wrote. Anything the console can be sent to
-// from the assistant is one of these constructors, and handoffs_test.go
-// holds every emitted route to their shapes.
+// from the assistant is one of these constructors; phase2_test.go
+// (TestHandoffsAreTheFiveKnownRoutes) holds the constructors to these
+// shapes, and assistant_phase2_test.go holds every route the tools emit.
 //
 //	/people/:id            the person's page
 //	/people/:id?enrol=1    the person's page with the enrolment dialog open

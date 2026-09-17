@@ -152,12 +152,21 @@ func TestWindowTextParsesIntoTheRouteShape(t *testing.T) {
 			{"days_of_week": 31, "start_time": "08:00", "end_time": "18:00"},
 			{"days_of_week": 32, "start_time": "09:00", "end_time": "13:00"},
 		},
-		"Daily 06:00-22:00":         {{"days_of_week": 127, "start_time": "06:00", "end_time": "22:00"}},
-		"Weekends 10:00-16:00":      {{"days_of_week": 96, "start_time": "10:00", "end_time": "16:00"}},
-		"Fri 22:00-06:00":           {{"days_of_week": 16, "start_time": "22:00", "end_time": "06:00"}},
-		"Sat,Sun 9:00-17:30":        {{"days_of_week": 96, "start_time": "09:00", "end_time": "17:30"}},
-		"Friday-Monday 08:00-12:00": {{"days_of_week": 16 | 32 | 64 | 1, "start_time": "08:00", "end_time": "12:00"}},
-		"Tuesday 08:00-24:00":       {{"days_of_week": 2, "start_time": "08:00", "end_time": "00:00"}},
+		"Daily 06:00-22:00":           {{"days_of_week": 127, "start_time": "06:00", "end_time": "22:00"}},
+		"every day 06:00-22:00":       {{"days_of_week": 127, "start_time": "06:00", "end_time": "22:00"}},
+		"Weekdays 08:00-17:00":        {{"days_of_week": 31, "start_time": "08:00", "end_time": "17:00"}},
+		"Weekends 10:00-16:00":        {{"days_of_week": 96, "start_time": "10:00", "end_time": "16:00"}},
+		"Fri 22:00-06:00":             {{"days_of_week": 16, "start_time": "22:00", "end_time": "06:00"}},
+		"Sat,Sun 9:00-17:30":          {{"days_of_week": 96, "start_time": "09:00", "end_time": "17:30"}},
+		"Saturday, Sunday 9:00-17:30": {{"days_of_week": 96, "start_time": "09:00", "end_time": "17:30"}},
+		"Friday-Monday 08:00-12:00":   {{"days_of_week": 16 | 32 | 64 | 1, "start_time": "08:00", "end_time": "12:00"}},
+		"MONDAY-friday 08:00-18:00":   {{"days_of_week": 31, "start_time": "08:00", "end_time": "18:00"}},
+		"Wednesday 08:00-24:00":       {{"days_of_week": 4, "start_time": "08:00", "end_time": "23:59"}},
+		"Daily 00:00-24:00":           {{"days_of_week": 127, "start_time": "00:00", "end_time": "23:59"}},
+		"Tue,Thu 07:30-08:00; Sun 0:05-0:10": {
+			{"days_of_week": 2 | 8, "start_time": "07:30", "end_time": "08:00"},
+			{"days_of_week": 64, "start_time": "00:05", "end_time": "00:10"},
+		},
 	}
 	for text, want := range cases {
 		got, err := parseWindows(text)
@@ -169,10 +178,116 @@ func TestWindowTextParsesIntoTheRouteShape(t *testing.T) {
 			t.Errorf("%q = %v, want %v", text, got, want)
 		}
 	}
-	for _, bad := range []string{"", "08:00-18:00", "Mon", "Mon 8-9", "Funday 08:00-18:00", "Mon 25:00-26:00", "Mon 08:00-18:60", `{"days_of_week":1}`} {
-		if _, err := parseWindows(bad); err == nil {
-			t.Errorf("%q parsed", bad)
+}
+
+// The review's cases: text the old parser silently misread. Each must be
+// REFUSED, never parsed into something else.
+func TestWindowTextRefusesWhatItCannotReadExactly(t *testing.T) {
+	refused := map[string]string{
+		// Day forms that used to collapse to one day.
+		"Monday to Friday 08:00-18:00": "write a range as Mon-Fri",
+		"Mon–Fri 08:00-18:00":          "write a range as Mon-Fri",
+		"Mon—Fri 08:00-18:00":          "write a range as Mon-Fri",
+		"Sat & Sun 09:00-13:00":        "write a range as Mon-Fri",
+		"Sat and Sun 09:00-13:00":      "write a range as Mon-Fri",
+		"Sat/Sun 09:00-13:00":          "write a range as Mon-Fri",
+		"Mondays 08:00-18:00":          "unknown day",
+		"Tues 08:00-18:00":             "unknown day",
+		"Mo 08:00-18:00":               "unknown day",
+		"Funday 08:00-18:00":           "unknown day",
+		"Mon-Wed-Fri 08:00-18:00":      "one hyphen",
+		"Mon, 08:00-18:00":             "empty entry",
+		"Mon-Fri":                      "expected days then a time range",
+		"08:00-18:00":                  "expected days then a time range",
+		// Times that used to be accepted with a different meaning.
+		"Mon-Fri 9:00am-5:00pm":     "24-hour form",
+		"Mon-Fri 9am-5pm":           "24-hour form",
+		"Mon-Fri 08:00-18:00:00":    "24-hour form",
+		"Mon-Fri 8-18":              "24-hour form",
+		"Mon-Fri 08:00-18:60":       "24-hour form",
+		"Mon-Fri 25:00-26:00":       "24-hour form",
+		"Mon-Fri 24:00-08:00":       "cannot start at 24:00",
+		"Mon-Fri 08:00-24:30":       "past the end of the day",
+		"Mon-Fri 08:00-18:00-19:00": "must be HH:MM-HH:MM",
+		"":                          "windows is empty",
+		`{"days_of_week":1}`:        "expected days then a time range",
+	}
+	for text, want := range refused {
+		got, err := parseWindows(text)
+		if err == nil {
+			t.Errorf("%q parsed to %v; want a refusal mentioning %q", text, got, want)
+			continue
 		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: error %q does not mention %q", text, err.Error(), want)
+		}
+	}
+	// 24:00 never becomes a zero-length or overnight window.
+	got, err := parseWindows("Daily 00:00-24:00")
+	if err != nil || got[0]["end_time"] != "23:59" {
+		t.Fatalf("00:00-24:00 = %v, %v", got, err)
+	}
+}
+
+func TestTimezonesAreCheckedBeforeTheRouteSeesThem(t *testing.T) {
+	for _, ok := range []string{"", "  ", "UTC", "Africa/Lagos", "Europe/London", "America/New_York", "Asia/Kolkata"} {
+		if err := validTimezone(ok); err != nil {
+			t.Errorf("valid zone %q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"Lagos", "WAT", "GMT+1", "Africa/Lago", "Local", "local", "Europe/London; DROP", "+01:00"} {
+		err := validTimezone(bad)
+		if err == nil {
+			t.Errorf("bad zone %q accepted", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "Africa/Lagos") {
+			t.Errorf("bad zone %q: error %q does not show the form to use", bad, err.Error())
+		}
+	}
+	// The tools refuse the zone before any request: no registry, no router.
+	r := NewRegistry()
+	registerTools(r)
+	create, _ := r.Get("create_schedule")
+	args, err := create.ValidateArgs(json.RawMessage(`{"name":"X","windows":"Mon 08:00-09:00","timezone":"Lagos"}`))
+	if err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	out := create.Run(&Turn{ctx: context.Background()}, args)
+	if !out.IsError || out.Status != models.ToolCallInvalid || !strings.Contains(fmt.Sprint(out.Result), "not a known IANA zone") {
+		t.Fatalf("create_schedule with a bad zone = %+v", out)
+	}
+	update, _ := r.Get("update_schedule")
+	args, _ = update.ValidateArgs(json.RawMessage(`{"schedule_id":"s1","timezone":"WAT"}`))
+	if _, err := update.Confirm(&Turn{ctx: context.Background()}, args); err == nil || !strings.Contains(err.Error(), "not a known IANA zone") {
+		t.Fatalf("update_schedule with a bad zone confirmed: %v", err)
+	}
+	// The description tells the truth about a blank zone.
+	for _, p := range create.Params {
+		if p.Name == "timezone" && !strings.Contains(p.Description, "site's own zone") {
+			t.Errorf("timezone description = %q", p.Description)
+		}
+	}
+}
+
+func TestExplainDenialDistinguishesLegacyEnrolment(t *testing.T) {
+	none := object{"credentials": []object{}, "enrolment_source": models.EnrolmentSourceNone}
+	if f := credentialFinding(none, "AT-1"); len(f) != 1 || !strings.Contains(f[0], "No fingerprint is enrolled") {
+		t.Fatalf("unenrolled finding = %v", f)
+	}
+	legacy := object{"credentials": []object{}, "enrolment_source": models.EnrolmentSourceLegacy}
+	f := credentialFinding(legacy, "AT-1")
+	if len(f) != 1 || strings.Contains(f[0], "No fingerprint is enrolled") || !strings.Contains(f[0], "older enrolment record") ||
+		!strings.Contains(f[0], "do not treat them as unenrolled") {
+		t.Fatalf("legacy finding = %v", f)
+	}
+	enrolledHere := object{"credentials": []object{{"state": models.CredentialActive, "terminal": object{"serial_number": "AT-1"}}}, "enrolment_source": models.EnrolmentSourceCredential}
+	if f := credentialFinding(enrolledHere, "AT-1"); len(f) != 0 {
+		t.Fatalf("enrolled-here finding = %v", f)
+	}
+	elsewhere := object{"credentials": []object{{"state": models.CredentialActive, "terminal": object{"serial_number": "AT-2"}}}, "enrolment_source": models.EnrolmentSourceCredential}
+	if f := credentialFinding(elsewhere, "AT-1"); len(f) != 1 || !strings.Contains(f[0], "not enrolled at AT-1") {
+		t.Fatalf("elsewhere finding = %v", f)
 	}
 }
 

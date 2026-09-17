@@ -303,6 +303,20 @@ func TestAssistantEvaluatesAccessAndExplainsARefusal(t *testing.T) {
 		t.Fatalf("explanation does not report the recorded reason: %s", content)
 	}
 
+	// A legacy-enrolled person: the credential list is empty but they ARE
+	// enrolled, and the explanation must not send the operator to enrol them.
+	legacyID := seedPerson(t, f.companyID, "P-LEGACY", "Legacy Person")
+	mustExec(t, `UPDATE people SET fingerprint_template = 'legacy-template-bytes' WHERE id = $1`, legacyID)
+	seedRefusal(t, f.companyID, siteID, deviceID, legacyID, "P-LEGACY", models.EventAccessDenied, models.DecisionDenied, models.ReasonNoPermission, refusedAt)
+	result, content, _ = f.runTool(t, conv, "explain_denial", map[string]any{"external_id": "P-LEGACY"})
+	expectStatus(t, "explain_denial for a legacy enrolment", result, models.ToolCallExecuted)
+	if strings.Contains(content, "No fingerprint is enrolled") || !strings.Contains(content, "older enrolment record") {
+		t.Fatalf("legacy explanation = %s", content)
+	}
+	if strings.Contains(content, "legacy-template-bytes") {
+		t.Fatalf("the legacy template reached the model")
+	}
+
 	// Nobody refused: said so, no evaluation attempted.
 	seedPerson(t, f.companyID, "P-FINE", "Fine Person")
 	result, content, _ = f.runTool(t, conv, "explain_denial", map[string]any{"external_id": "P-FINE"})
@@ -413,6 +427,73 @@ func TestAssistantSchedulesFromTextAndAsksWhenRulesDepend(t *testing.T) {
 	expectStatus(t, "empty update_schedule", result, models.ToolCallFailed)
 	if !strings.Contains(content, "Give a name, windows, timezone or active") || len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
 		t.Fatalf("empty update = %s", content)
+	}
+
+	// A timezone the platform could not evaluate never reaches the route:
+	// refused before any request or card, on create and on update, and the
+	// stored zone is untouched.
+	result, content, events = f.runTool(t, conv, "create_schedule", map[string]any{"name": "Bad zone", "windows": "Mon 08:00-09:00", "timezone": "Lagos"})
+	expectStatus(t, "create_schedule with a bad zone", result, models.ToolCallInvalid)
+	if !strings.Contains(content, "not a known IANA zone") {
+		t.Fatalf("bad zone message = %s", content)
+	}
+	var badZones int
+	scanRow(t, `SELECT count(*) FROM schedules WHERE company_id = $1 AND name = 'Bad zone'`, []any{f.companyID}, &badZones)
+	if badZones != 0 {
+		t.Fatalf("a schedule with an invalid zone was written")
+	}
+	result, content, events = f.runTool(t, conv, "update_schedule", map[string]any{"schedule_id": publicID, "timezone": "WAT"})
+	expectStatus(t, "update_schedule with a bad zone", result, models.ToolCallFailed)
+	if !strings.Contains(content, "not a known IANA zone") || len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
+		t.Fatalf("bad zone update = %s", content)
+	}
+	scanRow(t, `SELECT COALESCE(timezone, '') FROM schedules WHERE id = $1`, []any{scheduleID}, &tz)
+	if tz != "Africa/Lagos" {
+		t.Fatalf("zone after a refused update = %q", tz)
+	}
+
+	// Every schedule write the assistant made is the route's own audit row,
+	// linked to the tool call: the create, the rename, and the approved change.
+	var audits int
+	scanRow(t, `SELECT count(*) FROM audit_events a JOIN assistant_tool_calls c ON c.request_id = a.request_id
+	              WHERE a.action = 'SCHEDULE_CONFIGURED' AND c.tool_name IN ('create_schedule', 'update_schedule') AND a.company_id = $1
+	                AND a.user_agent LIKE 'AccessLink-Assistant/1%'`, []any{f.companyID}, &audits)
+	if audits != 3 {
+		t.Fatalf("audited schedule writes = %d, want 3", audits)
+	}
+}
+
+func TestAssistantScheduleTextIsRefusedRatherThanMisread(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	conv := f.newConversation(t)
+	// The forms the first parser silently turned into one day or an
+	// overnight span. None may reach the route.
+	for text, want := range map[string]string{
+		"Monday to Friday 08:00-18:00": "write a range as Mon-Fri",
+		"Mon–Fri 08:00-18:00":          "write a range as Mon-Fri",
+		"Sat & Sun 09:00-13:00":        "write a range as Mon-Fri",
+		"Mon-Fri 9:00am-5:00pm":        "24-hour form",
+		"Mon-Fri 24:00-08:00":          "cannot start at 24:00",
+	} {
+		result, content, _ := f.runTool(t, conv, "create_schedule", map[string]any{"name": "Misread", "windows": text})
+		expectStatus(t, "create_schedule "+text, result, models.ToolCallInvalid)
+		if !strings.Contains(content, want) {
+			t.Errorf("%q: message %q lacks %q", text, content, want)
+		}
+	}
+	var written int
+	scanRow(t, `SELECT count(*) FROM schedules WHERE company_id = $1 AND name = 'Misread'`, []any{f.companyID}, &written)
+	if written != 0 {
+		t.Fatalf("a misread schedule was written")
+	}
+	// The end of the day is expressible and stored as the last minute.
+	result, _, _ := f.runTool(t, conv, "create_schedule", map[string]any{"name": "All day", "windows": "Daily 00:00-24:00"})
+	expectStatus(t, "create_schedule all day", result, models.ToolCallExecuted)
+	var start, end string
+	scanRow(t, `SELECT w.start_time::text, w.end_time::text FROM schedule_windows w JOIN schedules s ON s.id = w.schedule_id
+	              WHERE s.company_id = $1 AND s.name = 'All day'`, []any{f.companyID}, &start, &end)
+	if !strings.HasPrefix(start, "00:00") || !strings.HasPrefix(end, "23:59") {
+		t.Fatalf("all-day window = %s-%s", start, end)
 	}
 }
 
@@ -587,6 +668,8 @@ func TestAssistantFleetToolsHonourSiteGrantsAndTenancy(t *testing.T) {
 		"request_diagnostic":        {"serial": "AT-GR-B"},
 		"get_terminal_capabilities": {"serial": "AT-GR-B"},
 		"list_terminal_commands":    {"serial": "AT-GR-B"},
+		"get_command":               {"serial": "AT-GR-B", "command_id": "a7f3c2e1-0000-4000-8000-000000000000"},
+		"wait_for_command":          {"serial": "AT-GR-B", "command_id": "a7f3c2e1-0000-4000-8000-000000000000", "timeout_s": 5},
 		"evaluate_access":           {"serial": "AT-GR-B", "external_id": "P-GR"},
 		"get_site_settings":         {"site_id": siteB},
 	} {

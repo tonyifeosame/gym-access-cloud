@@ -221,10 +221,26 @@ func explainReason(reason, terminal string) []string {
 
 // credentialFinding says whether a fingerprint is enrolled at the terminal
 // in question, which is the usual answer to "why not recognised".
+//
+// THE SOURCE BEFORE THE LIST. A person enrolled through the legacy column
+// has an empty credential list and enrolment_source LEGACY_ONLY (see
+// models.PersonCredentialsResponse); reading the list alone would call them
+// unenrolled and send the operator to enrol somebody who already is.
 func credentialFinding(creds object, serial string) []string {
 	list, _ := creds["credentials"].([]object)
 	if len(list) == 0 {
-		return []string{"No fingerprint is enrolled for them anywhere. Start one with start_enrollment at the terminal they will use."}
+		switch str(creds, "enrolment_source") {
+		case models.EnrolmentSourceLegacy:
+			where := "the terminal that captured it"
+			if serial != "" {
+				where = "the terminal that captured it, which may not be " + serial
+			}
+			return []string{"They are enrolled under the older enrolment record, which does not say which terminal holds the fingerprint. " +
+				"It works only at " + where + ". If they are refused at a terminal they should use, enrol them there with start_enrollment; " +
+				"do not treat them as unenrolled."}
+		default:
+			return []string{"No fingerprint is enrolled for them anywhere. Start one with start_enrollment at the terminal they will use."}
+		}
 	}
 	if serial == "" {
 		return nil

@@ -1,7 +1,6 @@
 package assistant
 
 import (
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -16,14 +15,17 @@ import (
 // WINDOWS ARE WRITTEN, NOT STRUCTURED. The registry takes strings, numbers
 // and booleans, and a schedule's windows are a list of objects -- so the
 // model writes them the way a person would ("Mon-Fri 08:00-18:00; Sat
-// 09:00-13:00") and parseWindows turns that into the route's shape, refusing
-// anything it does not understand. The route validates again.
+// 09:00-13:00") and parseWindows (tools_schedules_parse.go) turns that into
+// the route's shape, refusing anything it does not understand exactly. The
+// route validates again, but cannot tell a misread window from a meant one.
 
 const consoleSchedules = "/api/v1/console/schedules"
 
-const windowsHelp = "Windows as text, separated by ';': days then a time range, e.g. " +
-	"\"Mon-Fri 08:00-18:00; Sat 09:00-13:00\" or \"Daily 06:00-22:00\". A range ending at or " +
-	"before its start runs overnight (\"Fri 22:00-06:00\")."
+const windowsHelp = "Windows as text, separated by ';': days then a 24-hour time range, e.g. " +
+	"\"Mon-Fri 08:00-18:00; Sat 09:00-13:00\" or \"Daily 06:00-22:00\". Days: Daily, Weekdays, Weekends, " +
+	"Mon or Monday, a comma list (Sat,Sun) or a hyphen range (Mon-Fri); nothing else. Times HH:MM only " +
+	"(no am/pm); an end of 24:00 means the end of the day. A range ending at or before its start runs " +
+	"overnight (\"Fri 22:00-06:00\")."
 
 func registerScheduleTools(r *Registry) {
 	r.Register(&Tool{
@@ -33,7 +35,7 @@ func registerScheduleTools(r *Registry) {
 		Params: []Param{
 			{Name: "name", Type: "string", Description: "A name unique within the company.", Required: true, MaxLen: 100},
 			{Name: "windows", Type: "string", Description: windowsHelp, Required: true, MaxLen: 500},
-			{Name: "timezone", Type: "string", Description: "Optional IANA zone, e.g. Africa/Lagos. Blank uses the company default.", MaxLen: 64},
+			{Name: "timezone", Type: "string", Description: "Optional IANA zone, e.g. Africa/Lagos. Blank means the site's own zone (UTC if the site has none).", MaxLen: 64},
 			{Name: "description", Type: "string", Description: "Optional note.", MaxLen: 200},
 		},
 		Idempotent: false,
@@ -42,6 +44,9 @@ func registerScheduleTools(r *Registry) {
 		Run: func(t *Turn, a Args) Outcome {
 			windows, err := parseWindows(a.String("windows"))
 			if err != nil {
+				return Outcome{IsError: true, Status: models.ToolCallInvalid, Result: err.Error()}
+			}
+			if err := validTimezone(a.String("timezone")); err != nil {
 				return Outcome{IsError: true, Status: models.ToolCallInvalid, Result: err.Error()}
 			}
 			body := object{"name": a.String("name"), "windows": windows}
@@ -70,7 +75,7 @@ func registerScheduleTools(r *Registry) {
 			{Name: "schedule_id", Type: "string", Description: "The schedule's id, from list_schedules.", Required: true, MaxLen: 64, Identifier: true},
 			{Name: "name", Type: "string", Description: "A new name.", MaxLen: 100},
 			{Name: "windows", Type: "string", Description: "New windows, replacing all existing ones. " + windowsHelp, MaxLen: 500},
-			{Name: "timezone", Type: "string", Description: "A new IANA zone.", MaxLen: 64},
+			{Name: "timezone", Type: "string", Description: "A new IANA zone, e.g. Europe/London.", MaxLen: 64},
 			{Name: "active", Type: "boolean", Description: "false pauses the schedule (rules using it admit nobody), true resumes it."},
 		},
 		Destructive: true, Idempotent: true,
@@ -140,6 +145,9 @@ func scheduleChange(a Args) (string, error) {
 		parts = append(parts, "set its windows to "+v)
 	}
 	if v := a.String("timezone"); v != "" {
+		if err := validTimezone(v); err != nil {
+			return "", err
+		}
 		parts = append(parts, "set its timezone to "+v)
 	}
 	if a.Has("active") {
@@ -168,133 +176,4 @@ func findSchedule(t *Turn, id string) (object, error) {
 		}
 	}
 	return nil, errText("No schedule has that id.")
-}
-
-// --- window text ---------------------------------------------------------------------
-
-// Mon=1 .. Sun=64, the mask migration 002 established.
-var dayBits = map[string]int{
-	"mon": 1, "tue": 2, "wed": 4, "thu": 8, "fri": 16, "sat": 32, "sun": 64,
-}
-
-var dayOrder = []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
-
-const everyDay = 127
-
-// parseWindows turns "Mon-Fri 08:00-18:00; Sat 09:00-13:00" into the route's
-// windows. Each entry is DAYS then TIMES; DAYS is a comma list of day names
-// (three letters or full) and ranges (Mon-Fri), or Daily/Everyday/Weekdays/
-// Weekends; TIMES is HH:MM-HH:MM.
-func parseWindows(text string) ([]object, error) {
-	out := []object{}
-	for _, entry := range strings.Split(text, ";") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		fields := strings.Fields(entry)
-		if len(fields) < 2 {
-			return nil, fmt.Errorf("window %q: expected days then a time range, e.g. \"Mon-Fri 08:00-18:00\"", entry)
-		}
-		times := fields[len(fields)-1]
-		days := strings.Join(fields[:len(fields)-1], "")
-		mask, err := parseDays(days)
-		if err != nil {
-			return nil, fmt.Errorf("window %q: %v", entry, err)
-		}
-		start, end, err := parseTimeRange(times)
-		if err != nil {
-			return nil, fmt.Errorf("window %q: %v", entry, err)
-		}
-		out = append(out, object{"days_of_week": mask, "start_time": start, "end_time": end})
-	}
-	if len(out) == 0 {
-		return nil, errText("windows is empty; give at least one, e.g. \"Mon-Fri 08:00-18:00\"")
-	}
-	return out, nil
-}
-
-func parseDays(s string) (int, error) {
-	switch strings.ToLower(s) {
-	case "daily", "everyday", "every-day", "all":
-		return everyDay, nil
-	case "weekdays":
-		return 1 | 2 | 4 | 8 | 16, nil
-	case "weekends", "weekend":
-		return 32 | 64, nil
-	}
-	mask := 0
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if from, to, ok := strings.Cut(part, "-"); ok {
-			a, errA := dayIndex(from)
-			b, errB := dayIndex(to)
-			if errA != nil {
-				return 0, errA
-			}
-			if errB != nil {
-				return 0, errB
-			}
-			for i := a; ; i = (i + 1) % 7 {
-				mask |= dayBits[dayOrder[i]]
-				if i == b {
-					break
-				}
-			}
-			continue
-		}
-		i, err := dayIndex(part)
-		if err != nil {
-			return 0, err
-		}
-		mask |= dayBits[dayOrder[i]]
-	}
-	if mask == 0 {
-		return 0, errText("no days given")
-	}
-	return mask, nil
-}
-
-func dayIndex(name string) (int, error) {
-	key := strings.ToLower(strings.TrimSpace(name))
-	if len(key) > 3 {
-		key = key[:3]
-	}
-	for i, d := range dayOrder {
-		if d == key {
-			return i, nil
-		}
-	}
-	return 0, fmt.Errorf("unknown day %q", name)
-}
-
-func parseTimeRange(s string) (string, string, error) {
-	from, to, ok := strings.Cut(s, "-")
-	if !ok {
-		return "", "", fmt.Errorf("time range %q must be HH:MM-HH:MM", s)
-	}
-	start, err := normaliseClock(from)
-	if err != nil {
-		return "", "", err
-	}
-	end, err := normaliseClock(to)
-	if err != nil {
-		return "", "", err
-	}
-	return start, end, nil
-}
-
-func normaliseClock(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	var h, m int
-	if n, err := fmt.Sscanf(s, "%d:%d", &h, &m); err != nil || n != 2 || h < 0 || h > 24 || m < 0 || m > 59 || (h == 24 && m != 0) {
-		return "", fmt.Errorf("time %q must be HH:MM", s)
-	}
-	if h == 24 {
-		h = 0
-	}
-	return fmt.Sprintf("%02d:%02d", h, m), nil
 }
