@@ -131,7 +131,9 @@ describe('the device-test card', () => {
             consequence: {
               title: 'Have Reception (Lagos) sound its buzzer?',
               body: 'Reception will sound its buzzer when it next checks in, which is usually within a minute. Anybody standing at it will notice. It admits nobody, refuses nobody and opens nothing.',
-              warnings: ['This terminal is offline rather than online, so it may not collect the test before it lapses.'],
+              // The server warns about a fault, not about collection: a terminal
+              // that could not collect the test never reaches a card at all.
+              warnings: ['Reception is reporting a fault. It is still in contact with the platform, so the test will reach it.'],
             },
           }),
           { type: 'assistant.message', text: 'Waiting for your approval.' },
@@ -157,7 +159,7 @@ describe('the device-test card', () => {
     // operator has agreed to anything.
     const confirmation = await within(panel).findByRole('region', { name: 'Have Reception (Lagos) sound its buzzer?' })
     expect(within(confirmation).getByText(/Anybody standing at it will notice/)).toBeInTheDocument()
-    expect(within(confirmation).getByText(/offline rather than online/)).toBeInTheDocument()
+    expect(within(confirmation).getByText(/still in contact with the platform/)).toBeInTheDocument()
     expect(within(panel).getByText('Hardware test')).toBeInTheDocument()
     // Nothing has been refreshed, because nothing has happened.
     expect(terminalReads()).toBe(before)

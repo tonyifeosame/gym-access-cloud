@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"access-terminal-cloud-api/models"
 )
@@ -190,12 +191,36 @@ func TestPhase2bConsequenceWording(t *testing.T) {
 	if len(c.Warnings) != 0 {
 		t.Errorf("an online terminal warned: %v", c.Warnings)
 	}
-	offline := deviceTestConsequence("Loading Bay", "", models.DeviceTestSelfTest, "OFFLINE")
-	if !strings.Contains(strings.Join(offline.Warnings, " "), "offline rather than online") {
-		t.Errorf("offline warning = %v", offline.Warnings)
+	selfTest := deviceTestConsequence("Loading Bay", "", models.DeviceTestSelfTest, "ONLINE")
+	if !strings.Contains(selfTest.Title, "self-test of its buzzer and display") {
+		t.Errorf("self-test title = %q", selfTest.Title)
 	}
-	if !strings.Contains(offline.Title, "self-test of its buzzer and display") {
-		t.Errorf("self-test title = %q", offline.Title)
+	if selfTest.Title != "Have Loading Bay run a self-test of its buzzer and display?" {
+		t.Errorf("a terminal with no site name = %q", selfTest.Title)
+	}
+
+	// THE CARD NEVER WARNS THAT A TEST MAY NOT BE COLLECTED. A terminal that
+	// could not collect one never reaches a card (the preflight below), and
+	// the two states the store does accept are described as what they are:
+	// still in contact, the test will arrive.
+	for _, refused := range []string{"OFFLINE", "PROVISIONING", "DISABLED"} {
+		c := deviceTestConsequence("Loading Bay", "", models.DeviceTestBuzzer, refused)
+		if len(c.Warnings) != 0 {
+			t.Errorf("%s produced a card warning at all: %v", refused, c.Warnings)
+		}
+	}
+	for status, want := range map[string]string{
+		"ERROR":    "the test will reach it",
+		"UPDATING": "the test will reach it",
+	} {
+		c := deviceTestConsequence("Loading Bay", "", models.DeviceTestBuzzer, status)
+		joined := strings.Join(c.Warnings, " ")
+		if !strings.Contains(joined, want) {
+			t.Errorf("%s note = %v", status, c.Warnings)
+		}
+		if strings.Contains(joined, "may not collect") || strings.Contains(joined, "rather than online") {
+			t.Errorf("%s is accepted by the store but the card warns it might not be: %v", status, c.Warnings)
+		}
 	}
 
 	// Deleting a schedule states the count the approval rests on.
@@ -354,5 +379,134 @@ func TestListAuditRefusesAnInstantItCannotRead(t *testing.T) {
 	}
 	if _, err := audit.ValidateArgs(json.RawMessage(`{"limit":500}`)); err == nil {
 		t.Error("list_audit accepted limit 500")
+	}
+}
+
+// --- the device-test preflight ----------------------------------------------------------
+
+// The four conditions database/commands.go's commandTarget.deliverable
+// refuses, checked here in its order, so a card is never built for a test the
+// route would turn down. Each case is the shape of the console body the tool
+// actually reads.
+
+func TestDeviceTestPreflightMirrorsTheStoresRefusals(t *testing.T) {
+	online := func(extra object) object {
+		m := object{"serial_number": "AT-1", "device_name": "Reception", "status": "ONLINE", "active": true,
+			"health": object{"credential_active": true}}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+
+	// Switched off, by either column.
+	for _, off := range []object{{"status": "DISABLED"}, {"active": false}} {
+		if why := terminalCannotBeCommanded(online(off), "Reception"); !strings.Contains(why, "is disabled") {
+			t.Errorf("%v = %q, want a disabled refusal", off, why)
+		}
+	}
+	// No credential.
+	noKey := online(object{"health": object{"credential_active": false}})
+	if why := terminalCannotBeCommanded(noKey, "Reception"); !strings.Contains(why, "holds no credential") {
+		t.Errorf("uncredentialed = %q", why)
+	}
+	// ABSENT IS NOT FALSE: a body without the health block, or without
+	// `active`, must not be refused here -- the route still checks.
+	bare := object{"serial_number": "AT-1", "status": "ONLINE"}
+	if why := terminalCannotBeCommanded(bare, "Reception"); why != "" {
+		t.Errorf("a body with no health block was refused: %q", why)
+	}
+	if why := terminalCannotBeCommanded(online(nil), "Reception"); why != "" {
+		t.Errorf("a healthy terminal was refused: %q", why)
+	}
+
+	// Not in contact. UPDATING and ERROR are accepted by the store and so are
+	// accepted here; OFFLINE and PROVISIONING are not.
+	for _, ok := range []string{"ONLINE", "UPDATING", "ERROR"} {
+		if why := terminalIsNotInContact(object{"status": ok}, "Reception"); why != "" {
+			t.Errorf("%s was refused as out of contact: %q", ok, why)
+		}
+	}
+	for _, refused := range []string{"OFFLINE", "PROVISIONING", ""} {
+		why := terminalIsNotInContact(object{"status": refused}, "Reception")
+		if !strings.Contains(why, "not in contact") || !strings.Contains(why, "nothing would be sent") {
+			t.Errorf("%q = %q, want an out-of-contact refusal", refused, why)
+		}
+	}
+}
+
+func TestDeviceTestPreflightDistinguishesNeverReportedFromCannot(t *testing.T) {
+	offer := func(supported bool) []any {
+		return []any{object{"type": models.CommandDeviceTest, "supported": supported},
+			object{"type": models.CommandDiagnosticSnapshot, "supported": true}}
+	}
+	// Reported, and can.
+	can := object{"capabilities_reported_at": "2026-09-17T09:00:00Z", "commands": offer(true)}
+	if why := terminalCannotRunDeviceTest(can, "Reception"); why != "" {
+		t.Errorf("a capable terminal was refused: %q", why)
+	}
+	// Reported, and cannot.
+	cannot := object{"capabilities_reported_at": "2026-09-17T09:00:00Z", "commands": offer(false)}
+	why := terminalCannotRunDeviceTest(cannot, "Reception")
+	if !strings.Contains(why, "reported what it can do") || !strings.Contains(why, "nothing would be sent") {
+		t.Errorf("an incapable terminal = %q", why)
+	}
+	// Never reported. SILENCE IS NOT CONSENT, and it is not the same message.
+	silent := object{"commands": offer(false)}
+	why = terminalCannotRunDeviceTest(silent, "Reception")
+	if !strings.Contains(why, "never reported") || !strings.Contains(why, "nothing would be sent") {
+		t.Errorf("a silent terminal = %q", why)
+	}
+	if why == terminalCannotRunDeviceTest(cannot, "Reception") {
+		t.Error("never-reported and cannot are told apart by the store and must be here too")
+	}
+	// The command missing from the offer list entirely is a refusal, not a card.
+	if why := terminalCannotRunDeviceTest(object{"commands": []any{}}, "Reception"); why == "" {
+		t.Error("a platform offering no hardware test still built a card")
+	}
+}
+
+// --- the reject reason --------------------------------------------------------------------
+
+func TestRejectReasonNeverExceedsTheRouteOrSplitsARune(t *testing.T) {
+	// The route stores at most maxRejectReasonBytes and cuts by BYTE, so the
+	// assistant must arrive inside the limit and on a rune boundary.
+	cases := []string{
+		"",
+		"wrong site",
+		strings.Repeat("a", 500),
+		// Multi-byte, at the lengths that straddle the cut. "é" is two bytes
+		// and "→" is three, so at least one of these lands mid-rune under a
+		// naive byte slice.
+		strings.Repeat("é", 200),
+		strings.Repeat("→", 200),
+		strings.Repeat("a", 188) + strings.Repeat("é", 10),
+		strings.Repeat("a", 187) + strings.Repeat("→", 10),
+		strings.Repeat("🚪", 60),
+	}
+	for _, words := range cases {
+		got := assistantReasonWithin(words, maxRejectReasonBytes)
+		if len(got) > maxRejectReasonBytes {
+			t.Errorf("%d-byte reason produced %d bytes", len(words), len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("%d-byte reason produced invalid UTF-8: %q", len(words), got)
+		}
+		if !strings.HasPrefix(got, "assistant") {
+			t.Errorf("provenance lost: %q", got)
+		}
+	}
+	// Inside the limit it is exactly assistantReason, unchanged.
+	if got := assistantReasonWithin("wrong site", maxRejectReasonBytes); got != "assistant: wrong site" {
+		t.Errorf("short reason = %q", got)
+	}
+	if got := assistantReasonWithin("", maxRejectReasonBytes); got != "assistant" {
+		t.Errorf("empty reason = %q", got)
+	}
+	// A naive byte cut of the same input WOULD split a rune -- which is the
+	// bug this guards, stated so the test fails if the helper stops helping.
+	naive := assistantReason(strings.Repeat("é", 200))[:maxRejectReasonBytes]
+	if utf8.ValidString(naive) {
+		t.Error("this fixture no longer straddles the cut, so it proves nothing; choose one that does")
 	}
 }

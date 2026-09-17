@@ -36,6 +36,11 @@ import (
 
 const consoleAnnouncements = "/api/v1/console/terminal-announcements"
 
+// maxRejectReasonBytes is what RejectAnnouncement stores: anything longer is
+// cut, by bytes, in database/announcements.go. The assistant sends no more
+// than this so that the cut never happens there.
+const maxRejectReasonBytes = 200
+
 func registerAnnouncementTools(r *Registry) {
 	r.Register(&Tool{
 		Name: "approve_pending_terminal",
@@ -124,7 +129,10 @@ func registerAnnouncementTools(r *Registry) {
 		Run: func(t *Turn, a Args) Outcome {
 			body := object{}
 			if reason := a.String("reason"); reason != "" {
-				body["reason"] = assistantReason(reason)
+				// BOUNDED HERE, because the route truncates rather than
+				// refusing and does it with a byte slice. See
+				// assistantReasonWithin.
+				body["reason"] = assistantReasonWithin(reason, maxRejectReasonBytes)
 			}
 			m, resp, fail := post(t, http.MethodPost,
 				consoleAnnouncements+"/"+Segment(a.String("pending_id"))+"/reject", body)

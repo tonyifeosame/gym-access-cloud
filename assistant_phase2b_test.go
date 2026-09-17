@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"access-terminal-cloud-api/assistant"
 	"access-terminal-cloud-api/database"
@@ -357,15 +358,28 @@ func TestAssistantDeviceTestAsksFirstAndCannotReachTheRelay(t *testing.T) {
 		t.Fatalf("a rejected device test ran: %d", queued)
 	}
 
-	// A terminal that has not reported the capability is refused by the
-	// route, in its words, after the operator approved -- the gate is the
-	// route's, not the tool's.
+	// A terminal that has not reported the capability NEVER REACHES A CARD.
+	//
+	// This assertion used to say the opposite -- a card, an approval, and the
+	// route refusing afterwards -- and that was the defect: the operator spent
+	// a single-use confirmation to be told no. The preflight in
+	// tools_fleet.go now answers first, in the store's own words. The route is
+	// still the gate, and every state it refuses is covered by
+	// TestAssistantDeviceTestRefusesWhatTheTerminalCannotCollect.
 	f.env.registerDevice(f.env.siteAKey, "AT-TEST-2")
-	card = f.runToolAwaitingCard(t, conv, "run_device_test",
+	result, content, events = f.runTool(t, conv, "run_device_test",
 		map[string]any{"serial": "AT-TEST-2", "target": "self_test"})
-	result, _ = f.approveCard(t, conv, card)
-	if s := result.Data["status"]; s != models.ToolCallInvalid {
-		t.Fatalf("a test on an incapable terminal = %v", s)
+	expectStatus(t, "run_device_test on an incapable terminal", result, models.ToolCallFailed)
+	if !strings.Contains(content, "never reported") {
+		t.Fatalf("incapable terminal = %s", content)
+	}
+	if len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
+		t.Fatalf("a card was shown for a terminal that cannot run the test")
+	}
+	scanRow(t, `SELECT count(*) FROM sync_jobs WHERE job_type = 'DEVICE_TEST' AND device_id = $1`,
+		[]any{deviceIDBySerial(t, "AT-TEST-2")}, &queued)
+	if queued != 0 {
+		t.Fatalf("a refused device test queued work: %d", queued)
 	}
 }
 
@@ -689,3 +703,319 @@ func TestAssistantPhase2bProjectionsCarryNoSecretsAndHandOffToKnownRoutes(t *tes
 		}
 	}
 }
+
+// --- the device-test preflight, against the real route -------------------------------------
+
+// EVERY STATE THE ROUTE WOULD REFUSE IS REFUSED BEFORE A CARD IS BUILT, in
+// the store's own order, and none of them queues anything. The review that
+// asked for this found the opposite: a card promising a queued test, an
+// approval that consumed the operator's single-use confirmation, and a refusal
+// from the route afterwards.
+func TestAssistantDeviceTestRefusesWhatTheTerminalCannotCollect(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	key := f.env.registerDevice(f.env.siteAKey, "AT-PF-1")
+	mustExec(t, `UPDATE devices SET device_name = 'Reception' WHERE serial_number = 'AT-PF-1'`)
+	reportCapabilities(t, f.env, key, models.CapabilityCmdDeviceTest)
+	conv := f.newConversation(t)
+
+	healthy := func() {
+		t.Helper()
+		mustExec(t, `UPDATE devices SET status = 'ONLINE', active = TRUE,
+		                    api_key_hash = COALESCE(api_key_hash, repeat('a', 64)),
+		                    credential_revoked_at = NULL
+		              WHERE serial_number = 'AT-PF-1'`)
+	}
+
+	refused := []struct {
+		name  string
+		setup string
+		want  string
+	}{
+		{"disabled by status", `UPDATE devices SET status = 'DISABLED' WHERE serial_number = 'AT-PF-1'`, "is disabled"},
+		{"disabled by the active flag", `UPDATE devices SET active = FALSE WHERE serial_number = 'AT-PF-1'`, "is disabled"},
+		{"credential revoked",
+			`UPDATE devices SET api_key_hash = NULL, credential_revoked_at = CURRENT_TIMESTAMP WHERE serial_number = 'AT-PF-1'`,
+			"holds no credential"},
+		{"offline", `UPDATE devices SET status = 'OFFLINE' WHERE serial_number = 'AT-PF-1'`, "not in contact"},
+		{"provisioning", `UPDATE devices SET status = 'PROVISIONING' WHERE serial_number = 'AT-PF-1'`, "not in contact"},
+	}
+	for _, c := range refused {
+		healthy()
+		mustExec(t, c.setup)
+
+		result, content, events := f.runTool(t, conv, "run_device_test",
+			map[string]any{"serial": "AT-PF-1", "target": "buzzer"})
+		expectStatus(t, "run_device_test on a terminal that is "+c.name, result, models.ToolCallFailed)
+		if !strings.Contains(content, c.want) {
+			t.Errorf("%s: refusal %q does not say %q", c.name, content, c.want)
+		}
+		if len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
+			t.Errorf("%s: a card was shown for a test the route would refuse", c.name)
+		}
+		var queued int
+		scanRow(t, `SELECT count(*) FROM sync_jobs WHERE job_type = 'DEVICE_TEST'`, []any{}, &queued)
+		if queued != 0 {
+			t.Fatalf("%s: %d device tests were queued", c.name, queued)
+		}
+	}
+
+	// THE CAPABILITY CHECK COMES BEFORE THE CONTACT CHECK, matching the store:
+	// a terminal that is both out of contact and has never said what it can do
+	// is told the thing somebody has to fix first.
+	f.env.registerDevice(f.env.siteAKey, "AT-PF-2")
+	mustExec(t, `UPDATE devices SET status = 'OFFLINE' WHERE serial_number = 'AT-PF-2'`)
+	result, content, events := f.runTool(t, conv, "run_device_test",
+		map[string]any{"serial": "AT-PF-2", "target": "buzzer"})
+	expectStatus(t, "run_device_test on a silent terminal", result, models.ToolCallFailed)
+	if !strings.Contains(content, "never reported") || !strings.Contains(content, "nothing would be sent") {
+		t.Fatalf("silent terminal = %s", content)
+	}
+	if len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
+		t.Fatalf("a card was shown for a terminal that has never reported")
+	}
+
+	// A terminal that reported and cannot is told so differently.
+	keyThree := f.env.registerDevice(f.env.siteAKey, "AT-PF-3")
+	reportCapabilities(t, f.env, keyThree, models.CapabilityCmdDiagnosticSnapshot)
+	result, content, _ = f.runTool(t, conv, "run_device_test",
+		map[string]any{"serial": "AT-PF-3", "target": "buzzer"})
+	expectStatus(t, "run_device_test on an incapable terminal", result, models.ToolCallFailed)
+	if !strings.Contains(content, "reported what it can do") || strings.Contains(content, "never reported") {
+		t.Fatalf("incapable terminal = %s", content)
+	}
+
+	// THE POSITIVE CONTROL. Healthy and capable: a card, and the wording
+	// carries no warning about collecting it.
+	healthy()
+	card := f.runToolAwaitingCard(t, conv, "run_device_test",
+		map[string]any{"serial": "AT-PF-1", "target": "buzzer"})
+	if !strings.Contains(cardTitle(card), "Have Reception") {
+		t.Fatalf("card = %v", card.Data["consequence"])
+	}
+	if text := cardText(card); strings.Contains(text, "may not collect") || strings.Contains(text, "rather than online") {
+		t.Fatalf("the card still warns about collection: %s", text)
+	}
+	result, _ = f.approveCard(t, conv, card)
+	expectStatus(t, "approved device test on a healthy terminal", result, models.ToolCallConfirmedExecuted)
+	var queued int
+	scanRow(t, `SELECT count(*) FROM sync_jobs WHERE job_type = 'DEVICE_TEST'`, []any{}, &queued)
+	if queued != 1 {
+		t.Fatalf("the healthy terminal queued %d tests", queued)
+	}
+
+	// ERROR and UPDATING are accepted by the store, so they still get a card,
+	// and the note says the test will reach the terminal rather than warning
+	// that it might not.
+	mustExec(t, `DELETE FROM sync_jobs WHERE job_type = 'DEVICE_TEST'`)
+	for status, want := range map[string]string{"ERROR": "reporting a fault", "UPDATING": "installing software"} {
+		mustExec(t, `UPDATE devices SET status = $1 WHERE serial_number = 'AT-PF-1'`, status)
+		card = f.runToolAwaitingCard(t, conv, "run_device_test",
+			map[string]any{"serial": "AT-PF-1", "target": "buzzer"})
+		text := cardText(card)
+		if !strings.Contains(text, want) || !strings.Contains(text, "the test will reach it") {
+			t.Errorf("%s card = %s", status, text)
+		}
+		result, _ = f.approveCard(t, conv, card)
+		expectStatus(t, "approved device test on a terminal that is "+status, result, models.ToolCallConfirmedExecuted)
+		mustExec(t, `DELETE FROM sync_jobs WHERE job_type = 'DEVICE_TEST'`)
+	}
+}
+
+// --- repeatability --------------------------------------------------------------------------
+
+// DEVICE_TEST is Repeatable: false, and the store distinguishes a repeated
+// button press from a different request. Both answers reach the operator
+// through the assistant, and the second one names the tool that clears it.
+func TestAssistantDeviceTestRepeatabilityAndWithdrawal(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	key := f.env.registerDevice(f.env.siteAKey, "AT-RPT-1")
+	mustExec(t, `UPDATE devices SET device_name = 'Side Gate' WHERE serial_number = 'AT-RPT-1'`)
+	reportCapabilities(t, f.env, key, models.CapabilityCmdDeviceTest)
+	conv := f.newConversation(t)
+
+	// The first one queues.
+	card := f.runToolAwaitingCard(t, conv, "run_device_test", map[string]any{"serial": "AT-RPT-1", "target": "buzzer"})
+	result, content := f.approveCard(t, conv, card)
+	expectStatus(t, "first device test", result, models.ToolCallConfirmedExecuted)
+	if !strings.Contains(content, `"state":"QUEUED"`) {
+		t.Fatalf("first test = %s", content)
+	}
+	commandID := queryString(t, `SELECT public_id::text FROM sync_jobs WHERE job_type = 'DEVICE_TEST' ORDER BY id DESC LIMIT 1`)
+
+	// THE SAME TARGET AGAIN is the repeated button press: the one already
+	// waiting is returned, and no second row is written.
+	card = f.runToolAwaitingCard(t, conv, "run_device_test", map[string]any{"serial": "AT-RPT-1", "target": "buzzer"})
+	result, content = f.approveCard(t, conv, card)
+	expectStatus(t, "same target again", result, models.ToolCallConfirmedExecuted)
+	if !strings.Contains(content, "already waiting") {
+		t.Fatalf("repeat = %s", content)
+	}
+	var queued int
+	scanRow(t, `SELECT count(*) FROM sync_jobs WHERE job_type = 'DEVICE_TEST' AND status = 'PENDING'`, []any{}, &queued)
+	if queued != 1 {
+		t.Fatalf("a repeat wrote a second row: %d pending", queued)
+	}
+
+	// A DIFFERENT TARGET is a different command, and the slot is taken. The
+	// route refuses, and its words tell the operator to withdraw the one
+	// waiting -- which is the tool beside this one.
+	card = f.runToolAwaitingCard(t, conv, "run_device_test", map[string]any{"serial": "AT-RPT-1", "target": "display"})
+	result, content = f.approveCard(t, conv, card)
+	if s := result.Data["status"]; s != models.ToolCallInvalid {
+		t.Fatalf("different target while one is waiting = %v (%s)", s, content)
+	}
+	if !strings.Contains(content, "already waiting") || !strings.Contains(content, "withdraw") {
+		t.Fatalf("the refusal does not say to withdraw: %s", content)
+	}
+	scanRow(t, `SELECT count(*) FROM sync_jobs WHERE job_type = 'DEVICE_TEST'`, []any{}, &queued)
+	if queued != 1 {
+		t.Fatalf("a refused different target still wrote a row: %d", queued)
+	}
+
+	// Withdrawing clears the slot, and the different target then queues.
+	result, content, _ = f.runTool(t, conv, "withdraw_command",
+		map[string]any{"serial": "AT-RPT-1", "command_id": commandID})
+	expectStatus(t, "withdraw the waiting test", result, models.ToolCallExecuted)
+	if !strings.Contains(content, `"state":"CANCELLED"`) {
+		t.Fatalf("withdrawal = %s", content)
+	}
+	card = f.runToolAwaitingCard(t, conv, "run_device_test", map[string]any{"serial": "AT-RPT-1", "target": "display"})
+	result, content = f.approveCard(t, conv, card)
+	expectStatus(t, "different target after withdrawal", result, models.ToolCallConfirmedExecuted)
+	if !strings.Contains(content, `"state":"QUEUED"`) {
+		t.Fatalf("after withdrawal = %s", content)
+	}
+	var target string
+	scanRow(t, `SELECT payload->>'target' FROM sync_jobs WHERE job_type = 'DEVICE_TEST' AND status = 'PENDING'`, []any{}, &target)
+	if target != models.DeviceTestDisplay {
+		t.Fatalf("the pending test targets %q", target)
+	}
+	// Still no command parameters in anything the model was told.
+	if strings.Contains(content, `"params"`) {
+		t.Fatalf("the command parameters reached the model: %s", content)
+	}
+}
+
+// --- another tenant ---------------------------------------------------------------------------
+
+// THE THREE MANAGER TOOLS, AGAINST COMPANY TWO. Site C belongs to the other
+// tenant, so a terminal registered there is one this operator must not be able
+// to reach by naming its serial -- which is printed on the hardware and so is
+// exactly what a model might be handed.
+func TestAssistantPhase2bToolsCannotReachAnotherTenant(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleManager)
+	other := operatorCompanyID(t, "two")
+
+	// Their terminal, capable and healthy, with a command of their own waiting.
+	theirKey := f.env.registerDevice(f.env.siteCKey, "AT-THEIRS-CMD")
+	mustExec(t, `UPDATE devices SET device_name = 'Their Gate' WHERE serial_number = 'AT-THEIRS-CMD'`)
+	reportCapabilities(t, f.env, theirKey, models.CapabilityCmdDeviceTest, models.CapabilityCmdDiagnosticSnapshot)
+	theirDevice := deviceIDBySerial(t, "AT-THEIRS-CMD")
+
+	// Queued BY THEIR OWN OPERATOR through the console route, so the row is
+	// exactly what the platform writes rather than a hand-made one.
+	_, theirToken, theirCSRF := consoleOperatorSession(t, f.env.router, other, "them-cmd@example.com", models.RoleManager)
+	code, _ := consoleCall(t, f.env.router, http.MethodPost, "/api/v1/console/terminals/AT-THEIRS-CMD/commands",
+		`{"type":"DIAGNOSTIC_SNAPSHOT","reason":"theirs"}`, theirToken, theirCSRF)
+	if code != http.StatusAccepted {
+		t.Fatalf("queueing another tenant own command = %d", code)
+	}
+	theirCommand := queryString(t, `SELECT public_id::text FROM sync_jobs WHERE device_id = $1 AND command_class = 'COMMAND'`, theirDevice)
+
+	// Their schedule.
+	mustExec(t, `INSERT INTO schedules (company_id, name, timezone) VALUES ($1, 'Their Weekend', 'UTC')`, other)
+	theirSchedule := queryString(t, `SELECT public_id::text FROM schedules WHERE company_id = $1 AND name = 'Their Weekend'`, other)
+
+	conv := f.newConversation(t)
+
+	for tool, args := range map[string]map[string]any{
+		"withdraw_command": {"serial": "AT-THEIRS-CMD", "command_id": theirCommand},
+		"run_device_test":  {"serial": "AT-THEIRS-CMD", "target": "buzzer"},
+		"delete_schedule":  {"schedule_id": theirSchedule},
+	} {
+		result, content, events := f.runTool(t, conv, tool, args)
+		if s := result.Data["status"]; s != models.ToolCallNotFound && s != models.ToolCallFailed {
+			t.Errorf("%s against another tenant = %v (%s)", tool, s, content)
+		}
+		// Nothing of theirs is described, and no card is ever offered for it.
+		for _, leaked := range []string{"Their Gate", "Their Weekend"} {
+			if strings.Contains(content, leaked) {
+				t.Errorf("%s leaked another tenant's data: %s", tool, content)
+			}
+		}
+		if len(findEvents(events, assistant.EventConfirmationRequired)) != 0 {
+			t.Errorf("%s offered another tenant's resource for approval", tool)
+		}
+	}
+
+	// Nothing of theirs moved: the command still waits, no test was queued for
+	// their terminal, and their schedule is intact.
+	var status string
+	scanRow(t, `SELECT status FROM sync_jobs WHERE public_id = $1::uuid`, []any{theirCommand}, &status)
+	if status != "PENDING" {
+		t.Fatalf("another tenant's command became %s", status)
+	}
+	var queued int
+	scanRow(t, `SELECT count(*) FROM sync_jobs WHERE device_id = $1 AND job_type = 'DEVICE_TEST'`, []any{theirDevice}, &queued)
+	if queued != 0 {
+		t.Fatalf("a device test was queued for another tenant: %d", queued)
+	}
+	var deleted int
+	scanRow(t, `SELECT count(*) FROM schedules WHERE public_id = $1::uuid AND deleted_at IS NOT NULL`, []any{theirSchedule}, &deleted)
+	if deleted != 0 {
+		t.Fatalf("another tenant's schedule was deleted")
+	}
+
+	// And the two ADMIN decisions, from an administrator of this company, are
+	// already covered against another tenant by
+	// TestAssistantTerminalDecisionsAreAdminOnlyAndTenantScoped.
+}
+
+// --- the reject reason ---------------------------------------------------------------------
+
+// The route truncates a reason longer than 200 with a BYTE slice, so a
+// multi-byte one cut there would reach Postgres as an invalid sequence and
+// fail the rejection. The assistant sends no more than the route stores.
+func TestAssistantRejectReasonSurvivesMultibyteWords(t *testing.T) {
+	f := newAssistantFixture(t, models.RoleAdmin)
+	seedAdoptedAnnouncement(t, f.companyID, "AT-UTF-1")
+	pendingID := queryString(t, `SELECT public_id::text FROM terminal_announcements WHERE serial_number = 'AT-UTF-1'`)
+	conv := f.newConversation(t)
+
+	// 200 bytes of two- and three-byte runes, which a byte cut at 200 after an
+	// eleven-byte prefix lands inside.
+	words := strings.Repeat("é", 50) + strings.Repeat("→", 33) + "x"
+	card := f.runToolAwaitingCard(t, conv, "reject_pending_terminal",
+		map[string]any{"pending_id": pendingID, "reason": words})
+	if cardTitle(card) != "Refuse AT-UTF-1?" {
+		t.Fatalf("card = %v", card.Data["consequence"])
+	}
+	result, _ := f.approveCard(t, conv, card)
+	expectStatus(t, "rejection with a multibyte reason", result, models.ToolCallConfirmedExecuted)
+
+	var state, stored string
+	scanRow(t, `SELECT state, COALESCE(rejected_reason, '') FROM terminal_announcements WHERE public_id = $1::uuid`,
+		[]any{pendingID}, &state, &stored)
+	if state != "REJECTED" {
+		t.Fatalf("state = %s", state)
+	}
+	if len(stored) > 200 {
+		t.Fatalf("the stored reason is %d bytes", len(stored))
+	}
+	if !utf8.ValidString(stored) {
+		t.Fatalf("the stored reason is not valid UTF-8: %q", stored)
+	}
+	if !strings.HasPrefix(stored, "assistant") {
+		t.Fatalf("provenance lost: %q", stored)
+	}
+	// It was actually long enough to be shortened, so this is not passing by
+	// never reaching the limit.
+	if len(assistantReasonForTest(words)) <= 200 {
+		t.Fatalf("the fixture no longer exceeds the limit: %d bytes", len(assistantReasonForTest(words)))
+	}
+}
+
+// assistantReasonForTest mirrors the prefix the assistant adds, so the test
+// above can assert its fixture is genuinely over the limit without exporting
+// anything from the assistant package.
+func assistantReasonForTest(words string) string { return "assistant: " + words }

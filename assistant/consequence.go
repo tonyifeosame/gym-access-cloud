@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"access-terminal-cloud-api/models"
 )
@@ -120,6 +121,34 @@ func assistantReason(operatorWords string) string {
 	return "assistant: " + words
 }
 
+// assistantReasonWithin is assistantReason for a route that TRUNCATES rather
+// than refuses.
+//
+// database/announcements.go's RejectAnnouncement cuts a reason longer than 200
+// with a BYTE slice, `reason = reason[:200]`. The operator's words may be
+// anything a person types, so that cut can land inside a multi-byte rune and
+// hand Postgres a byte sequence it will not accept -- an invalid-encoding
+// error, a 500, and a rejection that did not happen. The tool's own
+// "assistant: " prefix makes it likelier by pushing a 190-byte reason past the
+// limit that a console operator's 190-byte reason would clear.
+//
+// So the assistant never sends more than the route stores, and never cuts a
+// rune in half. Truncating HERE rather than relying on the store's cut is the
+// difference between the operator's words being shortened and the request
+// failing.
+func assistantReasonWithin(operatorWords string, limit int) string {
+	reason := assistantReason(operatorWords)
+	if len(reason) <= limit {
+		return reason
+	}
+	// Back up to a rune boundary rather than cutting at the byte.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return strings.TrimRight(reason[:cut], " ")
+}
+
 // newRequestID mints the id an internal request carries -- the same shape
 // the logging middleware mints, so audit rows look alike whoever caused them.
 func newRequestID() string {
@@ -140,6 +169,16 @@ func newRequestID() string {
 // an access point with people at it is perceived by them, and the operator
 // approving it should be told where "there" is before they do -- which is why
 // the place is in the title rather than the body.
+//
+// IT CARRIES NO WARNING ABOUT THE TERMINAL'S STATE, and that is a correction.
+// It used to warn, for any status other than ONLINE, that the terminal "may
+// not collect the test before it lapses" -- wrong in both directions. A
+// terminal that is OFFLINE, PROVISIONING, DISABLED or uncredentialed is
+// REFUSED OUTRIGHT by the route with nothing queued, so the card is not shown
+// for one at all now (tools_fleet.go's preflight); and UPDATING and ERROR are
+// states the store deliberately accepts, because the terminal is still
+// heartbeating, so warning about them described a risk that does not exist.
+// What is left is a note for those two that says what will actually happen.
 func deviceTestConsequence(terminalLabel, siteName, target, status string) models.AssistantConsequence {
 	where := terminalLabel
 	if siteName != "" {
@@ -161,9 +200,14 @@ func deviceTestConsequence(terminalLabel, siteName, target, status string) model
 			"the test lapses unrun if the terminal has not collected it within five minutes.",
 			terminalLabel, what),
 	}
-	if status != "" && status != "ONLINE" {
-		c.Warnings = append(c.Warnings, fmt.Sprintf("This terminal is %s rather than online, so it may "+
-			"not collect the test before it lapses.", strings.ToLower(status)))
+	switch status {
+	case "ERROR":
+		c.Warnings = append(c.Warnings, fmt.Sprintf("%s is reporting a fault. It is still in contact with "+
+			"the platform, so the test will reach it, and what it does with it may be worth knowing.",
+			terminalLabel))
+	case "UPDATING":
+		c.Warnings = append(c.Warnings, fmt.Sprintf("%s is installing software. It is still in contact, "+
+			"so the test will reach it, though it may answer more slowly than usual.", terminalLabel))
 	}
 	return c
 }
