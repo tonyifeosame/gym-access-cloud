@@ -142,6 +142,60 @@ const UNAUTHENTICATED_SCREENS = [
 ]
 
 const failures = []
+
+/**
+ * The Google button's mark and label on one line, centred, and spaced.
+ *
+ * A REGRESSION CHECK FOR A FAULT A SCREENSHOT FOUND. `a.button` once set
+ * `inline-block` at a specificity that beat the button's own flex layout, so
+ * the mark sat on the text baseline -- its centre 3.5px above the label's --
+ * with no gap between them, in a box 3px taller than every other button on the
+ * card. None of that is visible to axe or to jsdom; all of it is a computed box.
+ *
+ * Tolerances are a pixel: centring is exact in the layout, and what is left is
+ * sub-pixel rounding of the label's line box.
+ */
+async function checkGoogleButton(page, label) {
+  const geometry = await page.evaluate(() => {
+    const button = document.querySelector('.login__google')
+    if (!button) return null
+    const mark = button.querySelector('svg').getBoundingClientRect()
+    const text = [...button.childNodes].find((node) => node.nodeType === 3 && node.textContent.trim())
+    const range = document.createRange()
+    range.selectNodeContents(text)
+    const words = range.getBoundingClientRect()
+    const box = button.getBoundingClientRect()
+    const primary = document.querySelector('.login__card .button--primary').getBoundingClientRect()
+    return {
+      markCentre: mark.top + mark.height / 2,
+      textCentre: words.top + words.height / 2,
+      boxCentre: box.top + box.height / 2,
+      gap: words.left - mark.right,
+      leftSlack: mark.left - box.left,
+      rightSlack: box.right - words.right,
+      height: box.height,
+      primaryHeight: primary.height,
+    }
+  })
+  if (!check(geometry !== null, `${label}: the Google button did not render with Google enabled`)) return
+  check(
+    Math.abs(geometry.markCentre - geometry.textCentre) <= 1,
+    `${label}: Google mark centre is ${(geometry.markCentre - geometry.textCentre).toFixed(1)}px off the label's`,
+  )
+  check(
+    Math.abs(geometry.markCentre - geometry.boxCentre) <= 1,
+    `${label}: Google mark is not vertically centred in its button`,
+  )
+  check(geometry.gap >= 6 && geometry.gap <= 12, `${label}: Google mark-to-label gap is ${geometry.gap.toFixed(1)}px`)
+  check(
+    Math.abs(geometry.leftSlack - geometry.rightSlack) <= 1,
+    `${label}: Google button content is not horizontally centred`,
+  )
+  check(
+    Math.abs(geometry.height - geometry.primaryHeight) <= 0.5,
+    `${label}: Google button is ${geometry.height}px tall beside a ${geometry.primaryHeight}px Sign in button`,
+  )
+}
 const notes = []
 /*
   Targets under 24px that PASS 2.5.8 through the spacing exception.
@@ -1034,6 +1088,8 @@ async function main() {
 
         // Touch targets, on the screens a customer meets on their own phone
         // before anybody has helped them.
+
+        if (screen.name === 'login') await checkGoogleButton(anonymous, label)
       }
 
       /*

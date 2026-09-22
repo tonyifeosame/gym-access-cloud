@@ -471,6 +471,22 @@ const PENDING = [
 const ROUTES = [
 
   /*
+    Every way in, GOOGLE INCLUDED.
+
+    Unanswered, this fell through to the 501 below and the login screen drew
+    its password-only fallback -- so the Google button, the one control on that
+    card with an icon in it, had never been drawn in a real browser. It is
+    enabled here so the sweep measures the card as a customer whose company
+    configured Google actually sees it.
+  */
+  [/\/api\/v1\/auth\/providers$/, () => ({
+    password: { enabled: true },
+    google: { enabled: true, start_path: '/api/v1/auth/google/start' },
+    signup: { enabled: true },
+    password_reset: { email_delivery: false },
+  })],
+
+  /*
     The setup facts the overview cannot derive for itself.
 
     ANCHORED AND LISTED EARLY, like every other exact path here. The overview

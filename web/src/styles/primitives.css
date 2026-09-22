@@ -228,6 +228,18 @@ summary:focus-visible,
   text-align: end;
 }
 
+/*
+  THE SAME RULE, AT THE SPECIFICITY IT NEEDS. `.table th, .table td` above sets
+  `text-align: start` at (0,1,1), which beat the lone class at (0,1,0) -- so
+  every column declared `align: 'end'` (counts on Sites and Companies, the
+  overview's Outcome) was drawn start-aligned, header included, while the
+  outcome badges pushed themselves right. The column then read as two
+  alignments at once.
+*/
+.table .table__cell--end {
+  text-align: end;
+}
+
 .table__row--clickable {
   cursor: pointer;
 }
@@ -387,7 +399,12 @@ textarea.field__input {
 }
 
 .checkbox__input {
-  margin-top: 1px;
+  /* NO MARGIN AT ALL. The browser gives a checkbox 3px 3px 3px 4px of its own,
+     which pushed the box 4px off the field's left edge and left every hint
+     below it (indented by exactly the box plus the gap) out of line with the
+     label it explains. The box is centred on the label's first line by the
+     label's own padding instead -- see `.checkbox__label`. */
+  margin: 0;
   /*
    * 24px, WHICH IS A CONFORMANCE FLOOR RATHER THAN A PREFERENCE. WCAG 2.2
    * SC 2.5.8 (Target Size, Minimum, AA) requires 24x24 CSS pixels, and this was
@@ -409,6 +426,11 @@ textarea.field__input {
   flex-direction: column;
   font-size: var(--font-size-sm);
   cursor: pointer;
+  /* Centres the first line of text on the 24px box beside it: half the
+     difference between the box and one line. 2px is the same sum for a
+     browser without the `lh` unit. */
+  padding-block-start: 2px;
+  padding-block-start: calc((24px - 1lh) / 2);
 }
 
 .checkbox__description {
@@ -458,9 +480,10 @@ textarea.field__input {
   gap: var(--space-2);
 }
 
-/* 24px, the WCAG 2.2 SC 2.5.8 floor. Same reasoning as .checkbox__input. */
+/* 24px, the WCAG 2.2 SC 2.5.8 floor. Same reasoning as .checkbox__input,
+   margins included: a radio carries 3px 3px 0 5px of its own. */
 .choice__input {
-  margin-top: 2px;
+  margin: 0;
   width: 24px;
   height: 24px;
   flex: 0 0 auto;
@@ -471,6 +494,9 @@ textarea.field__input {
   flex-direction: column;
   gap: var(--space-1);
   min-width: 0;
+  /* The label's first line centred on the radio, as `.checkbox__label` does. */
+  padding-block-start: 2px;
+  padding-block-start: calc((24px - 1lh) / 2);
 }
 
 .choice__label {
@@ -499,6 +525,9 @@ textarea.field__input {
   background: var(--danger-soft);
   color: var(--danger);
   font-size: var(--font-size-sm);
+  /* Snug, like the sign-in card's error: these run to two lines often enough
+     that body leading made them the loosest text on the form. */
+  line-height: var(--leading-snug);
 }
 
 .form__error p {
@@ -594,6 +623,7 @@ textarea.field__input {
   background: var(--danger-soft);
   color: var(--danger);
   font-size: var(--font-size-sm);
+  line-height: var(--leading-snug);
 }
 
 /* --- notifications ------------------------------------------------------- */
@@ -873,7 +903,8 @@ textarea.field__input {
     min-height: 44px;
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    /* The button radius, not the panel radius: this is a control. */
+    border-radius: var(--radius-sm);
     background: var(--surface);
     color: var(--text);
     font: inherit;
@@ -1078,11 +1109,20 @@ textarea.field__input {
 
 /* A link dressed as a button is a button to the eye and the thumb: the
  * button's own vertical padding (not the inline-link padding above) and no
- * underline, wherever it sits. After the rule above so it wins on order. */
+ * underline, wherever it sits. After the rule above so it wins on order.
+ *
+ * IT NO LONGER SETS `display`. It said `inline-block`, and at (0,1,1) it beat
+ * every single-class layout rule written for a link button -- `.login__google`
+ * asked for a centred flex row and silently got a text run. `.button` is now
+ * the flex box for both elements, so there is nothing to restate here. */
 a.button {
-  display: inline-block;
   padding-block: var(--space-2);
   text-decoration: none;
+}
+
+/* A small button keeps its small padding when it is a link. */
+a.button--small {
+  padding-block: var(--space-1);
 }
 
 .mono {
@@ -1096,6 +1136,23 @@ a.button {
 
 .panel__header {
   margin-bottom: var(--space-4);
+}
+
+/*
+  A panel's closing actions, and its tabs, never sit flush on the block above.
+
+  A panel is ordinary block flow, and most blocks in one bring their own
+  bottom margin -- but a notice, a description list and a paragraph whose
+  margin was zeroed do not, so "Grant access" touched the note above it on a
+  person, "Change policy" touched the policy's details on a site, and the
+  settings tabs touched the warning above them. Stated on the follower, so it
+  collapses into any margin the block above already has and only fills the gap
+  where there was none. Direct children only: inside `.form` the flex gap is
+  already doing this.
+*/
+.panel > * + .form__actions,
+.panel > * + .tabs {
+  margin-block-start: var(--space-4);
 }
 
 /* --- disclosure -----------------------------------------------------------
@@ -1431,8 +1488,21 @@ a.button {
   border-radius: var(--radius);
 }
 
+/*
+  A STAT TILE AND A SUMMARY CARD ARE ONE THING, DRAWN ONE WAY.
+
+  The overview and Terminals build `.tile`s; the person, site, terminal,
+  operator and credential pages build `.card`s -- an uppercase label, one
+  large value, a quiet line under it, every time. They had drifted: the card's
+  label was regular weight at 0.06em tracking and its value 600 at body
+  leading, the tile's label 600 at 0.04em and its value 650 set solid, and the
+  tile's detail line a size smaller. Side by side they read as two components.
+  The label takes the table header's treatment, which is the console's one
+  other uppercase label.
+*/
+.card__title,
 .tile__label {
-  margin: 0 0 var(--space-1);
+  margin: 0;
   font-size: var(--font-size-2xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1440,11 +1510,20 @@ a.button {
   font-weight: 600;
 }
 
+.card__value,
 .tile__value {
-  margin: 0;
+  margin: var(--space-2) 0 0;
   font-size: var(--font-size-2xl);
   font-weight: 650;
   line-height: 1.1;
+}
+
+.card__detail,
+.tile__description {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-snug);
 }
 
 .tile--positive {
@@ -1728,7 +1807,9 @@ a.button {
 
 .pending-terminals__item {
   display: flex;
-  align-items: flex-start;
+  /* Centred, so Approve and Remove sit on the serial's line rather than
+     hanging below it; the sentence underneath is on a line of its own. */
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
   flex-wrap: wrap;
@@ -2230,13 +2311,6 @@ a.button {
   border-color: var(--accent);
 }
 
-.tile__description {
-  margin: var(--space-1) 0 0;
-  font-size: var(--font-size-2xs);
-  line-height: var(--leading-snug);
-  color: var(--text-muted);
-}
-
 /* --- attention list -------------------------------------------------------
  *
  * Every entry restates something the platform actually reported. The tone is
@@ -2463,6 +2537,7 @@ a.button {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-3);
 }
 
@@ -2847,7 +2922,9 @@ a.button {
 
 .assistant__bubble--user {
   background: var(--accent);
-  color: #fff;
+  /* NOT white: the dark theme lightens the accent, and white on it is the
+     2.69:1 the primary button once had. See --on-accent in tokens.css. */
+  color: var(--on-accent);
 }
 
 .assistant__cursor::after {
@@ -2941,8 +3018,10 @@ a.button {
   min-height: 44px;
   font: inherit;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  /* The console's field, not a lookalike: the same border and radius as
+     `.field__input`, so the composer reads as the same control. */
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
 }

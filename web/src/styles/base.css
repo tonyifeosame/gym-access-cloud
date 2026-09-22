@@ -235,8 +235,17 @@ code {
   max-width: 1600px;
 }
 
+/*
+ * The title line is as tall as a control, so the page's actions -- which sit
+ * beside it, top-aligned -- are centred on the title rather than hanging 5px
+ * below it. Every page title takes the same box whether it has actions or not,
+ * so the lead and the first panel start at the same height on every screen.
+ */
 .page__header h1 {
   font-size: var(--font-size-2xl);
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height);
 }
 
 .page__lead {
@@ -261,64 +270,9 @@ code {
   padding: var(--space-4);
 }
 
-.card__title {
-  font-size: var(--font-size-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-}
-
-.card__value {
-  margin: var(--space-2) 0 0;
-  font-size: var(--font-size-2xl);
-  font-weight: 600;
-}
-
-.card__detail {
-  margin: var(--space-1) 0 0;
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  line-height: var(--leading-snug);
-}
-
 .panel__title {
   font-size: var(--font-size-lg);
   margin-bottom: var(--space-3);
-}
-
-.tiles {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-3);
-}
-
-.tile {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  text-decoration: none;
-  color: inherit;
-  background: var(--surface-raised);
-}
-
-.tile:hover {
-  border-color: var(--border-strong);
-}
-
-.tile__label {
-  font-weight: 600;
-}
-
-.tile__description {
-  font-size: var(--font-size-xs);
-  line-height: var(--leading-snug);
-  color: var(--text-muted);
 }
 
 .notice__title {
@@ -358,6 +312,20 @@ code {
   color: var(--text);
 }
 
+/* An empty or failed region is a section of a page, not a page: its heading
+ * sits at section size rather than the browser's 21-28px default, which made
+ * "No people yet" louder than the page title above it. The paragraphs lose
+ * their default margins because the column's gap already spaces them. */
+.state h1,
+.state h2 {
+  font-size: var(--font-size-lg);
+}
+
+.state p {
+  margin: 0;
+  max-width: 60ch;
+}
+
 .state__meta {
   font-size: var(--font-size-xs);
   color: var(--text-muted);
@@ -388,8 +356,25 @@ code {
 /* Controls                                                               */
 /* --------------------------------------------------------------------- */
 
+/*
+ * ONE BOX FOR EVERY BUTTON, WHATEVER ELEMENT CARRIES IT.
+ *
+ * A flex row rather than a text run, so an icon beside a label -- Google's mark
+ * on the sign-in card, a spinner beside "Saving…" -- is centred on the label and
+ * spaced from it by a token, instead of sitting on the text baseline and taking
+ * its gap from whitespace JSX does not render. Written here once because an <a>
+ * styled as a button used to fall back to inline-block (see `a.button` in
+ * primitives.css), which is how the Google button came to have its mark riding
+ * 3.5px above its label, touching it, in a box 3px taller than its neighbours.
+ */
 .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
   font: inherit;
+  text-align: center;
+  text-decoration: none;
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
@@ -418,11 +403,6 @@ code {
   border-color: transparent;
   background: transparent;
   color: var(--text-muted);
-}
-
-.button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 
 .field {
@@ -580,8 +560,8 @@ code {
  * the words the size they were meant to be.
  *
  * SCOPED TO `.login__note`, so it cannot reach `.login__secondary` -- the
- * full-width <a> styled as a button, which is `display: block` on purpose and
- * is already far above the floor.
+ * full-width <a> styled as a button, which spans the card on purpose and is
+ * already far above the floor.
  */
 .login__note a {
   display: inline-flex;
@@ -654,26 +634,17 @@ code {
  * card with the two actions swapped, which is what makes moving between them
  * feel like one flow rather than two products.
  *
- * .button is written for <button>, which is already block-level, centred and
- * free of text decoration. An <a> is none of those, so these three lines are
- * what make the two look like the same control rather than nearly the same
- * control. Nothing else about the button is restated here. */
+ * .button already centres its label and drops the underline for an <a>; the
+ * one thing left is width. `flex` rather than `inline-flex` so the link spans
+ * the card exactly as the <button> above it does. */
 .login__secondary {
-  display: block;
-  text-align: center;
-  text-decoration: none;
+  display: flex;
 }
 
 /* "Sign in with Google": the same outlined control as the other secondary
- * action, with Google's mark leading the label. The mark is inline SVG, so the
- * login screen still fetches nothing from a third party. */
-.login__google {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-}
-
+ * action, with Google's mark leading the label. Centring and the mark-to-label
+ * gap come from `.button`; the mark only has to refuse to shrink. It is inline
+ * SVG, so the login screen still fetches nothing from a third party. */
 .login__google-mark {
   flex: 0 0 auto;
 }
