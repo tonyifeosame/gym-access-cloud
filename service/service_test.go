@@ -85,7 +85,7 @@ func TestNoServiceAcceptsATenantFromItsCaller(t *testing.T) {
 		}
 	}
 
-	for _, in := range []any{MemberInput{}, PageRequest{}} {
+	for _, in := range []any{MemberInput{}, PageRequest{}, SiteInput{}} {
 		rt := reflect.TypeOf(in)
 		for i := 0; i < rt.NumField(); i++ {
 			name := strings.ToLower(rt.Field(i).Name)

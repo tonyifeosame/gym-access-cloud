@@ -54,6 +54,11 @@ func integrationCredentialRowID(t *testing.T, publicID string) int64 {
 // work without reading the plan -- fails here rather than arriving in
 // production ahead of its contract. Every addition to this list is preceded
 // by an addition to section 18.
+//
+// THE /oauth ROUTES ARE ON THIS LIST TOO (037). They sit under the same prefix
+// and are just as much a published contract, and the one thing this test exists
+// to catch -- a public route appearing without anybody deciding it should --
+// applies to the authorization server exactly as it does to a resource route.
 func TestPublicAPIMountsExactlyTheSpecifiedRoutes(t *testing.T) {
 	env := newTestEnv(t)
 
@@ -73,7 +78,18 @@ func TestPublicAPIMountsExactlyTheSpecifiedRoutes(t *testing.T) {
 		"GET /api/public/v1/members/:member_id/access",
 		"GET /api/public/v1/sites",
 		"GET /api/public/v1/sites/:site_id",
+		"POST /api/public/v1/sites",
+		"PATCH /api/public/v1/sites/:site_id",
 		"GET /api/public/v1/events",
+
+		// The authorization server. There is deliberately no registration
+		// endpoint and no introspection endpoint: the first would let anybody
+		// allow-list a redirect URI, and the second is not needed by a server
+		// whose tokens are opaque and looked up on every request anyway.
+		"GET /api/public/v1/oauth/authorize",
+		"POST /api/public/v1/oauth/authorize",
+		"POST /api/public/v1/oauth/token",
+		"POST /api/public/v1/oauth/revoke",
 	}
 	for _, w := range want {
 		if !found[w] {

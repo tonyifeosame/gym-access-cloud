@@ -774,6 +774,35 @@ func NewRouter() *gin.Engine {
 	}
 
 	// ---------------------------------------------------------------------
+	// The authorization server (037), MOUNTED BEFORE THE BEARER TREE
+	// ---------------------------------------------------------------------
+	//
+	// Its own group under the same /api/public/v1 prefix, and deliberately NOT
+	// inside the group below: these routes are how a caller OBTAINS a bearer
+	// token, so requiring one to reach them would be a loop. They carry their
+	// own limiter, their own error shape (RFC 6749 section 5.2 rather than the
+	// AccessLink envelope) and no scope gate.
+	//
+	// DECLARED FIRST because gin matches a static segment ahead of a parameter
+	// at the same position; writing them in this order keeps that from being
+	// something a reader has to know.
+	//
+	// WHAT THE AUTHORIZE ENDPOINTS READ, AND WHAT THEY DO NOT. They resolve the
+	// operator's session cookie themselves, to decide whether to show a sign-in
+	// form or a consent screen. They are NOT behind OperatorAuthMiddleware,
+	// because a signed-out customer arriving from a third party must get a form
+	// rather than a 401, and they set nothing the public handlers read -- a
+	// session cookie cannot authenticate anything under the bearer tree below.
+	oauth := r.Group("/api/public/v1/oauth")
+	oauth.Use(middleware.OAuthRateLimiter())
+	{
+		oauth.GET("/authorize", handlers.OAuthAuthorize)
+		oauth.POST("/authorize", handlers.OAuthAuthorizeSubmit)
+		oauth.POST("/token", handlers.OAuthToken)
+		oauth.POST("/revoke", handlers.OAuthRevoke)
+	}
+
+	// ---------------------------------------------------------------------
 	// Public API v1 -- API_SPEC.md section 18. THE FIRST ROUTES TO READ AN
 	// INTEGRATION CREDENTIAL.
 	// ---------------------------------------------------------------------
@@ -785,11 +814,16 @@ func NewRouter() *gin.Engine {
 	// tenant rather than someone's. RequireScope refuses at the edge; every
 	// service method checks the same scope again regardless.
 	//
-	// READ ROUTES ONLY IN THIS VERSION. The write semantics are specified in
-	// section 18 and follow with the idempotency middleware and a write rate
-	// class; a route for any other resource is added to the specification
-	// before it is mounted here, never after. TestPublicAPIMountsExactlyTheSpecifiedRoutes
-	// pins the set.
+	// A ROUTE FOR ANY RESOURCE IS ADDED TO THE SPECIFICATION BEFORE IT IS
+	// MOUNTED HERE, never after. TestPublicAPIMountsExactlyTheSpecifiedRoutes
+	// pins the set, and openapi_docs_test.go holds the published reference to
+	// it in both directions.
+	//
+	// TWO CREDENTIAL CLASSES REACH THIS TREE since 037: an integration
+	// credential (atp_) and an OAuth access token (ato_). Both are resolved to
+	// a service.TenantContext by the same middleware and are indistinguishable
+	// to every handler and every scope gate below, which is the point -- one
+	// authorization model, two ways to be issued a credential for it.
 	//
 	// AUTHENTICATION AND RATE LIMITING ARE ONE MIDDLEWARE HERE
 	// (middleware/public_rate_limit.go): the auth-failure allowance is charged
@@ -829,6 +863,14 @@ func NewRouter() *gin.Engine {
 		{
 			sites.GET("", handlers.PublicListSites)
 			sites.GET("/:site_id", handlers.PublicGetSite)
+		}
+		// Reads and writes carry DIFFERENT scopes, so they are two groups on
+		// one path rather than one group with a looser gate -- the same shape
+		// the member routes already use.
+		siteWrites := publicAPI.Group("/sites", middleware.RequireScope(models.ScopeSitesWrite))
+		{
+			siteWrites.POST("", handlers.PublicCreateSite)
+			siteWrites.PATCH("/:site_id", handlers.PublicUpdateSite)
 		}
 		events := publicAPI.Group("/events", middleware.RequireScope(models.ScopeEventsRead))
 		{

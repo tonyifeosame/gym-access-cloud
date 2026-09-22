@@ -199,6 +199,16 @@ func main() {
 		log.Fatalf("Identity providers: %v", err)
 	}
 
+	// The OAuth clients this deployment will accept (037).
+	//
+	// AFTER Connect, because it writes rows. Fatal on a half-configured client
+	// for the same reason configureIdentityProviders is: a deployment that
+	// named a client and forgot its redirect URI would look healthy and fail
+	// the first customer who tried to connect.
+	if err := configureOAuthClients(); err != nil {
+		log.Fatalf("OAuth clients: %v", err)
+	}
+
 	// Create the first operator, if this system has none and the environment
 	// says who it should be.
 	//

@@ -4394,6 +4394,7 @@ Writes are charged to the same credential and company allowances as reads
   "id": "5120e7c4-…",
   "name": "Site A",
   "address": "14 Marina Road",
+  "country": "NG",
   "timezone": "Africa/Lagos",
   "active": true,
   "terminal_count": 3,
@@ -4406,12 +4407,13 @@ Writes are charged to the same credential and company allowances as reads
 | `id` | string (UUID) | the public identifier; the path parameter |
 | `name` | string | |
 | `address` | string | **always present**; `""` when the site has none |
+| `country` | string | ISO 3166-1 alpha-2, upper case. **Always present**; `""` for a site created in the console, which does not ask for one |
 | `timezone` | string | IANA name; where the hardware stands |
-| `active` | bool | |
+| `active` | bool | `false` stops the site's terminals authenticating. Reversible, and **not** retirement |
 | `terminal_count` | integer | live (non-retired) terminals at the site |
 | `created_at` | timestamp | |
 
-**These seven fields are the whole object.** No `api_key` — the provisioning
+**These eight fields are the whole object.** No `api_key` — the provisioning
 secret is never selected for any public route. **No `offline_policy` and no
 `offline_grace_minutes`** in this version: they are a safety setting owned by
 the operator ([section 6](#6-site-settings)) and are not part of the public
@@ -4420,10 +4422,17 @@ site object.
 **Site restriction.** A credential is issued either for every site in its
 company or for a named set:
 
-| Credential | `GET /sites` | `GET /sites/{id}` |
+| Credential | `GET /sites` | `GET`/`PATCH /sites/{id}` |
 |---|---|---|
 | unrestricted | every live site in the company | any of them |
 | restricted to a set | **only the sites in the set** | a site in the set → the object; a site in the company but **outside the set → `403 site_not_permitted`**; a site in another company → `404 resource_not_found` |
+
+`POST /sites` is **refused** to a restricted credential with
+`403 site_not_permitted`. A restriction can only name sites that already exist,
+so there is no "add the location I was narrowed for" case; and a credential that
+could create a site it would then be unable to read or change is a capability
+nobody chose. **Creating is a company-wide act**, and a credential scoped away
+from company-wide reach does not have it.
 
 The list is **not paginated** and carries no envelope fields beyond `data`:
 
@@ -4453,6 +4462,7 @@ curl http://localhost:8080/api/public/v1/sites \
       "id": "3e2550b2-d1cd-4d0a-915d-dd79c68120e5",
       "name": "Abuja Studio",
       "address": "",
+      "country": "NG",
       "timezone": "Africa/Lagos",
       "active": true,
       "terminal_count": 0,
@@ -4462,6 +4472,7 @@ curl http://localhost:8080/api/public/v1/sites \
       "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
       "name": "Lagos Depot",
       "address": "14 Marina Road",
+      "country": "NG",
       "timezone": "Africa/Lagos",
       "active": true,
       "terminal_count": 0,
@@ -4481,6 +4492,7 @@ The same request with a credential restricted to one site:
       "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
       "name": "Lagos Depot",
       "address": "14 Marina Road",
+      "country": "NG",
       "timezone": "Africa/Lagos",
       "active": true,
       "terminal_count": 0,
@@ -4511,6 +4523,7 @@ curl http://localhost:8080/api/public/v1/sites/46e57753-0143-481a-83f6-e93a36cfb
   "id": "46e57753-0143-481a-83f6-e93a36cfb9a7",
   "name": "Lagos Depot",
   "address": "14 Marina Road",
+  "country": "NG",
   "timezone": "Africa/Lagos",
   "active": true,
   "terminal_count": 0,
@@ -4533,6 +4546,100 @@ The restricted credential asking for the site it was not issued for:
 }
 ```
 → `403`
+
+#### `POST /api/public/v1/sites`
+
+Credential scope `sites:write`. Creates a site in the credential's company and
+returns the site object → `201`.
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | ≤ 100 characters, unique among the company's live sites (case-insensitively) |
+| `country` | yes | ISO 3166-1 alpha-2. Case-insensitive on the way in, stored upper case |
+| `timezone` | yes | IANA zone name. An offset (`+01:00`) is a zone at one moment in the year, not a zone, and is refused; so is `Local` |
+| `address` | no | free text |
+| `active` | **refused** | a new site is always active. Sending the field is `400 invalid_field`, not a silent drop |
+
+`country` and `timezone` are required here and optional in the console. That is
+deliberate rather than an inconsistency: the console has a person looking at a
+form who can fill a blank in later, and an integration creating sites unattended
+does not. A fleet of locations silently recorded as `UTC` is a schedule firing at
+the wrong hour at every door.
+
+| Error | Status | `code` |
+|---|---|---|
+| A required field is absent or blank | `400` | `missing_field` |
+| An unusable country or timezone, or `active` | `400` | `invalid_field` |
+| A field this version does not define | `400` | `unknown_field` |
+| The credential is restricted to named sites | `403` | `site_not_permitted` |
+| The name is taken by a live site in this company | `409` | `site_name_already_exists` |
+
+**Retrying an ambiguous create.** The conflict is what makes a retry safe: a
+repeated create is refused rather than quietly producing a second location. If
+your request timed out and you do not know whether it landed, **retry it**. A
+`201` means it had not; a `409 site_name_already_exists` means it had, and
+`GET /sites` gives you the site — names are unique among a company's live sites,
+so matching on the name you sent resolves it exactly.
+
+**`Idempotency-Key` is not required here, and is not honoured on a request
+authenticated with an OAuth access token** (see *Known limitations*). The
+uniqueness of the name is what makes this route retry-safe, and it does so for
+both credential classes.
+
+```bash
+curl -X POST http://localhost:8080/api/public/v1/sites \
+  -H 'Authorization: Bearer atp_live_…' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Abuja Studio","address":"3 Shehu Shagari Way","country":"NG","timezone":"Africa/Lagos"}'
+```
+
+```json
+{
+  "id": "3e2550b2-d1cd-4d0a-915d-dd79c68120e5",
+  "name": "Abuja Studio",
+  "address": "3 Shehu Shagari Way",
+  "country": "NG",
+  "timezone": "Africa/Lagos",
+  "active": true,
+  "terminal_count": 0,
+  "created_at": "2026-09-22T10:34:35.327588Z"
+}
+```
+→ `201`
+
+**No provisioning key is returned, and none exists on this tree.** The site is
+created with one — without it no terminal could ever be registered there — and it
+is shown only in the console, only once, to an operator. Nothing in the public
+API reads or rotates it.
+
+#### `PATCH /api/public/v1/sites/{site_id}`
+
+Credential scope `sites:write`, and the credential must reach the site. Partial:
+supply at least one of `name`, `address`, `country`, `timezone` or `active`, and
+anything absent keeps its value → `200` with the site object.
+
+An explicitly empty `name`, `country` or `timezone` is `400 invalid_field`, not a
+blanking: there is no such thing as a site with no name and no zone.
+
+`active: false` locks out the site key and every terminal at the site
+immediately. It is reversible and destroys nothing. **There is no `DELETE`:**
+retiring a site soft-deletes every terminal at it and stops those doors opening
+by fingerprint, which is a decision for a person in the console
+([section 6](#6-site-settings)).
+
+| Error | Status | `code` |
+|---|---|---|
+| Not in this company, retired, or malformed | `404` | `resource_not_found` |
+| In this company but outside the credential's site restriction | `403` | `site_not_permitted` |
+| An empty or unusable field, or nothing to change | `400` | `invalid_field` |
+| The name is taken by another live site | `409` | `site_name_already_exists` |
+
+```bash
+curl -X PATCH http://localhost:8080/api/public/v1/sites/3e2550b2-d1cd-4d0a-915d-dd79c68120e5 \
+  -H 'Authorization: Bearer atp_live_…' \
+  -H 'Content-Type: application/json' \
+  -d '{"active":false}'
+```
 
 ### Access
 
@@ -4733,10 +4840,118 @@ curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
 ```
 → `400`
 
+### Connect — OAuth 2.0 for a third-party product
+
+**Auth: none.** These four routes are how a caller *obtains* a credential, so
+requiring one would be a loop.
+
+An integration credential is minted by an administrator in the console and
+pasted into somebody else's system. That is right for a customer's own tooling
+and wrong for a product a customer connects from the other side: the other
+product cannot ask every customer to open a console and copy a secret, and it
+must never hold a credential the customer cannot withdraw without our help.
+
+So the second way a bearer token comes to exist is a consent screen. The customer
+is sent to AccessLink from the other product, signs in if they are not already,
+sees exactly what is being asked for, and allows it. **Nothing in the flow
+requires the console**: the pages are served by the API.
+
+**The flow is authorization code with PKCE (S256). `plain` is not accepted and
+the implicit flow does not exist here.**
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/public/v1/oauth/authorize` | the sign-in and consent pages |
+| `POST` | `/api/public/v1/oauth/authorize` | the browser's form submission; an application never calls it |
+| `POST` | `/api/public/v1/oauth/token` | `authorization_code` and `refresh_token` grants |
+| `POST` | `/api/public/v1/oauth/revoke` | RFC 7009 |
+
+**Clients are configured, never registered.** There is no registration endpoint:
+one would let anybody allow-list a redirect address of their choosing, and the
+allow-listed redirect address is the whole of the defence an authorization-code
+flow has. A client exists because the deployment's environment says so
+(`OAUTH_DATAVASE_*`), with an exact list of redirect URIs and a ceiling on the
+scopes it may ever hold.
+
+**A grant's ceiling is narrower than a credential's.** In this version an OAuth
+client may be configured only for `sites:read` and `sites:write`; any other
+registered scope is refused at configuration, before the server starts. That is
+a phase boundary with work behind it rather than a style rule — a grant has no
+row to key an `Idempotency-Key` against and does not appear in the per-key usage
+report, and `members:write` is a route whose retry safety depends on the first
+of those. See *Known limitations*.
+
+**Where a failure is reported.** Until the `client_id` **and** the
+`redirect_uri` have both been checked against configuration, nothing is
+redirected anywhere — a server that reported "unknown client" by redirecting to
+the address the request supplied would be an open redirector. Those two
+failures render a page. Every other failure returns the customer to the
+**verified** address with `error`, `error_description` and their `state`.
+
+**What a consent can grant.** The intersection of three bounds, each of which can
+only narrow:
+
+| Bound | Meaning |
+|---|---|
+| the request | what the client asked for; absent means the client's whole configured set |
+| the client | the ceiling in the deployment's configuration |
+| the operator | the scope registry's `MinRole`. `sites:write` needs `ADMIN`, exactly as `POST /console/sites` does |
+
+An operator whose role cannot grant what was asked is told so plainly and told
+who can. The client learns only that the request was declined; which roles a
+customer's staff hold is the customer's business.
+
+**A grant inherits its owner's reach, continuously.** The site restriction on a
+token is not frozen at consent — it is resolved on every request from the
+consenting operator's *current* site grants, by the same rule
+`RequireSiteGrant` applies to that operator. Narrowing an operator narrows every
+grant they made, immediately. Deactivating them, or their company, ends those
+grants with no further action.
+
+**Tokens.** `ato_live_…` access tokens last an hour. `atr_live_…` refresh
+tokens **rotate**: every refresh returns a new one and retires the one presented.
+A retired refresh token presented again means two parties hold tokens from one
+chain and the server cannot tell which is the thief, so **the whole connection is
+revoked** and the customer must reconnect. A client must therefore store the new
+refresh token before using it, and must not retry a refresh with the old token
+after a timeout.
+
+An authorization code is single-use and lives two minutes. Presenting one twice
+revokes whatever the first exchange produced, for the same reason.
+
+**Error shape.** These four routes answer in RFC 6749 section 5.2's shape —
+`{"error": "invalid_grant", "error_description": "…"}` — because that is what
+client libraries parse. **Every other route in this section keeps the AccessLink
+envelope.** The boundary is exactly the `/oauth/` prefix.
+
+```json
+{
+  "error": "invalid_grant",
+  "error_description": "That authorization code is not valid."
+}
+```
+
+**What is never in a log, an audit record or an error body:** the authorization
+code, either token, the PKCE verifier, the client secret. What is recorded
+instead: the client id, the company, the consenting operator, the granted
+scopes, the access token's public id and the refresh family id — enough to
+answer every question an incident review asks, and nothing a reader of the trail
+could present as a credential.
+
+Five audit actions, because they are asked about separately:
+`OAUTH_CONSENT_GRANTED`, `OAUTH_CONSENT_DENIED`, `OAUTH_TOKEN_ISSUED`,
+`OAUTH_TOKEN_REFRESHED`, `OAUTH_GRANT_REVOKED`. Consent and issuance are separate
+records because they have different actors — a human grants, and the client
+exchanges minutes later with no human present.
+
 ### Endpoints in this version
 
 | Method | Path | Credential scope |
 |---|---|---|
+| `GET` | `/api/public/v1/oauth/authorize` | — (no credential) |
+| `POST` | `/api/public/v1/oauth/authorize` | — (browser form) |
+| `POST` | `/api/public/v1/oauth/token` | — (client authentication) |
+| `POST` | `/api/public/v1/oauth/revoke` | — (client authentication) |
 | `GET` | `/api/public/v1/members` | `members:read` |
 | `GET` | `/api/public/v1/members/{member_id}` | `members:read` |
 | `POST` | `/api/public/v1/members` | `members:write` |
@@ -4745,10 +4960,18 @@ curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
 | `GET` | `/api/public/v1/members/{member_id}/access` | `access:read` |
 | `GET` | `/api/public/v1/sites` | `sites:read` |
 | `GET` | `/api/public/v1/sites/{site_id}` | `sites:read` |
+| `POST` | `/api/public/v1/sites` | `sites:write` |
+| `PATCH` | `/api/public/v1/sites/{site_id}` | `sites:write` |
 | `GET` | `/api/public/v1/events` | `events:read` |
 
-`members:write` implies `members:read`; a credential issued with the former
-carries both. Terminals and webhooks have credential scopes but no contract
+**Either credential class reaches the scoped routes.** An integration credential
+(`atp_`) and an OAuth access token (`ato_`) are resolved to the same tenant
+context by the same middleware and are indistinguishable to every handler and
+every scope gate: one authorization model, two ways to be issued a credential
+for it.
+
+`members:write` implies `members:read` and `sites:write` implies `sites:read`; a
+credential issued with the former carries both. Terminals and webhooks have credential scopes but no contract
 yet; a route for either is added to this section before it is served, never
 after. There is no route that unlocks a door, commands a terminal, or touches
 biometric material, and none is planned for this tree.
@@ -4761,6 +4984,22 @@ Behaviour a client must design around today. This list is maintained against the
 code, not against intent — an item is removed only when a test that would catch
 its return exists and passes.
 
+1. **An OAuth grant does not carry `Idempotency-Key` or per-key usage.**
+   `idempotency_records.credential_id` and `api_usage_daily.credential_id` are
+   foreign keys into `api_credentials`, and a grant has no row there. An
+   `Idempotency-Key` sent with an `ato_` token is accepted and ignored, and a
+   grant's traffic does not appear in
+   `GET /console/api-credentials/{id}/usage`.
+
+   **This changes no outcome for the routes a grant can reach**, which is why it
+   is a limitation rather than a defect: `POST /sites` is made retry-safe by the
+   unique site name (retry it — `409 site_name_already_exists` means the first
+   attempt landed) and `PATCH` is idempotent by construction. It would matter for
+   a route whose replay can only be made safe by a stored response, so
+   [section 18](#18-public-api-v1) refuses to configure an OAuth client for one:
+   `members:write` is not grantable through a consent screen in this version.
+   Lifting that is a migration on `idempotency_records`, and it belongs with the
+   phase that needs it.
 1. **The legacy `GET /access/{member_id}` still ignores permissions.** It tests
    membership status only. It is retained for deployed tooling and is
    **deprecated**: the authorization engine is reached through

@@ -403,12 +403,22 @@ func (c Config) Tasks() []Task {
 			if err != nil {
 				return "", err
 			}
-			if buckets == 0 && records == 0 && usage == 0 {
+			// The OAuth sweep (037). Also not load-bearing: every check on
+			// the token and code paths already refuses an expired row, and
+			// the sweep keeps a week of consumed codes and rotated tokens
+			// precisely because they are the evidence a replay is detected
+			// from. See database.PurgeExpiredOAuthGrants.
+			grants, err := database.PurgeExpiredOAuthGrants(ctx)
+			if err != nil {
+				return "", err
+			}
+			if buckets == 0 && records == 0 && usage == 0 && grants == 0 {
 				return "", nil
 			}
 			return fmt.Sprintf(
-				"pruned %d idle rate bucket(s), %d idempotency record(s), %d usage row(s)",
-				buckets, records, usage), nil
+				"pruned %d idle rate bucket(s), %d idempotency record(s), %d usage row(s), "+
+					"%d expired oauth row(s)",
+				buckets, records, usage, grants), nil
 		},
 	})
 

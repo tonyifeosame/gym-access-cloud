@@ -219,7 +219,13 @@ func PublicAPILimiter(environment string) gin.HandlerFunc {
 		}
 
 		// Authenticated. The credential's bucket first, then the company's.
-		credKey := strconv.FormatInt(tc.CredentialID(), 10)
+		//
+		// THE PER-CALLER SUBJECT COMES FROM THE CONTEXT, not from a row id, so
+		// an OAuth grant is bucketed too. See TenantContext.RateSubject: an
+		// integration credential is its row id and a grant is keyed on client
+		// and company, because a token is replaced on every refresh and a
+		// per-token bucket could be reset by the party it limits.
+		credKey := tc.RateSubject()
 		companyKey := strconv.FormatInt(tc.CompanyID(), 10)
 
 		decision, err := byCredential.decide(c, RateSubjectCredential, credKey)
@@ -229,7 +235,7 @@ func PublicAPILimiter(environment string) gin.HandlerFunc {
 			return
 		}
 		if !decision.Allowed {
-			database.NoteAPICredentialUse(tc.CredentialID(), c.ClientIP(), RateClassRead, time.Now(), true)
+			noteCredentialUse(tc, c.ClientIP(), true)
 			refusePublicForRate(c, decision.RetryAfter, byCredential.limiter)
 			return
 		}
@@ -240,7 +246,7 @@ func PublicAPILimiter(environment string) gin.HandlerFunc {
 			return
 		}
 		if !companyDecision.Allowed {
-			database.NoteAPICredentialUse(tc.CredentialID(), c.ClientIP(), RateClassRead, time.Now(), true)
+			noteCredentialUse(tc, c.ClientIP(), true)
 			// The credential's token was spent; the headers still describe the
 			// credential's bucket, which is what the caller can act on.
 			setRateHeaders(c, byCredential.limiter, decision.Remaining)
@@ -249,12 +255,35 @@ func PublicAPILimiter(environment string) gin.HandlerFunc {
 		}
 
 		setRateHeaders(c, byCredential.limiter, decision.Remaining)
-		database.NoteAPICredentialUse(tc.CredentialID(), c.ClientIP(), RateClassRead, time.Now(), false)
+		noteCredentialUse(tc, c.ClientIP(), false)
 
 		c.Set(ContextTenant, tc)
-		c.Set(ContextAuthActor, ActorIntegration)
+		c.Set(ContextAuthActor, actorFor(tc))
 		c.Next()
 	}
+}
+
+// noteCredentialUse records a request against the per-key usage rollup.
+//
+// ONLY FOR AN INTEGRATION CREDENTIAL. api_usage_daily.credential_id is a
+// foreign key into api_credentials, so there is no row an OAuth grant could be
+// counted against, and inventing one would mean a second table to answer a
+// question nothing asks yet. The console's "is this key still in use" report is
+// about keys; a grant's equivalent is its own work and is recorded as a known
+// limitation rather than half-built here.
+func noteCredentialUse(tc *service.TenantContext, ip string, refused bool) {
+	if tc.CredentialID() == 0 {
+		return
+	}
+	database.NoteAPICredentialUse(tc.CredentialID(), ip, RateClassRead, time.Now(), refused)
+}
+
+// actorFor labels the request log with which credential class authenticated.
+func actorFor(tc *service.TenantContext) string {
+	if tc.Principal() == service.PrincipalOAuth {
+		return ActorOAuthGrant
+	}
+	return ActorIntegration
 }
 
 // setRateHeaders emits the IETF RateLimit header fields for a bucket.

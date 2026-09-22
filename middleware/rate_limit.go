@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"access-terminal-cloud-api/database"
+	"access-terminal-cloud-api/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -139,6 +140,10 @@ const (
 	// a request indefinitely is a worse availability problem than the one it
 	// was added to solve.
 	rateStoreTimeout = 2 * time.Second
+
+	// The /oauth tree's own allowance. See OAuthRateLimitPerMinute.
+	defaultOAuthRateLimitPerMinute = 240
+	defaultOAuthRateBurst          = 60
 )
 
 // Bucket subject kinds, as stored in api_rate_buckets.subject_type.
@@ -159,6 +164,14 @@ const (
 	RateClassAdopt         = "adopt"
 	RateClassAssistant     = "assistant"
 	RateClassAssistantOK   = "assistant_ok"
+
+	// RateClassOAuth is the authorization server's endpoints (037). ITS OWN
+	// CLASS rather than sharing login's, for exactly the argument the claim
+	// class already makes: a third-party client retrying a token exchange in a
+	// loop must not exhaust the allowance an operator needs to sign in, and an
+	// attacker hammering the console's login must not stop customers connecting
+	// an integration.
+	RateClassOAuth = "oauth"
 )
 
 // RateStore decides whether a subject may spend a token.
@@ -445,6 +458,48 @@ func LoginRateLimiter() gin.HandlerFunc {
 	return mount(newLimiter(RateClassLogin, LoginRateLimitPerMinute(), true, addressSubject))
 }
 
+// SpendLoginAttempt charges one token against the shared LOGIN allowance for
+// this request's client address, reporting whether the attempt may proceed.
+//
+// EXPORTED FOR THE ONE PASSWORD FORM THAT IS NOT A ROUTE OF ITS OWN: the OAuth
+// consent page's sign-in (handlers/oauth.go). Every other credential surface
+// has LoginRateLimiter mounted in front of it, and that limiter is ONE shared
+// allowance precisely so an attacker cannot get a second budget by alternating
+// between login, registration, password change and the handover routes. The
+// consent page's sign-in is another such surface, so it draws on the same
+// bucket rather than on the /oauth tree's own -- otherwise connecting an
+// integration would have doubled the password attempts one address gets.
+//
+// A HANDLER RATHER THAN MIDDLEWARE, because the route it sits on also carries
+// the consent submission, and charging a login token for somebody pressing
+// "Allow" would spend a security budget on an action that presents no
+// credential.
+//
+// FAIL CLOSED. A store that cannot answer reports not-allowed, exactly as every
+// other limiter here does: no password attempt is served unlimited because the
+// limiter was down.
+func SpendLoginAttempt(c *gin.Context) bool {
+	loginAttemptOnce.Do(func() {
+		loginAttempts = newLimiter(RateClassLogin, LoginRateLimitPerMinute(), true, addressSubject)
+	})
+	kind, key := loginAttempts.subject(c)
+	if key == "" {
+		return true
+	}
+	decision, err := loginAttempts.decideFor(c, kind, key)
+	if err != nil {
+		log.Printf("request_id=%s error op=\"rate limit\" class=%s: %v",
+			RequestID(c), loginAttempts.class, err)
+		return false
+	}
+	return decision.Allowed
+}
+
+var (
+	loginAttemptOnce sync.Once
+	loginAttempts    *limiter
+)
+
 // ClaimRateLimiter limits claim-code redemption per client address.
 //
 // ITS OWN CLASS, never shared with login, and the reason the route already
@@ -453,6 +508,97 @@ func LoginRateLimiter() gin.HandlerFunc {
 // hammering login must not lock out a commissioning engineer.
 func ClaimRateLimiter() gin.HandlerFunc {
 	return mount(newLimiter(RateClassClaim, LoginRateLimitPerMinute(), true, addressSubject))
+}
+
+// OAuthRateLimitPerMinute is the sustained allowance for the /oauth tree, and
+// OAuthRateBurst its capacity.
+//
+// GENEROUS, AND DELIBERATELY NOT THE LOGIN ALLOWANCE. This bucket gates page
+// renders, token exchanges and refreshes -- steady-state traffic that grows
+// with the number of connected customers, since every grant refreshes about
+// once an hour. THE PASSWORD ATTEMPTS ON THE CONSENT PAGE ARE NOT BOUNDED BY
+// IT: those spend the shared LOGIN allowance (see SpendLoginAttempt), so this
+// one does not have to be tight to be safe.
+//
+// WHAT THIS IS ON A DEPLOYMENT THAT TRUSTS NO PROXY. With TRUSTED_PROXIES=none
+// -- the Render service -- ClientIP is the platform's proxy for every request,
+// so this is ONE service-wide cap rather than per-source fairness. That is the
+// same limitation docs/operations.md already records for the credential
+// endpoints and the public authentication-failure bucket, and it is why the
+// number is a few hundred rather than a few dozen: at the login allowance of
+// ten a minute, three customers connecting at once would have exhausted the
+// whole deployment's connect flow.
+func OAuthRateLimitPerMinute() int {
+	return envRateLimit("OAUTH_RATE_LIMIT_PER_MINUTE", defaultOAuthRateLimitPerMinute)
+}
+
+// OAuthRateBurst is the bucket's capacity.
+func OAuthRateBurst() int {
+	return envRateLimit("OAUTH_RATE_BURST", defaultOAuthRateBurst)
+}
+
+// OAuthRateLimiter limits the authorization server's endpoints per client
+// address.
+//
+// ONE LIMITER OVER THE WHOLE /oauth TREE: the consent page, the sign-in it
+// contains, the token exchange and the revocation all draw on it. That is
+// deliberate -- they are one flow, and an attacker who could get a fresh
+// allowance by moving between them would have no limit at all.
+//
+// IT IS NOT THE DEFENCE ON THE PASSWORD FORM, and must not be read as one.
+// The consent page's sign-in spends the shared LOGIN allowance
+// (SpendLoginAttempt) and is bounded per account by the lockout in
+// database.AuthenticatePassword, exactly as the console's login route is. This
+// bounds request volume from one source, and nothing else.
+//
+// SHARED STORE, because a per-instance allowance on the endpoint that mints
+// bearer tokens would multiply with the instance count.
+//
+// IT ANSWERS IN THE PROTOCOL'S SHAPE rather than the console's, which is why it
+// is written out here over decideFor instead of reusing mount(). A client
+// library parsing RFC 6749 section 5.2 expects `error` to be a string; handing
+// it the console's {"error": "Too many attempts…"} would be read as an OAuth
+// error code that does not exist. The public API limiter makes the same move
+// for the same reason.
+func OAuthRateLimiter() gin.HandlerFunc {
+	l := newLimiter(RateClassOAuth, OAuthRateLimitPerMinute(), true, addressSubject)
+	l.burst = float64(OAuthRateBurst())
+	return func(c *gin.Context) {
+		kind, key := l.subject(c)
+		decision, err := l.decideFor(c, kind, key)
+		if err != nil {
+			// FAIL CLOSED, as every other limiter here does: a store that
+			// cannot answer is a 503 with Retry-After, never an unlimited
+			// request.
+			log.Printf("request_id=%s error op=\"rate limit\" class=%s: %v",
+				RequestID(c), l.class, err)
+			writeOAuthRateError(c, http.StatusServiceUnavailable,
+				models.OAuthErrTemporarilyUnavailable, 5)
+			return
+		}
+		if !decision.Allowed {
+			seconds := int(decision.RetryAfter.Seconds())
+			if seconds < 1 {
+				seconds = 1
+			}
+			writeOAuthRateError(c, http.StatusTooManyRequests,
+				models.OAuthErrTemporarilyUnavailable, seconds)
+			return
+		}
+		c.Next()
+	}
+}
+
+// writeOAuthRateError answers an authorization-server refusal in RFC 6749's
+// shape. The description is fixed text: it carries no token, no client id and
+// nothing about who else has been asking.
+func writeOAuthRateError(c *gin.Context, status int, code string, retryAfter int) {
+	c.Header("Retry-After", strconv.Itoa(retryAfter))
+	c.Header("Cache-Control", "no-store")
+	c.AbortWithStatusJSON(status, models.OAuthErrorBody{
+		Error:       code,
+		Description: "Too many requests. Please wait before trying again.",
+	})
 }
 
 // PlatformLoginRateLimiter limits platform administrator sign-in.

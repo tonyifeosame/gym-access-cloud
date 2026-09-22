@@ -187,7 +187,11 @@ for (const fence of fences) {
     if (!pathMatches(target.path, url.pathname)) fail(`${where}: path ${url.pathname} does not match ${target.path}`)
     const documented = new Set((target.op.parameters ?? []).concat(target.item.parameters ?? []).filter((p) => p.in === 'query').map((p) => p.name))
     for (const q of url.searchParams.keys()) if (!documented.has(q)) fail(`${where}: query parameter ${q} is not documented`)
-    if (target.path.startsWith('/api/public/')) {
+    // The authorization server's routes are how a caller obtains a credential,
+    // so an example for one carries no API key -- and must not, or the example
+    // would be teaching the wrong thing. Everything else on the public tree
+    // carries the placeholder, never a real key.
+    if (target.path.startsWith('/api/public/') && !target.path.startsWith('/api/public/v1/oauth/')) {
       if (req.headers.authorization !== `Bearer ${KEY_PLACEHOLDER}`) fail(`${where}: Authorization must be "Bearer ${KEY_PLACEHOLDER}"`)
     }
     for (const value of Object.values(req.headers)) {

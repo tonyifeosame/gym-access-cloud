@@ -1,6 +1,8 @@
 package service
 
 import (
+	"strconv"
+
 	"access-terminal-cloud-api/models"
 )
 
@@ -24,15 +26,57 @@ import (
 // The identity struct itself is public and any test can build one -- that is
 // the seam the service tests use. What the design closes is the path from a
 // REQUEST to a tenant: it runs through the credential store and nowhere else.
+//
+// ---------------------------------------------------------------------------
+// TWO WAYS TO BE AUTHENTICATED, ONE CONTEXT
+// ---------------------------------------------------------------------------
+//
+// Since 037 a public request may arrive with an INTEGRATION CREDENTIAL (atp_,
+// issued by an administrator in the console) or with an OAUTH ACCESS TOKEN
+// (ato_, granted by an operator to a configured client). Both are authenticated
+// bearer credentials belonging to one company with one scope set, so both
+// produce the same context and every service method downstream is unchanged.
+//
+// WHAT THE PRINCIPAL KIND IS FOR, AND WHAT IT IS NOT FOR. It is for the two
+// places the difference is real: an audit record has to say which kind of thing
+// acted, and the idempotency store keys on api_credentials.id and therefore has
+// no row for a token. NO AUTHORIZATION DECISION READS IT. A handler that
+// branched on the principal would be two authorization models wearing one type,
+// which is the thing this file exists to prevent.
 type TenantContext struct {
-	companyID    int64
+	companyID int64
+
+	// principal names which credential class authenticated. Exactly one of
+	// credentialID and tokenID is non-zero.
+	principal    string
 	credentialID int64
-	keyPrefix    string
-	environment  string
-	scopes       []string
-	siteIDs      []int64
-	requestID    string
+	tokenID      int64
+
+	// ownerUserID is the operator who granted an OAuth token, and 0 for an
+	// integration credential. Carried so an audit row can name the human
+	// behind a machine request.
+	ownerUserID    int64
+	ownerUserEmail string
+
+	// clientRowID is the OAuth client, and 0 for an integration credential. It
+	// is the per-caller rate bucket's subject; see RateSubject.
+	clientRowID int64
+
+	keyPrefix   string
+	environment string
+	scopes      []string
+	siteIDs     []int64
+	requestID   string
 }
+
+// Principal kinds.
+const (
+	// PrincipalCredential is an integration credential issued in the console.
+	PrincipalCredential = "credential"
+
+	// PrincipalOAuth is an access token granted through the OAuth flow.
+	PrincipalOAuth = "oauth"
+)
 
 // FromCredential builds the context an authenticated public request runs as.
 //
@@ -45,6 +89,7 @@ func FromCredential(identity *models.APICredentialIdentity, requestID string) *T
 	}
 	return &TenantContext{
 		companyID:    identity.CompanyID,
+		principal:    PrincipalCredential,
 		credentialID: identity.ID,
 		keyPrefix:    identity.KeyPrefix,
 		environment:  identity.Environment,
@@ -54,12 +99,90 @@ func FromCredential(identity *models.APICredentialIdentity, requestID string) *T
 	}
 }
 
+// FromOAuthGrant builds the context an OAuth-authenticated request runs as.
+//
+// The counterpart to FromCredential, and it is a SECOND CONSTRUCTOR rather than
+// a widened first one so that neither path can be reached with half an identity
+// from the other. Both take an identity the database produced from a stored
+// hash; neither takes anything a request could set.
+//
+// KeyPrefix carries the CLIENT IDENTIFIER here ("datavase"), where the
+// credential path carries the key prefix. Both are non-secret display forms of
+// "which credential did this", which is what every log line and audit row
+// downstream wants from it -- so those call sites stay unchanged and keep
+// working for both.
+func FromOAuthGrant(identity *models.OAuthTokenIdentity, requestID string) *TenantContext {
+	if identity == nil {
+		return nil
+	}
+	return &TenantContext{
+		companyID:      identity.CompanyID,
+		principal:      PrincipalOAuth,
+		tokenID:        identity.ID,
+		ownerUserID:    identity.UserID,
+		ownerUserEmail: identity.UserEmail,
+		clientRowID:    identity.ClientRowID,
+		keyPrefix:      identity.ClientID,
+		environment:    identity.Environment,
+		scopes:         append([]string(nil), identity.Scopes...),
+		siteIDs:        append([]int64(nil), identity.SiteIDs...),
+		requestID:      requestID,
+	}
+}
+
 // CompanyID is the tenant. It is read by the service layer to open a scoped
 // transaction and by nothing above it.
 func (t *TenantContext) CompanyID() int64 { return t.companyID }
 
-// CredentialID identifies the credential for usage accounting and idempotency.
+// CredentialID identifies the integration credential for usage accounting and
+// idempotency.
+//
+// ZERO FOR AN OAUTH GRANT, and callers must treat zero as "there is no
+// api_credentials row here" rather than as a tenant. Both
+// api_usage_daily.credential_id and idempotency_records.credential_id are
+// foreign keys into that table, so an OAuth request has nothing to write there
+// -- IdempotencyMiddleware already passes through on a zero and that is the
+// correct behaviour, not an oversight.
 func (t *TenantContext) CredentialID() int64 { return t.credentialID }
+
+// Principal reports which credential class authenticated: PrincipalCredential
+// or PrincipalOAuth. For audit records and log lines only; no authorization
+// decision reads it.
+func (t *TenantContext) Principal() string { return t.principal }
+
+// TokenID identifies the OAuth access token, or 0 for an integration
+// credential.
+func (t *TenantContext) TokenID() int64 { return t.tokenID }
+
+// OwnerUserID is the operator who granted an OAuth token, or 0.
+func (t *TenantContext) OwnerUserID() int64 { return t.ownerUserID }
+
+// OwnerUserEmail is that operator's address, or "". It names the human behind a
+// machine request in the audit trail.
+func (t *TenantContext) OwnerUserEmail() string { return t.ownerUserEmail }
+
+// RateSubject is the identity a per-caller rate-limit bucket is kept under.
+//
+// An integration credential is its row id, as it always was. An OAuth grant is
+// keyed on the CLIENT AND COMPANY rather than the token, because a token is
+// replaced on every refresh -- a per-token bucket would hand a client a fresh
+// full allowance whenever it chose to refresh, which is a limit that can be
+// reset by the party it limits.
+//
+// BOTH ROW IDS, NOT THE CLIENT'S NAME. api_rate_buckets.subject_key is capped
+// at 64 characters and a client_id may be 64 on its own, so keying on the name
+// would be a length the database refuses -- as a 503 on every request, on the
+// day somebody configured a long client id.
+//
+// The two key spaces cannot collide: one is decimal digits, the other is
+// prefixed. The same shape the adopt limiter already uses for "session:<id>".
+func (t *TenantContext) RateSubject() string {
+	if t.principal == PrincipalOAuth {
+		return "oauth:" + strconv.FormatInt(t.clientRowID, 10) +
+			":" + strconv.FormatInt(t.companyID, 10)
+	}
+	return strconv.FormatInt(t.credentialID, 10)
+}
 
 // KeyPrefix is the non-secret display form, for log lines and audit rows.
 func (t *TenantContext) KeyPrefix() string { return t.keyPrefix }

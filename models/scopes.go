@@ -18,10 +18,11 @@ import (
 // means a new scope has to be added to every list, and the one that gets
 // forgotten is a silent authorization hole.
 //
-// The set is CLOSED in two places on purpose. Here, so Go refuses to grant one
-// it does not know; and in migrations/030 as a CHECK, so the database refuses to
-// store one. Adding a scope is therefore a code change and a migration, which is
-// correct: it is a change to what a credential can do.
+// The set is CLOSED in more than one place on purpose. Here, so Go refuses to
+// grant one it does not know; and as CHECK constraints -- migrations/030 for
+// api_credentials, migrations/037 for the OAuth clients and grants -- so the
+// database refuses to store one. Adding a scope is therefore a code change and a
+// migration, which is correct: it is a change to what a credential can do.
 //
 // ---------------------------------------------------------------------------
 // IMPLICATION IS EXPANDED AT ISSUE TIME, NOT AT CHECK TIME
@@ -55,6 +56,7 @@ const (
 	ScopeMembersRead    = "members:read"
 	ScopeMembersWrite   = "members:write"
 	ScopeSitesRead      = "sites:read"
+	ScopeSitesWrite     = "sites:write"
 	ScopeTerminalsRead  = "terminals:read"
 	ScopeEventsRead     = "events:read"
 	ScopeAccessRead     = "access:read"
@@ -120,6 +122,27 @@ var Scopes = map[string]ScopeSpec{
 		Write:            false,
 		SiteRestrictable: true,
 		Description:      "Read your sites.",
+	},
+	// MinRole ADMIN, matching POST /console/sites exactly. Creating a site is
+	// an ADMIN decision in the console, and a scope that let a MANAGER grant
+	// away something they cannot do themselves would be a privilege escalation
+	// with an OAuth consent screen in front of it.
+	//
+	// SiteRestrictable TRUE, AND IT BITES HARDER THAN THE READ SCOPES DO. A
+	// credential narrowed to named sites may update THOSE sites and may not
+	// create new ones: a restriction can only name sites that already exist, so
+	// there is no "add the location I was narrowed for" case, and a credential
+	// that could create a site it would then be unable to read or change is a
+	// capability nobody chose. Creating is a company-wide act and is refused to
+	// a credential scoped away from company-wide reach -- see
+	// service.SiteService.Create.
+	ScopeSitesWrite: {
+		Name:             ScopeSitesWrite,
+		Implies:          []string{ScopeSitesRead},
+		MinRole:          RoleAdmin,
+		Write:            true,
+		SiteRestrictable: true,
+		Description:      "Create sites and change their details.",
 	},
 	ScopeTerminalsRead: {
 		Name:             ScopeTerminalsRead,

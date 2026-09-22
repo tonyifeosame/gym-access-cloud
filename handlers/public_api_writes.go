@@ -119,13 +119,32 @@ func bodyError(err error) error {
 }
 
 // recordIntegrationAudit writes an audit row for a public write.
+//
+// TWO PRINCIPALS REACH THIS FUNCTION SINCE 037 and it must name them
+// differently, because "an administrator issued a key and something is using
+// it" and "an operator connected a third-party product" are different facts
+// about how a company's data is being changed.
+//
+//	credential   role INTEGRATION, actor the key's non-secret prefix.
+//	oauth        role OAUTH_CLIENT, actor the client id, and the CONSENTING
+//	             OPERATOR named in `changes` -- there is no human on the
+//	             request, but there is a human who authorised it, and an
+//	             administrator reviewing the trail needs to know who.
+//
+// tc.KeyPrefix() carries the right non-secret display form for both, so the
+// shape of the record does not change.
 func recordIntegrationAudit(c *gin.Context, tc *service.TenantContext, action, targetType,
 	targetPublicID, label string, changes gin.H) {
+
+	actorRole := actorRoleIntegration
+	if tc.Principal() == service.PrincipalOAuth {
+		actorRole = actorRoleOAuthClient
+	}
 
 	entry := database.AuditEntry{
 		CompanyID:      tc.CompanyID(),
 		ActorEmail:     tc.KeyPrefix(),
-		ActorRole:      actorRoleIntegration,
+		ActorRole:      actorRole,
 		IPAddress:      c.ClientIP(),
 		UserAgent:      c.Request.UserAgent(),
 		RequestID:      middleware.RequestID(c),
@@ -137,8 +156,17 @@ func recordIntegrationAudit(c *gin.Context, tc *service.TenantContext, action, t
 	if changes == nil {
 		changes = gin.H{}
 	}
-	changes["via"] = "public_api"
-	changes["credential_key_prefix"] = tc.KeyPrefix()
+	if tc.Principal() == service.PrincipalOAuth {
+		changes["via"] = "oauth"
+		changes["oauth_client_id"] = tc.KeyPrefix()
+		// The human who granted the connection. ActorUserID is deliberately
+		// left zero: they did not make THIS request, and attributing it to
+		// them as the actor would be a trail that lies about who was present.
+		changes["granted_by"] = tc.OwnerUserEmail()
+	} else {
+		changes["via"] = "public_api"
+		changes["credential_key_prefix"] = tc.KeyPrefix()
+	}
 	entry.Changes = map[string]any(changes)
 	database.WriteAuditEvent(entry)
 }

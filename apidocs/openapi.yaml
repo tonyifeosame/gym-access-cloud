@@ -122,12 +122,141 @@ info:
     | `members:read` | reading members |
     | `members:write` | creating, updating and removing members (includes `members:read`) |
     | `access:read` | a member's access rules |
-    | `sites:read` | sites |
+    | `sites:read` | reading sites |
+    | `sites:write` | creating sites and changing their details (includes `sites:read`) |
     | `events:read` | the events trail |
 
-    **Site restriction.** A key issued for a named set of sites lists and reads only
-    those sites and only events at them; a site outside the set is
-    `403 site_not_permitted`. Members are company-wide and are not narrowed.
+    **Site restriction.** A key issued for a named set of sites lists, reads and
+    changes only those sites and only events at them; a site outside the set is
+    `403 site_not_permitted`. It **cannot create** a site either: creating is a
+    company-wide act, and a key that could create a site it would then be unable
+    to read or change is a capability nobody chose. Members are company-wide and
+    are not narrowed.
+
+    ## Connecting an application
+
+    The section above is for software a customer's own staff configure. If you are
+    building a product that *other people's* AccessLink accounts connect to, do not
+    ask them to paste a key: use **Connect**, and they authorise you in two clicks.
+
+    It is OAuth 2.0, authorization code with PKCE. You register once with
+    AccessLink and are given a `client_id`, an optional secret, and one or more
+    exact callback addresses. Nothing about the flow requires the customer to visit
+    the AccessLink console — they see an AccessLink sign-in page and a consent page,
+    and come straight back to you.
+
+    **1. Send the customer to AccessLink.** Generate a `code_verifier` (43–128
+    characters from `A–Z a–z 0–9 - . _ ~`), keep it, and send its base64url
+    SHA-256 digest as the `code_challenge`:
+
+    ```
+    https://api.accesslink.store/api/public/v1/oauth/authorize
+      ?response_type=code
+      &client_id=datavase
+      &redirect_uri=https%3A%2F%2Fapp.datavase.example%2Fintegrations%2Faccesslink%2Fcallback
+      &scope=sites%3Aread%20sites%3Awrite
+      &state=dG9rZW4tYmluZGluZy1zdGF0ZQ
+      &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+      &code_challenge_method=S256
+    ```
+
+    The `redirect_uri` is compared **exactly** against what you registered. If it
+    does not match, or the `client_id` is unknown, the customer sees an AccessLink
+    page and is returned nowhere — we will not redirect to an address we cannot
+    vouch for.
+
+    **2. Read the callback.** We return them to your address with `code` and your
+    `state`. Check the `state` matches the one you sent. A customer who declines
+    comes back as `?error=access_denied&state=…` instead.
+
+    ```
+    https://app.datavase.example/integrations/accesslink/callback
+      ?code=atc_9f2c…&state=dG9rZW4tYmluZGluZy1zdGF0ZQ
+    ```
+
+    **3. Exchange the code**, from your server, within two minutes. A code works
+    once:
+
+    ```bash
+    curl -X POST "https://api.accesslink.store/api/public/v1/oauth/token" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -u "datavase:<YOUR_CLIENT_SECRET>" \
+      --data-urlencode "grant_type=authorization_code" \
+      --data-urlencode "code=<CODE_FROM_CALLBACK>" \
+      --data-urlencode "redirect_uri=https://app.datavase.example/integrations/accesslink/callback" \
+      --data-urlencode "code_verifier=<YOUR_CODE_VERIFIER>"
+    ```
+
+    ```json
+    {
+      "access_token": "ato_live_…",
+      "token_type": "Bearer",
+      "expires_in": 3600,
+      "refresh_token": "atr_live_…",
+      "scope": "sites:read sites:write"
+    }
+    ```
+
+    **4. Call the API** with the access token, exactly as you would with a key.
+    Every route in this reference accepts either and cannot tell them apart:
+
+    ```
+    Authorization: Bearer ato_live_…
+    ```
+
+    **5. Refresh before it expires.** An access token lasts an hour.
+
+    ```bash
+    curl -X POST "https://api.accesslink.store/api/public/v1/oauth/token" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -u "datavase:<YOUR_CLIENT_SECRET>" \
+      --data-urlencode "grant_type=refresh_token" \
+      --data-urlencode "refresh_token=<YOUR_REFRESH_TOKEN>"
+    ```
+
+    > **Refresh tokens rotate, and reuse is fatal to the connection.** Every
+    > refresh returns a *new* refresh token and retires the one you sent. Store the
+    > new one before you use it, and never retry a refresh with the old token after
+    > a timeout — if a retired token is presented, two parties hold tokens for one
+    > connection and AccessLink cannot tell which is which, so it revokes the
+    > connection and the customer has to reconnect. If a refresh times out, refresh
+    > again with the newest token you have; if that fails with `invalid_grant`,
+    > send the customer through Connect again.
+
+    **6. Disconnecting.** Send the refresh token to end the whole connection.
+    The endpoint answers `200` whether or not it recognised the token.
+
+    ```bash
+    curl -X POST "https://api.accesslink.store/api/public/v1/oauth/revoke" \
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -u "datavase:<YOUR_CLIENT_SECRET>" \
+      --data-urlencode "token=<YOUR_REFRESH_TOKEN>"
+    ```
+
+    **What a connection can carry in this version: `sites:read` and
+    `sites:write`.** Other scopes exist for API keys and are not offered through
+    a consent screen yet.
+
+    **What a customer can grant you.** Only what they hold themselves. The consent
+    screen offers the intersection of what you asked for, what your client is
+    registered for, and what the signed-in operator's own role allows —
+    `sites:write` needs an Administrator or the account Owner. If their account
+    cannot grant it, they are told to ask somebody who can, and you are told only
+    that the request was declined. A grant is also narrowed to the sites that
+    operator can reach, and narrows further by itself if their access is later
+    reduced.
+
+    **Errors here look different.** The four Connect endpoints answer in OAuth's
+    own shape — a plain `error` string — because that is what client libraries
+    parse. Every other route in this reference answers with the `error` object
+    described under *Errors*.
+
+    ```json
+    {
+      "error": "invalid_grant",
+      "error_description": "That authorization code is not valid."
+    }
+    ```
 
     ## Integration flow
 
@@ -240,12 +369,48 @@ info:
     |---|---|---|
     | Members | `GET /members` · `POST /members` · `GET`/`PATCH`/`DELETE /members/{member_id}` | `members:read` / `members:write` |
     | Access | `GET /members/{member_id}/access` | `access:read` |
-    | Sites | `GET /sites` · `GET /sites/{site_id}` | `sites:read` |
+    | Sites | `GET /sites` · `GET`/`PATCH /sites/{site_id}` · `POST /sites` | `sites:read` / `sites:write` |
     | Events | `GET /events` | `events:read` |
 
     Paths are relative to `https://api.accesslink.store/api/public/v1`. Each is
     documented in full in the reference below, with its parameters, schemas and
     every error it can return.
+
+    **Creating a site.** `name`, `country` (ISO 3166-1 alpha-2) and `timezone`
+    (an IANA zone name — an offset like `+01:00` is not a zone) are all required.
+    The timezone is where the hardware stands, and it is what access schedules at
+    that site are evaluated in, so there is no sensible default to fall back on.
+
+    ```bash {op=createSite}
+    curl -X POST "https://api.accesslink.store/api/public/v1/sites" \
+      -H "Authorization: Bearer <ACCESSLINK_API_KEY>" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Abuja Studio","address":"3 Shehu Shagari Way","country":"NG","timezone":"Africa/Lagos"}'
+    ```
+
+    ```json {op=createSite status=201}
+    {
+      "id": "3e2550b2-d1cd-4d0a-915d-dd79c68120e5",
+      "name": "Abuja Studio",
+      "address": "3 Shehu Shagari Way",
+      "country": "NG",
+      "timezone": "Africa/Lagos",
+      "active": true,
+      "terminal_count": 0,
+      "created_at": "2026-09-22T10:34:35.327588Z"
+    }
+    ```
+
+    A second create with the same name is `409 site_name_already_exists` rather
+    than a second location, **so a retry after a timeout is safe and is the right
+    move**: `201` means the first attempt had not landed, `409` means it had, and
+    `GET /sites` then gives you the site — names are unique among a company's live
+    sites. `Idempotency-Key` is not needed on this route and is not honoured on a
+    request authenticated with an access token. Changing a site is
+    `PATCH /sites/{site_id}` with only the fields you are changing; `active: false`
+    stops that site's terminals authenticating and is reversible. There is no
+    delete — retiring a site also retires every terminal at it, which is a decision
+    for a person in the console.
 
     ## Fingerprint authentication
 
@@ -367,11 +532,24 @@ servers:
 
 x-tagGroups:
   - name: Public API
-    tags: [Members, Access, Sites, Events]
+    tags: [Connect, Members, Access, Sites, Events]
   - name: Console API (operator session)
     tags: [Console session, Fingerprint enrolment]
 
 tags:
+  - name: Connect
+    description: |
+      How an application is connected to a customer's AccessLink account without
+      anybody copying a key. The customer is sent to AccessLink, signs in, sees
+      exactly what is being asked for and allows it; the application receives an
+      access token and a refresh token. **OAuth 2.0 authorization code with PKCE
+      (S256).** These four endpoints are the only ones that are reached without a
+      credential, and the only ones that answer in the OAuth error shape
+      (`{"error": "invalid_grant", …}`) rather than this API's.
+
+      **In this version a connection can carry `sites:read` and `sites:write`
+      only.** Other scopes exist for API keys and are not offered through a
+      consent screen yet.
   - name: Members
     description: |
       The people your terminals recognise. **Scope `members:read`, or
@@ -389,8 +567,18 @@ tags:
       at the moment of presentation — read the outcome in *Events*.
   - name: Sites
     description: |
-      Your sites — where terminals stand. **Scope `sites:read`.** A key issued for
-      particular sites sees only those.
+      Your sites — where terminals stand. **Scope `sites:read`, or `sites:write`
+      to create and change them.** A key issued for particular sites reads and
+      changes only those, and **cannot create new ones** — creating is a
+      company-wide act, and a key scoped away from company-wide reach does not
+      have it.
+
+      A site has a `name`, a `country` (ISO 3166-1 alpha-2) and a `timezone`
+      (IANA zone name). The timezone is where the *hardware* stands and is what
+      access schedules at that site are evaluated in, so it is required on
+      create rather than defaulted. There is no delete: retiring a site also
+      retires every terminal at it and stops those doors opening by fingerprint,
+      which is a decision for a person in the console.
   - name: Events
     description: |
       Every presentation at a door — admitted or refused, and why. **Scope
@@ -427,6 +615,23 @@ components:
         An API key issued in the console under *Settings → API access*. Send it
         as `Authorization: Bearer <ACCESSLINK_API_KEY>`. The scope each route
         needs is listed on the operation.
+    DatavaseOAuth:
+      type: oauth2
+      description: |
+        An access token obtained through *Connect* — OAuth 2.0 authorization
+        code with PKCE. Send it exactly as an API key, `Authorization: Bearer
+        <token>`; tokens look like `ato_live_…`, last an hour, and are refreshed
+        with a rotating refresh token. Every route below accepts either an API
+        key or an access token and cannot tell them apart: the scopes a token
+        carries are the same scopes, and the account is determined by the grant.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://api.accesslink.store/api/public/v1/oauth/authorize
+          tokenUrl: https://api.accesslink.store/api/public/v1/oauth/token
+          refreshUrl: https://api.accesslink.store/api/public/v1/oauth/token
+          scopes:
+            sites:read: Read the account's sites.
+            sites:write: Create sites and change their details.
     OperatorSession:
       type: apiKey
       in: cookie
@@ -753,8 +958,8 @@ components:
 
     Site:
       type: object
-      description: These seven fields are the whole object.
-      required: [id, name, address, timezone, active, terminal_count, created_at]
+      description: These eight fields are the whole object.
+      required: [id, name, address, country, timezone, active, terminal_count, created_at]
       properties:
         id:
           type: string
@@ -765,12 +970,22 @@ components:
         address:
           type: string
           description: Always present; `""` when the site has none.
+        country:
+          type: string
+          description: |
+            ISO 3166-1 alpha-2, upper case. Always present; `""` for a site
+            created before the field existed, or created in the console, which
+            does not ask for one.
+          example: NG
         timezone:
           type: string
           description: IANA time zone name of where the hardware stands.
           example: Africa/Lagos
         active:
           type: boolean
+          description: |
+            `false` stops the site's terminals authenticating. Reversible, and
+            not the same as retiring a site.
         terminal_count:
           type: integer
           description: Live (non-retired) terminals at the site.
@@ -781,10 +996,126 @@ components:
         id: 46e57753-0143-481a-83f6-e93a36cfb9a7
         name: Lagos Depot
         address: 14 Marina Road
+        country: NG
         timezone: Africa/Lagos
         active: true
         terminal_count: 0
         created_at: "2026-09-11T10:34:35.32243Z"
+
+    SiteCreate:
+      type: object
+      description: |
+        `name`, `country` and `timezone` are required. `active` is not accepted:
+        a new site is always active, and sending the field is
+        `400 invalid_field` rather than being ignored.
+      required: [name, country, timezone]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          description: Unique among this account's live sites, case-insensitively.
+        address:
+          type: string
+          description: Optional, free text.
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+          description: ISO 3166-1 alpha-2. Case-insensitive on the way in, stored upper case.
+        timezone:
+          type: string
+          description: IANA zone name. An offset such as `+01:00` is not a zone and is refused.
+      example:
+        name: Abuja Studio
+        address: 3 Shehu Shagari Way
+        country: NG
+        timezone: Africa/Lagos
+
+    SiteUpdate:
+      type: object
+      description: |
+        Partial. Supply at least one field; anything absent keeps its value. An
+        explicitly empty `name`, `country` or `timezone` is `400 invalid_field`,
+        not a blanking.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        address:
+          type: string
+        country:
+          type: string
+          minLength: 2
+          maxLength: 2
+        timezone:
+          type: string
+        active:
+          type: boolean
+      example:
+        timezone: Africa/Lagos
+        active: false
+
+    TokenResponse:
+      type: object
+      description: RFC 6749 section 5.1. The only response in this API that contains a credential.
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token:
+          type: string
+          description: "Send as `Authorization: Bearer <access_token>`."
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Seconds until the access token expires.
+        refresh_token:
+          type: string
+          description: |
+            Present on both grant types. **It changes on every refresh** - store
+            the new one and discard the old. Presenting a refresh token twice
+            revokes the whole connection.
+        scope:
+          type: string
+          description: The scopes actually granted, space-delimited. May be narrower than requested.
+      example:
+        access_token: ato_live_EXAMPLE_NOT_A_REAL_TOKEN
+        token_type: Bearer
+        expires_in: 3600
+        refresh_token: atr_live_EXAMPLE_NOT_A_REAL_TOKEN
+        scope: sites:read sites:write
+
+    OAuthError:
+      type: object
+      description: |
+        RFC 6749 section 5.2 - **not** this API's error shape. The *Connect*
+        endpoints answer with this; every other route answers with `Error`.
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_request
+            - invalid_client
+            - invalid_grant
+            - invalid_scope
+            - unauthorized_client
+            - unsupported_grant_type
+            - unsupported_response_type
+            - access_denied
+            - server_error
+            - temporarily_unavailable
+        error_description:
+          type: string
+          description: For a developer reading a log. Never stable, never machine-readable.
+        error_uri:
+          type: string
+      example:
+        error: invalid_grant
+        error_description: That authorization code is not valid.
 
     SiteList:
       type: object
@@ -1228,6 +1559,7 @@ x-accesslink-error-codes:
   - { code: idempotency_in_progress, type: conflict_error, status: 409, message: "A request with that Idempotency-Key is still in progress.", reserved: false }
   - { code: roster_exceeds_terminal_capacity, type: conflict_error, status: 409, message: "A terminal cannot hold the people this change would give it.", reserved: false }
   - { code: webhook_limit_reached, type: conflict_error, status: 409, message: "This account already has the maximum number of webhook endpoints.", reserved: true }
+  - { code: site_name_already_exists, type: conflict_error, status: 409, message: "A site with that name already exists in this account.", reserved: false }
   - { code: cursor_expired, type: gone_error, status: 410, message: "That cursor points past the data retained for this account.", reserved: false }
   - { code: rate_limit_exceeded, type: rate_limit_error, status: 429, message: "Rate limit exceeded.", reserved: false }
   - { code: internal_error, type: api_error, status: 500, message: "Something went wrong on our side. The request id identifies this failure in our logs.", reserved: false }
@@ -1237,6 +1569,357 @@ paths:
   # ==========================================================================
   # PUBLIC API
   # ==========================================================================
+
+  # --------------------------------------------------------------------------
+  # Connect - the OAuth authorization server.
+  #
+  # THE ONLY ROUTES IN THIS DOCUMENT REACHED WITHOUT A CREDENTIAL, and the only
+  # ones that answer in the OAuth error shape. Everything else answers with the
+  # AccessLink envelope.
+  # --------------------------------------------------------------------------
+
+  /api/public/v1/oauth/authorize:
+    get:
+      tags: [Connect]
+      operationId: authorize
+      summary: Start a connection
+      description: |
+        Send the customer's browser here. AccessLink signs them in if they are
+        not already, shows them exactly which permissions you are asking for,
+        and returns them to your `redirect_uri` with a single-use `code`.
+
+        **PKCE is mandatory.** Generate a `code_verifier` (43–128 characters
+        from `A–Z a–z 0–9 - . _ ~`), send its SHA-256 as `code_challenge`
+        (base64url, no padding) with `code_challenge_method=S256`, and keep the
+        verifier to send to the token endpoint. Send a `state` you can check on
+        the way back; it is returned unchanged.
+
+        **Where errors go.** If the `client_id` is not one we know, or the
+        `redirect_uri` is not one registered for it, AccessLink shows the
+        customer a page and returns them nowhere — redirecting on an
+        unverified address would make this an open redirector. Every other
+        failure returns them to your registered `redirect_uri` with `error`,
+        `error_description` and your `state`. A customer who declines is
+        `error=access_denied`.
+      security: []
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          description: Must be `code`.
+          schema: { type: string, enum: [code] }
+          example: code
+        - name: client_id
+          in: query
+          required: true
+          description: Your client identifier, as configured with AccessLink.
+          schema: { type: string }
+          example: datavase
+        - name: redirect_uri
+          in: query
+          required: true
+          description: |
+            Where to return the customer. Compared **exactly** against the
+            addresses registered for your client — no prefix or wildcard match.
+          schema: { type: string, format: uri }
+          example: https://app.datavase.example/integrations/accesslink/callback
+        - name: scope
+          in: query
+          required: false
+          description: |
+            Space-delimited. Omit to ask for everything your client is
+            registered for. A scope your client is not registered for is
+            `error=invalid_scope`.
+          schema: { type: string }
+          example: sites:read sites:write
+        - name: state
+          in: query
+          required: false
+          description: Opaque value returned unchanged. Use it to tie the callback to the request you made.
+          schema: { type: string, maxLength: 512 }
+          example: dG9rZW4tYmluZGluZy1zdGF0ZQ
+        - name: code_challenge
+          in: query
+          required: true
+          description: base64url SHA-256 of your `code_verifier`, no padding (43 characters).
+          schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+          example: E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+        - name: code_challenge_method
+          in: query
+          required: true
+          description: Must be `S256`. `plain` is not accepted.
+          schema: { type: string, enum: [S256] }
+          example: S256
+      responses:
+        "200":
+          description: |
+            The AccessLink sign-in or consent page, as HTML. Nothing to parse —
+            the customer reads it and decides.
+          content:
+            text/html:
+              schema: { type: string }
+        "303":
+          description: |
+            The customer is returned to your `redirect_uri` with either `code`
+            and `state`, or `error`, `error_description` and `state`.
+          headers:
+            Location:
+              description: Your `redirect_uri` with the result appended as query parameters.
+              schema: { type: string, format: uri }
+        "400":
+          description: |
+            An HTML page. The request could not be returned anywhere safely:
+            the `client_id` is unknown or the `redirect_uri` is not registered.
+          content:
+            text/html:
+              schema: { type: string }
+        "429":
+          description: Too many requests from this address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "503":
+          description: AccessLink could not check the request just now.
+          content:
+            text/html:
+              schema: { type: string }
+    post:
+      tags: [Connect]
+      operationId: authorizeSubmit
+      summary: Submit the sign-in or consent form
+      description: |
+        **The customer's browser posts this form; your application never calls
+        it.** It is the target of the sign-in and consent pages that
+        `GET /api/public/v1/oauth/authorize` renders, and it is documented only
+        so the flow can be read end to end.
+
+        The form restates the whole authorization request, which AccessLink
+        re-checks against the registered client before it acts on it, and
+        carries a single-use token that must match a cookie set when the page
+        was rendered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [response_type, client_id, redirect_uri, code_challenge, code_challenge_method, form_token]
+              properties:
+                response_type: { type: string, enum: [code] }
+                client_id: { type: string }
+                redirect_uri: { type: string, format: uri }
+                scope: { type: string }
+                state: { type: string }
+                code_challenge: { type: string }
+                code_challenge_method: { type: string, enum: [S256] }
+                form_token:
+                  type: string
+                  description: The single-use value from the rendered page.
+                action:
+                  type: string
+                  enum: [signin, allow, deny]
+                  description: |
+                    `signin` submits the sign-in form and shows the consent
+                    screen; signing in is never consenting. `allow` grants,
+                    anything else declines.
+                email: { type: string, format: email, description: Only with `action=signin`. }
+                password: { type: string, format: password, description: Only with `action=signin`. }
+      responses:
+        "200":
+          description: The next page - the consent screen, or the sign-in form again with a message.
+          content:
+            text/html:
+              schema: { type: string }
+        "303":
+          description: The customer is returned to the registered `redirect_uri` with `code` or `error`.
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        "400":
+          description: An HTML page; the request could not be returned anywhere safely.
+          content:
+            text/html:
+              schema: { type: string }
+        "429":
+          description: Too many requests from this address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "503":
+          description: AccessLink could not check the request just now.
+          content:
+            text/html:
+              schema: { type: string }
+
+  /api/public/v1/oauth/token:
+    post:
+      tags: [Connect]
+      operationId: token
+      summary: Exchange a code, or refresh
+      description: |
+        Form-encoded in, JSON out. Two grant types.
+
+        **`authorization_code`** exchanges the `code` from the callback for
+        tokens. Send the same `redirect_uri` you started with and the
+        `code_verifier` whose challenge you sent. A code is single-use and
+        expires in two minutes; presenting one twice revokes whatever the first
+        exchange produced.
+
+        **`refresh_token`** exchanges a refresh token for a new pair.
+        **Refresh tokens rotate:** every refresh returns a new one and retires
+        the one you sent. Store the new one before you use it. Presenting a
+        retired refresh token means two parties hold tokens from one
+        connection, so AccessLink revokes the whole connection and the customer
+        must reconnect — that is the point of rotation, and it is why a
+        refresh must not be retried with the old token after a network failure.
+        Send `scope` to narrow the grant; a scope outside it is refused rather
+        than trimmed.
+
+        Authenticate as your client with HTTP Basic (`client_id` as the
+        username) or with `client_id` and `client_secret` in the form. A client
+        registered without a secret sends neither.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code, refresh_token]
+                code: { type: string, description: With `authorization_code`. }
+                redirect_uri:
+                  type: string
+                  format: uri
+                  description: With `authorization_code`; must equal the one used to obtain the code.
+                code_verifier:
+                  type: string
+                  minLength: 43
+                  maxLength: 128
+                  description: With `authorization_code`; the PKCE verifier.
+                refresh_token: { type: string, description: With `refresh_token`. }
+                scope: { type: string, description: With `refresh_token`, to narrow the grant. }
+                client_id: { type: string }
+                client_secret: { type: string, format: password }
+      responses:
+        "200":
+          description: The tokens.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          description: |
+            `invalid_grant` (the code or refresh token is unknown, expired,
+            already used, for another client, or the `redirect_uri` or
+            `code_verifier` does not match), `invalid_request`,
+            `invalid_scope`, `unsupported_grant_type`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+              examples:
+                badCode:
+                  summary: The code is not valid
+                  value:
+                    error: invalid_grant
+                    error_description: That authorization code is not valid.
+                reuse:
+                  summary: A retired refresh token was presented
+                  value:
+                    error: invalid_grant
+                    error_description: That refresh token is not valid. The grant has been revoked; the account holder must reconnect.
+        "401":
+          description: "`invalid_client` - the client is unknown or its secret did not match."
+          headers:
+            WWW-Authenticate:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "429":
+          description: Too many requests from this address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "503":
+          description: "`temporarily_unavailable`. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+
+  /api/public/v1/oauth/revoke:
+    post:
+      tags: [Connect]
+      operationId: revoke
+      summary: Disconnect
+      description: |
+        RFC 7009. Send a refresh token to end the whole connection, or an access
+        token to end just that token.
+
+        **Always `200` once your client is authenticated**, whether or not the
+        token existed — a client cleaning up should not have to tell "already
+        gone" from "never yours", and an endpoint that did would confirm a
+        guessed token to whoever asked.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+                token_type_hint:
+                  type: string
+                  enum: [access_token, refresh_token]
+                  description: Optional and ignored; the token's own form says which it is.
+                client_id: { type: string }
+                client_secret: { type: string, format: password }
+      responses:
+        "200":
+          description: Revoked, or there was nothing to revoke. No body.
+        "400":
+          description: "`invalid_request` - no `token` was sent."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "401":
+          description: "`invalid_client`."
+          headers:
+            WWW-Authenticate:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "429":
+          description: Too many requests from this address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "503":
+          description: "`temporarily_unavailable`. Retry."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
 
   /api/public/v1/members:
     get:
@@ -1666,6 +2349,7 @@ paths:
                       - id: 3e2550b2-d1cd-4d0a-915d-dd79c68120e5
                         name: Abuja Studio
                         address: ""
+                        country: NG
                         timezone: Africa/Lagos
                         active: true
                         terminal_count: 0
@@ -1673,6 +2357,7 @@ paths:
                       - id: 46e57753-0143-481a-83f6-e93a36cfb9a7
                         name: Lagos Depot
                         address: 14 Marina Road
+                        country: NG
                         timezone: Africa/Lagos
                         active: true
                         terminal_count: 0
@@ -1684,6 +2369,7 @@ paths:
                       - id: 46e57753-0143-481a-83f6-e93a36cfb9a7
                         name: Lagos Depot
                         address: 14 Marina Road
+                        country: NG
                         timezone: Africa/Lagos
                         active: true
                         terminal_count: 0
@@ -1696,6 +2382,115 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+    post:
+      tags: [Sites]
+      operationId: createSite
+      summary: Create a site
+      description: |
+        Requires scope `sites:write`. Creates a location in your account and
+        returns it. `name`, `country` and `timezone` are all required: a site
+        created unattended has nobody to fill a blank in later, and the timezone
+        is what access schedules at that site are evaluated in.
+
+        The name must be unique among your live sites, case-insensitively —
+        a duplicate is `409 site_name_already_exists`, which also makes a
+        retried create safe: the second attempt is refused rather than quietly
+        producing a second location.
+
+        The site is created active and with no terminals. Registering hardware
+        at it is done from the console; nothing in this API returns or rotates a
+        site's provisioning key.
+
+        **A key restricted to named sites cannot create** — `403
+        site_not_permitted`. A restriction can only name sites that already
+        exist, and a key that could create a site it would then be unable to
+        read or change is a capability nobody chose.
+
+        **Retrying an ambiguous create.** If your request timed out and you do
+        not know whether it landed, retry it: `201` means it had not, and `409`
+        means it had — `GET /sites` then gives you the site, matched on the name
+        you sent. `Idempotency-Key` is not needed here and is not honoured on a
+        request authenticated with an access token.
+      security:
+        - IntegrationCredential: []
+        - DatavaseOAuth: [sites:write]
+      x-scope: sites:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteCreate"
+            examples:
+              minimal:
+                summary: The three required fields
+                value:
+                  name: Abuja Studio
+                  country: NG
+                  timezone: Africa/Lagos
+              withAddress:
+                summary: With a street address
+                value:
+                  name: Lagos Depot
+                  address: 14 Marina Road
+                  country: NG
+                  timezone: Africa/Lagos
+      responses:
+        "201":
+          description: The site as created.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          description: |
+            `missing_field` (`name`, `country` or `timezone`), `invalid_field`
+            (an unusable country or timezone, or `active`), `unknown_field`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: invalid_request_error
+                  code: invalid_field
+                  message: country must be an ISO 3166-1 alpha-2 code such as NG, GB or US.
+                  param: country
+                  request_id: 9b1c0e6a4f2d7c31
+                  doc_url: https://accesslink.store/docs/errors/invalid_field
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "`insufficient_scope`, or `site_not_permitted` when the key is restricted to named sites."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: permission_error
+                  code: site_not_permitted
+                  message: This credential is restricted to named sites, so it cannot create new ones. A credential that may add sites must not be restricted to a set of them.
+                  request_id: 433be31abd341a5c
+                  doc_url: https://accesslink.store/docs/errors/site_not_permitted
+        "409":
+          description: "`site_name_already_exists`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: conflict_error
+                  code: site_name_already_exists
+                  message: A site with that name already exists in this account.
+                  param: name
+                  request_id: 3d5f7a91c0b24e88
+                  doc_url: https://accesslink.store/docs/errors/site_name_already_exists
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
@@ -1739,6 +2534,75 @@ paths:
                   request_id: 433be31abd341a5c
                   doc_url: https://accesslink.store/docs/errors/site_not_permitted
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+    patch:
+      tags: [Sites]
+      operationId: updateSite
+      summary: Update a site
+      description: |
+        Requires scope `sites:write`, and the key or token must reach the site.
+        Partial: supply at least one of `name`, `address`, `country`, `timezone`
+        or `active`, and anything you leave out keeps its value.
+
+        `active: false` stops the site's terminals authenticating immediately.
+        It is reversible and destroys nothing — it is not the same as retiring a
+        site, which this API cannot do.
+
+        A site that is not in this account, retired, or whose id is malformed is
+        `404 resource_not_found`; a site in this account but outside the key's
+        site restriction is `403 site_not_permitted`.
+      security:
+        - IntegrationCredential: []
+        - DatavaseOAuth: [sites:write]
+      x-scope: sites:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteUpdate"
+            examples:
+              correctTheZone:
+                summary: Correct the timezone
+                value:
+                  timezone: Africa/Lagos
+              closeForTheSeason:
+                summary: Deactivate the site
+                value:
+                  active: false
+      responses:
+        "200":
+          description: The site as it now stands.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          description: |
+            `invalid_field` (an empty or unusable name, country or timezone, or
+            a body with none of the five fields), `unknown_field`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: "`insufficient_scope`, or `site_not_permitted` for a site outside the key's restriction."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`site_name_already_exists`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
