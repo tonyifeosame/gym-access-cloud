@@ -87,9 +87,26 @@ func IdempotencyMiddleware() gin.HandlerFunc {
 		// "company_id" gin key, which the public tree deliberately leaves unset.
 		tc := Tenant(c)
 		if tc == nil || tc.CompanyID() == 0 || tc.CredentialID() == 0 {
-			// Reached only if this is mounted without the public authentication
-			// middleware in front of it. There is no tenant to scope the record
-			// to, and a record scoped to nothing would be reachable by everyone.
+			// TWO CASES REACH THIS, AND BOTH PASS THROUGH RATHER THAN REFUSE.
+			//
+			// A missing TenantContext means this is mounted without the public
+			// authentication middleware in front of it. There is no tenant to
+			// scope the record to, and a record scoped to nothing would be
+			// reachable by everyone.
+			//
+			// A ZERO CredentialID MEANS AN OAUTH GRANT (037). Both
+			// idempotency_records.credential_id and api_usage_daily.credential_id
+			// are foreign keys into api_credentials, so a grant has no row to be
+			// keyed against; claiming one would be a constraint violation served
+			// as a 500 on a request that is otherwise perfectly good.
+			//
+			// THE CONSEQUENCE IS A DOCUMENTED LIMITATION, not a silent one: an
+			// Idempotency-Key sent with an OAuth token is accepted and ignored,
+			// and the write endpoints this phase adds are safe to retry without
+			// it -- a repeated POST /sites is refused with
+			// site_name_already_exists rather than creating a second location.
+			// Keying a record on a grant is a migration to
+			// idempotency_records, and it belongs with the phase that needs it.
 			c.Next()
 			return
 		}

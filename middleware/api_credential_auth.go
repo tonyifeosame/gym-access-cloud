@@ -35,7 +35,19 @@ const ContextTenant = "api_tenant"
 // ActorIntegration marks an integration credential in the request log.
 const ActorIntegration = "integration"
 
-// APICredentialAuthMiddleware authenticates Authorization: Bearer atp_… .
+// ActorOAuthGrant marks an OAuth access token in the request log. A distinct
+// label from ActorIntegration because "a key somebody pasted into a system" and
+// "a connection a customer authorised" are different things to find in a log,
+// and one label for both would make them indistinguishable during an incident.
+const ActorOAuthGrant = "oauth"
+
+// APICredentialAuthMiddleware authenticates Authorization: Bearer atp_… or
+// ato_… .
+//
+// SINCE 037 THE BEARER MAY BE EITHER CLASS, and service.Authenticate dispatches
+// on the prefix. Nothing here changes: both produce a *service.TenantContext
+// and both are refused with the same 401 codes. Only the request log's actor
+// label tells them apart.
 func APICredentialAuthMiddleware(environment string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		presented := service.BearerCredential(c.GetHeader("Authorization"))
@@ -56,7 +68,7 @@ func APICredentialAuthMiddleware(environment string) gin.HandlerFunc {
 			return
 		}
 		c.Set(ContextTenant, tc)
-		c.Set(ContextAuthActor, ActorIntegration)
+		c.Set(ContextAuthActor, actorFor(tc))
 		// The secret itself is not retained anywhere past this point; the
 		// non-secret prefix is on the TenantContext for whoever logs it.
 		c.Next()

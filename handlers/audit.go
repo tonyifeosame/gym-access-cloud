@@ -178,6 +178,28 @@ const (
 	auditAPICredentialRotated    = "API_CREDENTIAL_ROTATED"
 	auditAPICredentialRevoked    = "API_CREDENTIAL_REVOKED"
 	auditAPICredentialRevokedAll = "API_CREDENTIAL_REVOKED_ALL"
+
+	// OAuth grants (037). FIVE actions, not one, for the reason the command
+	// plane and the credential trail already give: an audit trail is read by
+	// filtering on `action`, and "who connected a third party to our account",
+	// "what has it collected a token for since" and "who disconnected it" are
+	// three different questions somebody asks separately.
+	//
+	// CONSENT AND ISSUANCE ARE SEPARATE RECORDS BECAUSE THEY HAVE DIFFERENT
+	// ACTORS. A human grants consent; the client, minutes later and with no
+	// human present, exchanges the code. Collapsing them would attribute a
+	// machine's action to a person.
+	//
+	// NO TOKEN AND NO CODE IS EVER IN ONE OF THESE RECORDS. What is recorded is
+	// the client, the scopes, the access token's public id and the refresh
+	// family -- enough to answer what the integration could do and which grant
+	// a request came from, and nothing that would let a reader of the trail
+	// become it.
+	auditOAuthConsentGranted = "OAUTH_CONSENT_GRANTED"
+	auditOAuthConsentDenied  = "OAUTH_CONSENT_DENIED"
+	auditOAuthTokenIssued    = "OAUTH_TOKEN_ISSUED"
+	auditOAuthTokenRefreshed = "OAUTH_TOKEN_REFRESHED"
+	auditOAuthGrantRevoked   = "OAUTH_GRANT_REVOKED"
 )
 
 // Audit target types.
@@ -196,6 +218,13 @@ const (
 	// means a PERSON's card or fingerprint -- two very different things to find
 	// in a trail, and a shared type would make one unfilterable from the other.
 	auditTargetAPICredential = "API_CREDENTIAL"
+
+	// A connection a customer made to a third-party application. Distinct from
+	// API_CREDENTIAL for the same reason: one is a key an administrator minted
+	// and pasted somewhere, the other is a grant an operator made on a consent
+	// screen, and "what have we connected" is a different question from "what
+	// keys have we issued".
+	auditTargetOAuthGrant = "OAUTH_GRANT"
 )
 
 // recordAudit writes one operator action.

@@ -94,6 +94,16 @@ func MembersAfter(q Querier, companyID int64, after *KeysetPosition, limit int) 
 type TenantSite struct {
 	ID   int64
 	Site models.ConsoleSite
+
+	// Country is ISO 3166-1 alpha-2, or "" for a site created before
+	// migration 037 or through the console, which does not ask for one.
+	//
+	// HERE RATHER THAN ON models.ConsoleSite, deliberately. ConsoleSite is the
+	// console's wire shape and adding a field to it would change what every
+	// console site response carries -- a change to shipped behaviour that this
+	// work has no reason to make. The public projection needs the value; the
+	// console does not have to learn about it.
+	Country string
 }
 
 // SiteInTenant reads one live site by public id. sql.ErrNoRows when the id is
@@ -101,7 +111,7 @@ type TenantSite struct {
 // as text so a malformed value is simply not found rather than a cast error.
 func SiteInTenant(q Querier, companyID int64, publicID string) (*TenantSite, error) {
 	rows, err := q.Query(`
-		SELECT s.id, `+consoleSiteColumns+`
+		SELECT s.id, `+consoleSiteColumns+`, `+tenantSiteExtraColumns+`
 		  FROM sites s
 		 WHERE s.company_id = $1
 		   AND s.deleted_at IS NULL
@@ -131,7 +141,7 @@ func SiteInTenant(q Querier, companyID int64, publicID string) (*TenantSite, err
 func SitesInTenant(q Querier, companyID int64, siteIDs []int64) ([]TenantSite, error) {
 	scoped := siteIDs != nil
 	rows, err := q.Query(`
-		SELECT s.id, `+consoleSiteColumns+`
+		SELECT s.id, `+consoleSiteColumns+`, `+tenantSiteExtraColumns+`
 		  FROM sites s
 		 WHERE s.company_id = $1
 		   AND s.deleted_at IS NULL
@@ -144,6 +154,11 @@ func SitesInTenant(q Querier, companyID int64, siteIDs []int64) ([]TenantSite, e
 	return scanTenantSites(rows)
 }
 
+// tenantSiteExtraColumns is what the PUBLIC projection reads beyond the
+// console's. Appended rather than folded into consoleSiteColumns so the console
+// queries are untouched by anything the public API needs.
+const tenantSiteExtraColumns = `COALESCE(s.country, '')`
+
 func scanTenantSites(rows *sql.Rows) ([]TenantSite, error) {
 	defer rows.Close()
 	var out []TenantSite
@@ -151,7 +166,7 @@ func scanTenantSites(rows *sql.Rows) ([]TenantSite, error) {
 		var ts TenantSite
 		if err := rows.Scan(&ts.ID, &ts.Site.ID, &ts.Site.Name, &ts.Site.Address,
 			&ts.Site.Timezone, &ts.Site.Active, &ts.Site.CreatedAt, &ts.Site.DeviceCount,
-			&ts.Site.OfflinePolicy, &ts.Site.OfflineGraceMinutes); err != nil {
+			&ts.Site.OfflinePolicy, &ts.Site.OfflineGraceMinutes, &ts.Country); err != nil {
 			return nil, err
 		}
 		out = append(out, ts)

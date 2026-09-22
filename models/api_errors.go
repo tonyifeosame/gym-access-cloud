@@ -97,6 +97,7 @@ const (
 	CodeIdempotencyInProgres = "idempotency_in_progress"
 	CodeRosterOverCapacity   = "roster_exceeds_terminal_capacity"
 	CodeWebhookLimitReached  = "webhook_limit_reached"
+	CodeSiteNameExists       = "site_name_already_exists"
 
 	// gone_error -- 410
 	CodeCursorExpired = "cursor_expired"
@@ -181,6 +182,13 @@ var APIErrors = map[string]APIErrorSpec{
 		"A terminal cannot hold the people this change would give it."},
 	CodeWebhookLimitReached: {CodeWebhookLimitReached, ErrorTypeConflict, http.StatusConflict,
 		"This account already has the maximum number of webhook endpoints."},
+	// A 409 rather than a 400: the request is well formed and the platform is
+	// refusing on state, which is the same distinction ErrAPICredentialLimit
+	// already draws. It also makes a retried create safe to reason about --
+	// the second attempt is told the name is taken rather than quietly
+	// producing a second site nobody asked for.
+	CodeSiteNameExists: {CodeSiteNameExists, ErrorTypeConflict, http.StatusConflict,
+		"A site with that name already exists in this account."},
 
 	CodeCursorExpired: {CodeCursorExpired, ErrorTypeGone, http.StatusGone,
 		"That cursor points past the data retained for this account."},

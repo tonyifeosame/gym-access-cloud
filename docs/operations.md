@@ -219,6 +219,88 @@ query, another key or an older format is refused as `cursor_invalid`. Rotating
 integrators simply restart their listing — and there is deliberately no
 previous-key grace window.
 
+## Connect: the OAuth client (037)
+
+A third-party product connects to a customer's account through a consent screen
+rather than a pasted key. There is **no registration endpoint** — a client
+exists because this deployment's environment says so, which is what keeps the
+allow-listed redirect address something only an operator can change.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OAUTH_DATAVASE_REDIRECT_URIS` | *(unset)* | Comma-separated allow-list. **Setting it is what turns the integration on.** Compared exactly — no prefix or wildcard match. https, or http on a loopback host |
+| `OAUTH_DATAVASE_CLIENT_ID` | `datavase` | The identifier in the authorization URL |
+| `OAUTH_DATAVASE_NAME` | `Datavase` | What the consent screen calls it |
+| `OAUTH_DATAVASE_CLIENT_SECRET` | *(unset)* | Makes it a confidential client. Optional: PKCE is mandatory either way |
+| `OAUTH_DATAVASE_SCOPES` | `sites:read sites:write` | The ceiling this client may ever be granted. **Only these two are accepted in this version**; anything else fails startup |
+| `OAUTH_RATE_LIMIT_PER_MINUTE` | `240` | The `/oauth` tree's allowance per client address |
+| `OAUTH_RATE_BURST` | `60` | That bucket's capacity |
+
+**Unset means off**, and that is the correct state for a deployment with no
+integration: the authorize endpoint answers and recognises no application.
+**Setting a client id or a secret without a redirect URI fails startup** —
+somebody meant to turn this on, and a half-configured client looks healthy until
+the first customer tries to connect.
+
+The startup line names the client, whether it is confidential, its scopes and
+its redirect URIs in full. None of those is a secret, and "which address will
+this server hand an authorization code to" is exactly the question somebody
+reviewing a deployment needs answered without opening a database.
+
+Changing a variable and restarting rewrites the row. **A blank
+`OAUTH_DATAVASE_CLIENT_SECRET` does not clear an existing one**: a forgotten
+variable must not silently downgrade a confidential client to a public one.
+Clearing a secret means rotating it to a new value.
+
+### Rate limiting
+
+The `/oauth` tree has its own class and its own allowance, deliberately not the
+login one: it gates page renders, token exchanges and refreshes, and refresh
+traffic grows with the number of connected customers (roughly one request per
+connection per hour).
+
+**The password attempts on the consent page are not bounded by it.** Those spend
+the shared `login` allowance, the same bucket `POST /api/v1/auth/login` draws on,
+and are bounded per account by the lockout in the credential store. A password
+form must not be a second budget — otherwise adding a connect flow would have
+doubled the attempts one address gets.
+
+On a deployment that trusts no proxy (`TRUSTED_PROXIES=none`, the Render
+service) every per-address bucket sees one address for every caller, so both of
+these are service-wide caps rather than per-source fairness — the same
+limitation already recorded above for the credential endpoints, tracked as
+[issue #8](https://github.com/tonyifeosame/gym-access-cloud/issues/8). It is why
+the OAuth allowance is a few hundred a minute rather than a few dozen.
+
+### What to watch for
+
+Two log lines are worth alerting on. Both mean a credential has been copied
+somewhere it should not be, and both are already acted on by the server — the
+grant is revoked before the line is written.
+
+```
+oauth=code_replayed client=<id> ip=<addr>
+oauth=refresh_reuse client=<id> ip=<addr>
+```
+
+`refresh_reuse` is the more serious of the two: a retired refresh token was
+presented, which means two parties held tokens for one connection. The customer
+will be asked to reconnect, which is the intended and visible consequence.
+
+A client that repeatedly triggers it without an attack behind it is a client
+storing the *old* refresh token after a rotation, or retrying a timed-out
+refresh with it. That is a bug in the client and the fix is on their side; the
+behaviour here is not negotiable, because a rotation that tolerated reuse would
+detect nothing.
+
+### Housekeeping
+
+`api_housekeeping` also sweeps expired authorization codes and tokens. It is
+**not load-bearing**: every check on the token paths already refuses an expired
+row. It keeps **seven days** of consumed codes and rotated tokens on purpose —
+those rows are what a replay is detected against, and deleting one the moment it
+expires would turn "this code was used twice" into "this code never existed".
+
 ## Shutdown
 
 On `SIGTERM`/`SIGINT` the process drains in dependency order:

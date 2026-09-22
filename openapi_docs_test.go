@@ -315,8 +315,9 @@ func TestOpenAPIGuideExamplesRunAgainstTheRouter(t *testing.T) {
 	env := newTestEnv(t)
 	companyID := operatorCompanyID(t, "one")
 	// The scopes as the console issues them: ExpandScopes is what makes
-	// members:write carry members:read, exactly as the guide says it does.
-	scopes, err := models.ExpandScopes([]string{models.ScopeMembersWrite, models.ScopeAccessRead, models.ScopeSitesRead, models.ScopeEventsRead})
+	// members:write carry members:read and sites:write carry sites:read,
+	// exactly as the guide says they do.
+	scopes, err := models.ExpandScopes([]string{models.ScopeMembersWrite, models.ScopeAccessRead, models.ScopeSitesWrite, models.ScopeEventsRead})
 	if err != nil {
 		t.Fatalf("expanding scopes: %v", err)
 	}

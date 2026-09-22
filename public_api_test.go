@@ -386,13 +386,23 @@ func TestPublicSitesHonourTheCredentialRestriction(t *testing.T) {
 		t.Errorf("sites are not ordered by name: %v (%s)", names, raw)
 	}
 	siteObj := data[0].(map[string]any)
-	for _, k := range []string{"id", "name", "address", "timezone", "active", "terminal_count", "created_at"} {
+	// EIGHT SINCE 037: `country` joined the projection. The count is pinned
+	// rather than only the names, because the thing this guards against is a
+	// field ARRIVING -- a provisioning key, an offline policy, a settings blob
+	// -- and a names-only check would not see one.
+	for _, k := range []string{"id", "name", "address", "country", "timezone", "active", "terminal_count", "created_at"} {
 		if _, ok := siteObj[k]; !ok {
 			t.Errorf("site lacks %s: %v", k, siteObj)
 		}
 	}
-	if len(siteObj) != 7 {
-		t.Errorf("site has %d fields, want 7: %v", len(siteObj), siteObj)
+	if len(siteObj) != 8 {
+		t.Errorf("site has %d fields, want 8: %v", len(siteObj), siteObj)
+	}
+	// A site the console created has no country, and the field is PRESENT and
+	// empty rather than absent: a client should not have to tell an absent key
+	// from an unknown country.
+	if country, present := siteObj["country"]; !present || country != "" {
+		t.Errorf("a console-created site reported country = %v (present %v)", country, present)
 	}
 	if siteObj["terminal_count"] != float64(1) || siteObj["address"] != "" {
 		t.Errorf("terminal_count/address: %v", siteObj)

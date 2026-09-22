@@ -107,6 +107,19 @@ func ErrInsufficientScope(scope string) *Error {
 // helpful answer.
 func ErrSiteNotPermitted() *Error { return newError(models.CodeSiteNotPermitted, "", "", nil) }
 
+// ErrSiteCreateNotPermitted refuses a CREATE from a credential that is
+// restricted to named sites.
+//
+// THE SAME CODE AS ErrSiteNotPermitted, with a different sentence. It is the
+// same fact -- this credential's site restriction forbids what was asked -- and
+// an integrator branches on the code, not the sentence. A second code for the
+// same condition would be a contract an error handler has to learn twice.
+func ErrSiteCreateNotPermitted() *Error {
+	return newError(models.CodeSiteNotPermitted, "",
+		"This credential is restricted to named sites, so it cannot create new ones. "+
+			"A credential that may add sites must not be restricted to a set of them.", nil)
+}
+
 // ErrTenantIdentity refuses a request that tried to name its own tenant.
 func ErrTenantIdentity(param string) *Error {
 	return newError(models.CodeTenantIdentity, param, "", nil)
@@ -145,6 +158,16 @@ func ErrMemberIDUnusable() *Error {
 // ErrMemberIDExists is the unique-violation answer for a duplicate member id.
 func ErrMemberIDExists() *Error {
 	return newError(models.CodeMemberIDExists, "member_id", "", nil)
+}
+
+// ErrSiteNameExists is the unique-violation answer for a duplicate site name.
+//
+// A 409 rather than a 404 or a 400: the site the caller named is in their own
+// company, the request is well formed, and the platform is refusing on state.
+// It also makes a retried create safe to reason about -- the second attempt is
+// told the name is taken rather than quietly producing a second location.
+func ErrSiteNameExists() *Error {
+	return newError(models.CodeSiteNameExists, "name", "", nil)
 }
 
 // ErrRosterOverCapacity carries the terminal detail the console shape already

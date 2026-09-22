@@ -74,6 +74,13 @@ var (
 	ErrSiteNameTooLong  = errors.New("site name must be 100 characters or fewer")
 	ErrSiteNameTaken    = errors.New("a site with that name already exists in this company")
 
+	// ErrSiteTimezoneRequired is the PUBLIC write path's rule, not the
+	// console's. The console defaults a blank zone to UTC because somebody is
+	// looking at the form and can correct it; an integration creating a site
+	// unattended cannot, and a fleet of sites silently recorded as UTC is a
+	// schedule that fires at the wrong hour at every door.
+	ErrSiteTimezoneRequired = errors.New("site timezone is required")
+
 	// ErrOperatorsExist reports that the system already has at least one live
 	// operator. Returned by the first-operator bootstrap, where it is a normal
 	// outcome rather than a failure: it is what makes the bootstrap incapable of

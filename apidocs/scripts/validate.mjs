@@ -53,7 +53,14 @@ for (const [t] of groupedTags) if (!declaredTags.has(t)) fail(`x-tagGroups names
 
 const consoleTags = new Set(groups.find((g) => g.name.startsWith('Console'))?.tags ?? [])
 const publicTags = new Set(groups.find((g) => g.name === 'Public API')?.tags ?? [])
-const scopes = new Set(['members:read', 'members:write', 'access:read', 'sites:read', 'events:read'])
+const scopes = new Set(['members:read', 'members:write', 'access:read', 'sites:read', 'sites:write', 'events:read'])
+// The authorization server's own routes. They are under /api/public/ and are
+// public in every sense, but they are how a caller OBTAINS a credential, so the
+// public-route rules below -- carry an integration credential, name a scope --
+// are exactly the rules they must not follow. They have their own, checked
+// here: no security scheme at all, no x-scope, and the two failures a client
+// has to handle documented.
+const CONNECT_PREFIX = '/api/public/v1/oauth/'
 const operationIds = new Set()
 let operations = 0
 
@@ -77,7 +84,16 @@ for (const [path, item] of Object.entries(doc.paths ?? {})) {
     if (!Array.isArray(op.security)) fail(`${where}: security must be declared explicitly (use [] for an open route)`)
 
     const isPublic = path.startsWith('/api/public/')
-    if (isPublic) {
+    const isConnect = path.startsWith(CONNECT_PREFIX)
+    if (isConnect) {
+      if (!publicTags.has(tag)) fail(`${where}: authorization-server route must use a Public API tag`)
+      const schemes = (op.security ?? []).flatMap((s) => Object.keys(s))
+      if (schemes.length !== 0) fail(`${where}: an authorization-server route is reached without a credential; declare security: []`)
+      if (op['x-scope'] !== undefined) fail(`${where}: an authorization-server route names no scope`)
+      for (const status of ['400', '429']) {
+        if (!op.responses?.[status]) fail(`${where}: authorization-server route must document ${status}`)
+      }
+    } else if (isPublic) {
       if (!publicTags.has(tag)) fail(`${where}: public route must use a Public API tag`)
       const schemes = (op.security ?? []).flatMap((s) => Object.keys(s))
       if (!schemes.includes('IntegrationCredential')) fail(`${where}: public route must require IntegrationCredential`)
@@ -140,7 +156,7 @@ if (!doc.servers?.some((s) => s.url === 'https://api.accesslink.store')) fail('s
 // The guide's section order is the product's: what a developer needs first
 // comes first. Enforced by heading order so a rewrite cannot quietly bury the
 // quick start under reference material.
-const wantOrder = ['Quick start', 'Authentication', 'Integration flow', 'Core operations', 'Fingerprint authentication', 'Errors', 'Rate limits', 'Full API reference']
+const wantOrder = ['Quick start', 'Authentication', 'Connecting an application', 'Integration flow', 'Core operations', 'Fingerprint authentication', 'Errors', 'Rate limits', 'Full API reference']
 const headings = [...(doc.info.description ?? '').matchAll(/^## (.+)$/gm)].map((m) => m[1].trim())
 const positions = wantOrder.map((h) => headings.indexOf(h))
 if (positions.some((p) => p < 0)) fail(`guide is missing sections: ${wantOrder.filter((_, i) => positions[i] < 0).join(', ')}`)
