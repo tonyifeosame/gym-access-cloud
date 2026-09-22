@@ -54,8 +54,8 @@ const page = ({ title, heading, body, canonical }) => `<!doctype html>
 <link rel="canonical" href="${canonical}">
 <link rel="icon" href="${BASE}/favicon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: light dark; --accent: #1f5fbf; --muted: #5d6b7b; --line: #d6dde6; --code: #f1f4f8; }
-  @media (prefers-color-scheme: dark) { :root { --accent: #8ab8ff; --muted: #97a4b4; --line: #2b3542; --code: #161d27; } }
+  :root { color-scheme: light dark; --accent: #2f5bd7; --muted: #5d6b7b; --line: #d6dde6; --code: #f1f4f8; }
+  @media (prefers-color-scheme: dark) { :root { --accent: #7d9bf0; --muted: #97a4b4; --line: #2b3542; --code: #161d27; } }
   body { margin: 0; font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 46rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
   a { color: var(--accent); }

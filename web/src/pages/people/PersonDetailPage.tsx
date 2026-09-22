@@ -205,7 +205,9 @@ export function PersonDetailPage() {
         reading this page enrols fingers.
       */}
       <section className="panel" aria-labelledby="person-credential-heading">
-        <div className="panel__header">
+        {/* Split: the enrol action sits on the title's line, as every other
+            panel with a header action does, rather than stacked under it. */}
+        <div className="panel__header panel__header--split">
           <h2 className="panel__title" id="person-credential-heading">
             Fingerprint
           </h2>
