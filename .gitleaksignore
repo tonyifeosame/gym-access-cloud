@@ -47,3 +47,27 @@
 e6b9c7253cf06a90b44addc261f4994e5bd071a8:web/src/test/fixtures.ts:generic-api-key:418
 e6b9c7253cf06a90b44addc261f4994e5bd071a8:web/src/test/fixtures.ts:generic-api-key:438
 e6b9c7253cf06a90b44addc261f4994e5bd071a8:web/src/pages/api-credentials/apiCredentials.test.tsx:generic-api-key:46
+
+# apidocs/openapi.yaml:181, :210 and :230 --
+#
+# The three Connect examples in the guide: the authorization-code exchange, the
+# refresh, and the revocation. Each authenticates the client with curl's short
+# HTTP Basic flag, carrying the client id and the guide's own uppercase
+# placeholder for a client secret with a colon between them. (Described rather
+# than quoted, for the reason the entry above gives: this file is scanned too.)
+#
+# The curl-auth-user rule fires on that flag followed by a colon-separated pair,
+# whatever the pair contains, at entropy 4.32 -- which here is the entropy of the
+# PLACEHOLDER's own letters. There is no secret on any of the three lines and
+# there could not be: every client secret in this system is read from the
+# environment and stored as a SHA-256 digest, and no endpoint returns one.
+#
+# NOT SILENCED BY REWRITING THE EXAMPLES. Basic is what RFC 6749 section 2.3.1
+# prefers and what a client library will use, so the guide shows it. And the
+# header of this file already records why an edit would not help: on a pull
+# request the action scans base..head, so the finding lives in the patch of the
+# commit that introduced it, and a later commit removing the line leaves that
+# patch exactly as it was.
+6a7aa5993de5deded4df970e7140a0ac7bdb2f84:apidocs/openapi.yaml:curl-auth-user:181
+6a7aa5993de5deded4df970e7140a0ac7bdb2f84:apidocs/openapi.yaml:curl-auth-user:210
+6a7aa5993de5deded4df970e7140a0ac7bdb2f84:apidocs/openapi.yaml:curl-auth-user:230
