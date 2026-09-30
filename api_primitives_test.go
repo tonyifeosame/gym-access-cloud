@@ -74,6 +74,10 @@ func TestPublicAPIMountsExactlyTheSpecifiedRoutes(t *testing.T) {
 		"GET /api/public/v1/sites",
 		"GET /api/public/v1/sites/:site_id",
 		"GET /api/public/v1/events",
+		"GET /api/public/v1/terminals",
+		"POST /api/public/v1/terminals/:serial/enrollments",
+		"GET /api/public/v1/members/:member_id/enrollment",
+		"DELETE /api/public/v1/members/:member_id/enrollment",
 	}
 	for _, w := range want {
 		if !found[w] {

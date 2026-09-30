@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"access-terminal-cloud-api/models"
+
+	"github.com/lib/pq"
 )
 
 // Operator-driven fingerprint enrolment (migrations/027_fingerprint_enrollment.sql).
@@ -46,6 +48,10 @@ var ErrEnrollmentNotFound = errors.New("no enrolment for this person")
 // issued a credential. The reason travels with it.
 var ErrTerminalNotEnrollable = errors.New("terminal cannot perform an enrolment")
 
+// ErrLiveEnrollmentOutOfReach is returned when a site-bounded caller would
+// supersede a live enrolment at a terminal outside its sites. Nothing is changed.
+var ErrLiveEnrollmentOutOfReach = errors.New("live enrolment at a terminal outside the caller's sites")
+
 // EnrollmentTarget is a terminal considered as somewhere a person could stand.
 type EnrollmentTarget struct {
 	DeviceID     int64
@@ -72,6 +78,12 @@ type StartEnrollmentInput struct {
 
 	ActorUserID int64
 	ActorEmail  string
+
+	// ReachableSiteIDs, when non-nil, bounds which live enrolment this start may
+	// supersede: one at a terminal outside these sites (or at no known site) is
+	// left untouched and the start is refused with ErrLiveEnrollmentOutOfReach.
+	// nil means no bound -- the console, whose site grant was applied upstream.
+	ReachableSiteIDs []int64
 }
 
 // StartFingerprintEnrollment queues an ENROLL_FINGERPRINT job for one terminal
@@ -84,6 +96,14 @@ type StartEnrollmentInput struct {
 // it can no longer complete it: AckJobCompleted refuses a cancelled job, which
 // is behaviour that already existed and is relied on here.
 func StartFingerprintEnrollment(input StartEnrollmentInput) (*models.ConsoleEnrollment, error) {
+	// A lapsed window at an out-of-reach terminal must read EXPIRED rather than
+	// block the start, and must not be marked CANCELLED by the supersede below.
+	if input.ReachableSiteIDs != nil {
+		if err := ExpireDueEnrollments(); err != nil {
+			return nil, err
+		}
+	}
+
 	window := input.ExpiresInSeconds
 	if window <= 0 {
 		window = models.DefaultEnrollmentWindowSeconds
@@ -129,6 +149,25 @@ func StartFingerprintEnrollment(input StartEnrollmentInput) (*models.ConsoleEnro
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Under the person lock, so no start can slip a live enrolment in between
+	// this check and the supersede.
+	if input.ReachableSiteIDs != nil {
+		var outOfReach bool
+		if err := tx.QueryRow(`
+			SELECT EXISTS (
+			    SELECT 1 FROM enrollment_requests er
+			      LEFT JOIN devices d ON d.id = er.device_id
+			     WHERE er.person_id = $1
+			       AND er.status IN ('PENDING', 'IN_PROGRESS')
+			       AND (d.site_id IS NULL OR NOT d.site_id = ANY($2::bigint[])))`,
+			personID, pq.Array(input.ReachableSiteIDs)).Scan(&outOfReach); err != nil {
+			return nil, err
+		}
+		if outOfReach {
+			return nil, ErrLiveEnrollmentOutOfReach
+		}
 	}
 
 	// Supersede whatever was outstanding, job and enrolment together.

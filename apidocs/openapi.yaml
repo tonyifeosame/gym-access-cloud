@@ -281,7 +281,7 @@ info:
     | `401` | `authentication_error` | `api_credential_missing`, `api_credential_invalid`, `api_credential_wrong_environment` |
     | `403` | `permission_error` | `insufficient_scope`, `site_not_permitted` |
     | `404` | `not_found_error` | `resource_not_found` — the same answer for a record that never existed and one outside your company |
-    | `409` | `conflict_error` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `idempotency_key_reuse`, `idempotency_in_progress` |
+    | `409` | `conflict_error` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `terminal_not_enrollable`, `enrollment_in_progress_elsewhere`, `idempotency_key_reuse`, `idempotency_in_progress` |
     | `410` | `gone_error` | `cursor_expired` |
     | `429` | `rate_limit_error` | `rate_limit_exceeded` (with `Retry-After`) |
     | `500` / `503` | `api_error` | `internal_error` / `service_unavailable` (`503` carries `Retry-After`) |
@@ -367,7 +367,7 @@ servers:
 
 x-tagGroups:
   - name: Public API
-    tags: [Members, Access, Sites, Events]
+    tags: [Members, Access, Sites, Events, Terminals, Remote enrolment]
   - name: Console API (operator session)
     tags: [Console session, Fingerprint enrolment]
 
@@ -395,6 +395,25 @@ tags:
     description: |
       Every presentation at a door — admitted or refused, and why. **Scope
       `events:read`.** Newest first, filterable, paginated by cursor.
+  - name: Terminals
+    description: |
+      Your terminals and whether each can take an enrolment. **Scope
+      `terminals:read`.** A key issued for particular sites sees only the
+      terminals at those sites.
+  - name: Remote enrolment
+    description: |
+      Ask one terminal to capture a member's fingerprint, and follow what
+      became of it — the same enrolment the console runs, driven by your key.
+      **Scope `enrollments:write` to start or cancel; `members:read` to read
+      the status** (`enrollments:write` implies nothing). The member must be
+      standing at the terminal, which **stops checking fingers at its door**
+      until the enrolment completes, is cancelled, or its window closes
+      (default 5 minutes). The fingerprint stays on that terminal; no route
+      returns it. One live enrolment per member: starting again supersedes the
+      previous one — unless it is at a terminal outside a site-restricted key's
+      sites, which is refused (`409 enrollment_in_progress_elsewhere`) and left
+      running. Send an `Idempotency-Key` on the start — a keyless retry
+      of a start that succeeded supersedes it and re-arms the reader.
   - name: Console session
     description: |
       Signing an operator in and out of the AccessLink Console API. **These are
@@ -1076,6 +1095,122 @@ components:
         biometric_enrolled: false
         enrollment: null
 
+    Terminal:
+      type: object
+      description: These seven fields are the whole object. Nothing here is a credential.
+      required: [serial, name, site_id, site_name, status, last_seen_at, enrollable]
+      properties:
+        serial:
+          type: string
+          description: The terminal's serial number; the path parameter of the enrolment start.
+        name:
+          type: string
+          description: Empty when the terminal has none.
+        site_id:
+          type: string
+          format: uuid
+        site_name:
+          type: string
+        status:
+          type: string
+          description: The terminal's lifecycle status, as the console shows it.
+        last_seen_at:
+          type: [string, "null"]
+          format: date-time
+          description: Last heartbeat, else last contact; `null` if never seen.
+        enrollable:
+          type: boolean
+          description: Whether a start at this terminal would be accepted — active, not disabled, and holding a credential of its own. The same test the start applies.
+      example:
+        serial: AT-E05A1B38AA38
+        name: Front door
+        site_id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+        site_name: Lagos Depot
+        status: ONLINE
+        last_seen_at: "2026-09-30T08:10:21Z"
+        enrollable: true
+
+    TerminalList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Terminal"
+          description: Every terminal the key reaches, ordered by site name then serial. Not paginated.
+
+    PublicEnrollmentStart:
+      type: object
+      additionalProperties: false
+      required: [member_id]
+      properties:
+        member_id:
+          type: string
+          maxLength: 31
+          description: The member to enrol.
+        expires_in_seconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+          default: 300
+          description: How long the terminal waits for a finger. The door is out of service for this long at most.
+      example:
+        member_id: MEM001
+        expires_in_seconds: 120
+
+    PublicEnrollment:
+      type: object
+      description: One enrolment. Identifiers only — no name and nothing biometric.
+      required: [id, member_id, member, status, terminal_serial, created_at, expires_at, started_at, completed_at]
+      properties:
+        id:
+          type: string
+        member_id:
+          type: string
+        member:
+          type: string
+          format: uuid
+          description: The member object's `id`.
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED, FAILED, EXPIRED, CANCELLED]
+          description: "`FAILED` is not retried automatically; `CANCELLED` includes an enrolment superseded by a newer start."
+        terminal_serial:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+          description: The terminal's site; omitted only if that is no longer known.
+        error:
+          type: string
+          description: On `FAILED`, the terminal's own words; on `CANCELLED`, why.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the terminal picked the job up.
+        completed_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the enrolment reached a final status, whichever one.
+      example:
+        id: "42"
+        member_id: MEM001
+        member: 9b2f6a7e-3c1d-4f0a-8e5b-1d2c3b4a5f60
+        status: PENDING
+        terminal_serial: AT-E05A1B38AA38
+        site_id: 46e57753-0143-481a-83f6-e93a36cfb9a7
+        created_at: "2026-09-30T08:10:22Z"
+        expires_at: "2026-09-30T08:12:22Z"
+        started_at: null
+        completed_at: null
+
   responses:
     Unauthorized:
       description: No credential, a malformed one, one of the other environment, or one that is unknown, revoked, expired or rotated out.
@@ -1227,6 +1362,8 @@ x-accesslink-error-codes:
   - { code: idempotency_key_reuse, type: conflict_error, status: 409, message: "That Idempotency-Key was already used for a different request.", reserved: false }
   - { code: idempotency_in_progress, type: conflict_error, status: 409, message: "A request with that Idempotency-Key is still in progress.", reserved: false }
   - { code: roster_exceeds_terminal_capacity, type: conflict_error, status: 409, message: "A terminal cannot hold the people this change would give it.", reserved: false }
+  - { code: terminal_not_enrollable, type: conflict_error, status: 409, message: "That terminal cannot run an enrolment: it is disabled, retired, or has never been provisioned with a credential of its own.", reserved: false }
+  - { code: enrollment_in_progress_elsewhere, type: conflict_error, status: 409, message: "This member already has an enrolment in progress at a terminal this credential cannot reach. It was left untouched.", reserved: false }
   - { code: webhook_limit_reached, type: conflict_error, status: 409, message: "This account already has the maximum number of webhook endpoints.", reserved: true }
   - { code: cursor_expired, type: gone_error, status: 410, message: "That cursor points past the data retained for this account.", reserved: false }
   - { code: rate_limit_exceeded, type: rate_limit_error, status: 429, message: "Rate limit exceeded.", reserved: false }
@@ -1855,6 +1992,172 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "410":
           description: "`cursor_expired`. Event cursors do not expire in this version."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/terminals:
+    get:
+      tags: [Terminals]
+      operationId: listTerminals
+      summary: List terminals
+      description: |
+        Requires scope `terminals:read`. **Not paginated** — every live terminal
+        the key reaches, ordered by site name then serial; `[]` when there are
+        none. A site-restricted key sees only the terminals at its sites.
+      security:
+        - IntegrationCredential: []
+      x-scope: terminals:read
+      responses:
+        "200":
+          description: The terminals.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TerminalList"
+        "400":
+          description: "`unknown_parameter`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/terminals/{serial}/enrollments:
+    parameters:
+      - $ref: "#/components/parameters/serial"
+    post:
+      tags: [Remote enrolment]
+      operationId: startEnrollment
+      summary: Start an enrolment
+      description: |
+        Requires scope `enrollments:write`. Puts the terminal into enrolment
+        mode for the member and supersedes any live enrolment the member
+        already has — except, for a site-restricted key, one at a terminal
+        outside its sites: that is `409 enrollment_in_progress_elsewhere`, and
+        the other enrolment, its job and this request's terminal are untouched. A terminal in another company or outside the key's site
+        restriction is `404 resource_not_found`, as is an unknown member.
+      security:
+        - IntegrationCredential: []
+      x-scope: enrollments:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublicEnrollmentStart"
+      responses:
+        "201":
+          description: The enrolment, `PENDING`.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEnrollment"
+        "400":
+          description: "`missing_field`, `invalid_field` (`expires_in_seconds` outside 30–3600), `unknown_field`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`terminal_not_enrollable` (disabled, retired, or without a credential of its own), `enrollment_in_progress_elsewhere` (a site-restricted key would cancel a live enrolment outside its sites; nothing was changed), `idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  type: conflict_error
+                  code: terminal_not_enrollable
+                  message: "That terminal cannot run an enrolment: it is disabled, retired, or has never been provisioned with a credential of its own."
+                  request_id: 7a1c2e3d4f5b6a79
+                  doc_url: https://accesslink.store/docs/errors/terminal_not_enrollable
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /api/public/v1/members/{member_id}/enrollment:
+    parameters:
+      - $ref: "#/components/parameters/memberId"
+    get:
+      tags: [Remote enrolment]
+      operationId: getEnrollment
+      summary: Get a member's enrolment
+      description: |
+        Requires scope `members:read`. The member's **most recent** enrolment,
+        live or finished, so a failure stays readable; a window that has run
+        out reads as `EXPIRED` at once. Poll this for the outcome.
+        `404 resource_not_found` when the member does not exist or has no
+        enrolment at a terminal the key can see.
+      security:
+        - IntegrationCredential: []
+      x-scope: members:read
+      responses:
+        "200":
+          description: The enrolment.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEnrollment"
+        "400":
+          description: "`unknown_parameter`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    delete:
+      tags: [Remote enrolment]
+      operationId: cancelEnrollment
+      summary: Cancel a member's enrolment
+      description: |
+        Requires scope `enrollments:write`. Cancels the live enrolment and
+        withdraws its job; the terminal returns to checking fingers.
+        `404 resource_not_found` when nothing is live — including an enrolment
+        that already completed, which cancelling never undoes.
+      security:
+        - IntegrationCredential: []
+      x-scope: enrollments:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      responses:
+        "200":
+          description: The enrolment, `CANCELLED`.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicEnrollment"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`idempotency_key_reuse` or `idempotency_in_progress`."
           content:
             application/json:
               schema:

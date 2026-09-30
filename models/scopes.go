@@ -59,6 +59,12 @@ const (
 	ScopeEventsRead     = "events:read"
 	ScopeAccessRead     = "access:read"
 	ScopeWebhooksManage = "webhooks:manage"
+
+	// ScopeEnrollmentsWrite starts and cancels fingerprint enrolment at a
+	// terminal. Separate from members:write because it commands hardware: the
+	// chosen terminal stops checking fingers at its door until the enrolment
+	// completes, is cancelled, or its window closes.
+	ScopeEnrollmentsWrite = "enrollments:write"
 )
 
 // ScopeSpec describes one scope.
@@ -148,6 +154,13 @@ var Scopes = map[string]ScopeSpec{
 		Write:            true,
 		SiteRestrictable: false,
 		Description:      "Register and manage endpoints that receive your events.",
+	},
+	ScopeEnrollmentsWrite: {
+		Name:             ScopeEnrollmentsWrite,
+		MinRole:          RoleManager,
+		Write:            true,
+		SiteRestrictable: true,
+		Description:      "Start and cancel fingerprint enrolment at your terminals. The chosen terminal pauses door checks until the finger is captured.",
 	},
 }
 

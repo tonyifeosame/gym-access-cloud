@@ -51,13 +51,14 @@ func TestEveryRegisteredScopeIsWellFormed(t *testing.T) {
 	}
 }
 
-// The registry and the database CHECK in migrations/030 must hold the same set.
+// The registry and the database CHECK (migrations/030, last rebuilt by 038) must hold the same set.
 // They are two independent closed sets, and the failure if they drift is
 // asymmetric and quiet: Go accepts a scope the database then refuses to store,
 // which surfaces as a 500 on the issue path.
 func TestScopeSetMatchesTheDocumentedV1Set(t *testing.T) {
 	want := []string{
 		"access:read",
+		"enrollments:write",
 		"events:read",
 		"members:read",
 		"members:write",
