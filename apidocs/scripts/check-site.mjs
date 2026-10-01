@@ -227,7 +227,13 @@ for (const c of doc['x-accesslink-error-codes']) {
     check(res.status === 200 && res.headers.get('x-fallback') !== 'console' && html.includes(`<code>${c.code}</code>`) && html.includes(String(c.status)),
       `${path} is missing or does not name the code and status`)
     check(!/docs\.accesslink\.store|onrender\.com/.test(html), `${path} names a hosting hostname`)
+    check(new RegExp(`<meta name="description" content="AccessLink API error ${c.code} \\(HTTP ${c.status}\\): `).test(html),
+      `${path} has no description naming the code and status`)
   }
+}
+check(/<meta name="description" content="[^"]{50,}">/.test(await (await fetch(`${origin}${BASE}/errors/`)).text()), `${BASE}/errors/ has no description`)
+for (const asset of ['favicon.svg', 'favicon.ico', 'apple-touch-icon.png']) {
+  check((await fetchStatus(`${BASE}/${asset}`)) === 200, `GET ${BASE}/${asset} is not 200`)
 }
 
 // --- the reference in a browser -------------------------------------------

@@ -7,7 +7,8 @@
  * a directory's index.html when the request ends in a slash, then the rules
  * top-down, then 404 with 404.html. So what passes here is what is deployed.
  *
- *   - every page: lang, viewport, a title, a favicon; the indexable page has a
+ *   - every page: lang, viewport, a title, the favicon set (SVG, ICO and
+ *     apple-touch-icon, each of which must answer); the indexable page has a
  *     description, a canonical URL and sharing metadata WITHOUT an image; the
  *     404 and console-redirect pages say noindex;
  *   - robots.txt names the sitemap; sitemap.xml is well formed, lists the
@@ -90,6 +91,8 @@ for (const page of ['index.html', '404.html', 'console-redirect.html']) {
   const title = attr(html, /<title>([^<]+)<\/title>/)
   check(Boolean(title) && title.includes('AccessLink'), `${page}: no title naming AccessLink`)
   check(/<link rel="icon" href="\/favicon\.svg"/.test(html), `${page}: no favicon`)
+  check(/<link rel="icon" href="\/favicon\.ico" sizes="32x32"/.test(html), `${page}: no favicon.ico`)
+  check(/<link rel="apple-touch-icon" href="\/apple-touch-icon\.png"/.test(html), `${page}: no apple-touch-icon`)
   check(!/(src|href)="https?:\/\/(?!accesslink\.store|app\.accesslink\.store)/.test(html), `${page}: links to a third party`)
 }
 const home = read('index.html')
@@ -178,7 +181,7 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r))
 const local = `http://127.0.0.1:${server.address().port}`
 const toLocal = (url) => url.replace(ORIGIN, local)
 
-for (const path of ['/', '/robots.txt', '/sitemap.xml', '/favicon.svg', '/site.css', '/docs/']) {
+for (const path of ['/', '/robots.txt', '/sitemap.xml', '/favicon.svg', '/favicon.ico', '/apple-touch-icon.png', '/site.css', '/docs/', '/docs/favicon.ico', '/docs/apple-touch-icon.png']) {
   check((await fetch(local + path)).status === 200, `GET ${path} is not 200`)
 }
 for (const url of locs) check((await fetch(toLocal(url))).status === 200, `sitemap URL ${url} does not answer 200`)
