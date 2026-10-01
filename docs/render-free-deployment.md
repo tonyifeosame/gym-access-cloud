@@ -404,9 +404,17 @@ repository cannot tell you. Render's documentation says
   `render.yaml` would be overwritten. Routes and headers not in the file are
   kept, and `sync: false` variables are ignored after the Blueprint is first
   created.
-- A sync **recreates** a defined service that was deleted by hand. Check
-  `accesslink-docs` in particular: `docs.accesslink.store` answered 404 on
-  2026-10-01 instead of redirecting.
+- A sync **recreates** a defined service that was deleted by hand.
+- **`accesslink-docs` does not match `render.yaml` today.** As observed on
+  2026-10-01, `docs.accesslink.store` serves a full copy of the reference: `/`,
+  `/errors/` and `/errors/<code>` answer HTTP 200 with the reference's own pages,
+  not a redirect, and without the security-policy header. `render.yaml` defines
+  `accesslink-docs` as redirect-only (build `mkdir -p redirect-only`, every path
+  redirected to `https://accesslink.store/docs/*`). A Blueprint sync that manages
+  this service could convert it to that redirect configuration. That has not
+  happened; it is what a sync would do. The redirect works whether
+  `accesslink.store` is still on the console or already on `accesslink-site`,
+  since both serve `/docs`.
 
 Blueprint sync is one mechanism; each service's own **Auto-Deploy** setting is
 another, and it applies whether or not a Blueprint exists. Render's
@@ -439,19 +447,40 @@ Check, in this order:
 1. **Create `accesslink-site`.** Sync the Blueprint (or create a static site by
    hand with the same settings: root `site`, build `npm run build`, publish
    `./dist`, `NODE_VERSION=20`, and the routes and headers from `render.yaml`).
+
+   **Which branch it builds from.** `render.yaml` sets `branch: main` for
+   `accesslink-site`, so a Blueprint-created service builds what is on `main`.
+   Testing it on `*.onrender.com` therefore needs either
+   (a) the branch merged to `main` first, or
+   (b) the service created by hand from `feat/accesslink-prelaunch-site` for
+   pre-merge testing (switch it to `main` once merged).
+
    Deploy it and check it on its `*.onrender.com` address, **before any domain
    moves**:
    - `/`, `/docs/`, `/docs/errors/resource_not_found`: 200.
+   - `/docs` (no trailing slash): 301 to `/docs/`.
+   - `/robots.txt` and `/sitemap.xml`: 200, and the files from the build (not
+     a Render page). Worth seeing rather than assuming: on the console service,
+     `/robots.txt` answered Render's own 404 even with a catch-all route in place.
    - `/no-such-page`, `/docs/no-such-page`, `/404`: **must be 404 and show the
      AccessLink "Page not found" page.** This is the one behaviour the build
      cannot prove. Render is expected to put `404.html` in its not-found
      response, but that is not in its static-site documentation. If it shows a
      plain "Not Found" instead, stop: the status is still right, but the page
      needs a different approach before launch.
-   - `/redeem?token=x&next=%2Fpeople#y` must land on
-     `https://app.accesslink.store/redeem?token=x&next=%2Fpeople#y`.
-   - `curl -sI <address>/` shows the `Content-Security-Policy` from
-     `render.yaml`.
+   - The console's old addresses, each landing on `app.accesslink.store` with
+     path, query and fragment intact:
+     - exact-path rule: `/redeem?token=x&next=%2Fpeople#y` →
+       `https://app.accesslink.store/redeem?token=x&next=%2Fpeople#y`;
+     - wildcard rule: `/people/MEM001` →
+       `https://app.accesslink.store/people/MEM001`;
+     - query string: `/login?error=x&next=%2Fsites` →
+       `https://app.accesslink.store/login?error=x&next=%2Fsites`.
+   - `curl -sI <address>/` shows all four headers from `render.yaml`:
+     - `Content-Security-Policy` (the `accesslink-site` policy);
+     - `X-Content-Type-Options: nosniff`;
+     - `Referrer-Policy: no-referrer`;
+     - `Strict-Transport-Security: max-age=63072000`.
 2. **Confirm `app.accesslink.store` is on `accesslink-console`** (Settings →
    Custom Domains). It answers today; this only confirms which service holds it.
 3. **Point the API at the console's new home.** On `accesslink-api` set
