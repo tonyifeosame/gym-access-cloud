@@ -233,6 +233,23 @@ func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
 		           AND j.entity_id = p.id
 		           AND j.job_type = 'DELETE'
 		           AND j.status IN ('PENDING', 'DELIVERED')
+		   )
+		   -- Already removed: the terminal acknowledged a DELETE newer than
+		   -- the last thing it was sent about this person. Without this the
+		   -- removal is queued again on every pass, for ever (039 keeps the
+		   -- job history of erased people, which is what made it visible).
+		   AND NOT EXISTS (
+		        SELECT 1 FROM sync_jobs ack
+		         WHERE ack.device_id = d.id
+		           AND ack.entity_type = 'PERSON'
+		           AND ack.entity_id = p.id
+		           AND ack.job_type = 'DELETE'
+		           AND ack.status = 'COMPLETED'
+		           AND ack.id > (SELECT max(sent.id) FROM sync_jobs sent
+		                          WHERE sent.device_id = d.id
+		                            AND sent.entity_type = 'PERSON'
+		                            AND sent.entity_id = p.id
+		                            AND sent.job_type <> 'DELETE')
 		   )`,
 		models.SyncProtocolVersion, deviceID)
 	if err != nil {

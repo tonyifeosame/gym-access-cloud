@@ -3,9 +3,11 @@
 -- A retention window for every company's door history, and the first one the
 -- legacy access_logs table has ever had.
 --
--- Numbered 038, not 037: 037 is taken by the unmerged OAuth work (PR #24), and
--- migrations apply in filename order with no ledger, so a shared number would
--- leave the order of the two undefined.
+-- Numbered 038, not 037: 037 is taken by the unmerged OAuth work (PR #24).
+-- deploy/migrate.sh records each applied file in schema_migrations with a
+-- checksum and applies only pending ones, so if PR #24 merges later its 037
+-- is applied after this in production while a from-empty build applies it
+-- before. Neither depends on the other, so the order does not matter.
 --
 -- ---------------------------------------------------------------------------
 -- WHAT CHANGES

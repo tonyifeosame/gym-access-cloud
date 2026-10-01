@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,12 +306,48 @@ type erasedMember struct {
 	FullName   string
 }
 
+// lifetimeSlack widens a person's lifetime by the time it takes the audit row
+// for their creation or deletion to be written after the row itself, which is
+// after the transaction commits.
+const lifetimeSlack = time.Minute
+
+// personLifetimeTx returns the window [from, to] in which a row that merely
+// NAMES this person's member number -- with no person id or public id to say
+// whose it is -- can be attributed to them.
+//
+// THE REUSED-NUMBER RULE. A member number can be given to somebody new once its
+// holder is deleted. Matching by number alone would then reach the other
+// holder's rows -- a live member's audit trail, door history and assistant
+// records rewritten because somebody else with their number was erased. So the
+// window is this person's own lifetime, widened by lifetimeSlack and then
+// CLAMPED so it can never reach into the lifetime of any other row holding the
+// same number: not past the creation of a later holder, not before the
+// deletion of an earlier one.
+func personLifetimeTx(tx *sql.Tx, companyID, personID int64, externalID string,
+	createdAt, deletedAt time.Time) (time.Time, time.Time, error) {
+	var from, to time.Time
+	err := tx.QueryRow(`
+		SELECT GREATEST($4::timestamptz - make_interval(secs => $6),
+		                COALESCE((SELECT max(o.deleted_at) FROM people o
+		                           WHERE o.company_id = $1 AND o.external_id = $3 AND o.id <> $2
+		                             AND o.deleted_at IS NOT NULL AND o.deleted_at <= $4),
+		                         '-infinity'::timestamptz)),
+		       LEAST($5::timestamptz + make_interval(secs => $6),
+		             COALESCE((SELECT min(o.created_at) FROM people o
+		                        WHERE o.company_id = $1 AND o.external_id = $3 AND o.id <> $2
+		                          AND o.created_at > $4),
+		                      'infinity'::timestamptz))`,
+		companyID, personID, externalID, createdAt, deletedAt, lifetimeSlack.Seconds()).Scan(&from, &to)
+	return from, to, err
+}
+
 // erasePersonTx removes everything personal about one member except the
 // member number on their own row, and records them in the ledger.
 //
-// Scoped by company throughout. Idempotent: running it twice over the same
-// person finds nothing left to remove and writes one more ledger entry, which
-// matches the same hash and changes nothing.
+// Scoped by company throughout, and by IDENTITY: rows linked to the person are
+// theirs; rows that only name their number are theirs only inside their own
+// lifetime (personLifetimeTx). A live member holding the same number is never
+// touched. Idempotent.
 func erasePersonTx(tx *sql.Tx, companyID int64, m erasedMember) error {
 	// The sealed template first, on every route into erasure -- a delete made
 	// now and one made before 039 alike.
@@ -318,49 +355,61 @@ func erasePersonTx(tx *sql.Tx, companyID int64, m erasedMember) error {
 		return fmt.Errorf("destroying sealed material: %w", err)
 	}
 
+	// The person row keeps the member number and nothing else of theirs. A row
+	// deleted before 039 keeps its ORIGINAL deleted_at: that date is what the
+	// lifetime and the ledger are measured from.
+	var createdAt, deletedAt time.Time
+	if err := tx.QueryRow(`
+		UPDATE people
+		   SET full_name = '', membership_type = '', email = NULL, phone = NULL,
+		       valid_from = NULL, valid_until = NULL, category_id = NULL,
+		       fingerprint_template = NULL, active = FALSE,
+		       deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id = $1 AND company_id = $2
+		RETURNING created_at, deleted_at`, m.ID, companyID).Scan(&createdAt, &deletedAt); err != nil {
+		return fmt.Errorf("erasing person row: %w", err)
+	}
+
+	from, to, err := personLifetimeTx(tx, companyID, m.ID, m.ExternalID, createdAt, deletedAt)
+	if err != nil {
+		return fmt.Errorf("bounding the person's lifetime: %w", err)
+	}
+
 	steps := []struct {
 		what  string
 		query string
 		args  []any
 	}{
-		// Rules naming the person, and enrolments waiting for them. Both
-		// would cascade at finalisation; going now means a deleted person
-		// holds no permission in the meantime.
+		// Rules naming the person, and enrolments waiting for them.
 		{"permissions", `DELETE FROM permissions WHERE company_id = $1 AND person_id = $2`,
 			[]any{companyID, m.ID}},
 		{"enrolment requests", `DELETE FROM enrollment_requests WHERE person_id = $1`,
 			[]any{m.ID}},
 
-		// Delivered and failed person jobs carry the person's name in their
-		// payload; pending upserts are superseded by the DELETE. A PENDING
-		// DELETE is NOT removed: for somebody deleted before 039 it is the
-		// only instruction an offline terminal will ever get to forget them,
-		// and nothing re-queues it. It keeps its row, and -- like a job a
-		// terminal has already taken, whose acknowledgement has to find it --
-		// loses everything in the payload but the number.
-		{"finished sync jobs", `
-			DELETE FROM sync_jobs
-			 WHERE entity_type = 'PERSON' AND entity_id = $1
-			   AND (status IN ('COMPLETED', 'FAILED', 'CANCELLED')
-			        OR (status = 'PENDING' AND job_type <> 'DELETE'))`,
-			[]any{m.ID}},
-		{"in-flight and undelivered DELETE jobs", `
+		// EVERY person job keeps its row and loses everything but the number.
+		//
+		// The rows are the only record of which terminals were ever sent this
+		// person. The roster reconciler queues a DELETE for a terminal from
+		// exactly that record -- so a terminal that was paused, disabled or
+		// otherwise not being synced when the person was deleted still gets
+		// told once it rejoins -- and finalisation will not delete the person
+		// while any terminal sent them has not acknowledged a DELETE.
+		{"person sync job payloads", `
 			UPDATE sync_jobs
 			   SET payload = jsonb_build_object('member_id', entity_external_id, 'deleted', TRUE)
-			 WHERE entity_type = 'PERSON' AND entity_id = $1
-			   AND (status = 'IN_PROGRESS' OR (status = 'PENDING' AND job_type = 'DELETE'))`,
+			 WHERE entity_type = 'PERSON' AND entity_id = $1`,
 			[]any{m.ID}},
 
-		// The person row keeps the member number and nothing else of theirs.
-		{"person row", `
-			UPDATE people
-			   SET full_name = '', membership_type = '', email = NULL, phone = NULL,
-			       valid_from = NULL, valid_until = NULL, category_id = NULL,
-			       fingerprint_template = NULL, active = FALSE,
-			       deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
-			       updated_at = CURRENT_TIMESTAMP
-			 WHERE id = $1 AND company_id = $2`,
-			[]any{m.ID, companyID}},
+		// Undelivered upserts are cancelled: delivering them would re-add the
+		// person. An undelivered DELETE is kept -- for somebody deleted before
+		// 039 it is the only instruction an offline terminal will get.
+		{"undelivered upserts", `
+			UPDATE sync_jobs
+			   SET status = 'CANCELLED'
+			 WHERE entity_type = 'PERSON' AND entity_id = $1
+			   AND status = 'PENDING' AND job_type <> 'DELETE'`,
+			[]any{m.ID}},
 	}
 	for _, s := range steps {
 		if _, err := tx.Exec(s.query, s.args...); err != nil {
@@ -368,80 +417,137 @@ func erasePersonTx(tx *sql.Tx, companyID int64, m erasedMember) error {
 		}
 	}
 
-	if _, err := tx.Exec(`SELECT anonymize_person_history($1, $2, $3)`,
-		companyID, m.ID, m.ExternalID); err != nil {
+	if _, err := tx.Exec(`SELECT anonymize_person_history($1, $2, $3, $4, $5)`,
+		companyID, m.ID, m.ExternalID, from, to); err != nil {
 		return fmt.Errorf("anonymising door history: %w", err)
 	}
-	if _, err := tx.Exec(`SELECT redact_person_audit($1, $2, $3)`,
-		companyID, m.ExternalID, ErasedPersonLabel(m.PublicID)); err != nil {
+	if _, err := tx.Exec(`SELECT redact_person_audit($1, $2::uuid, $3, $4, $5, $6)`,
+		companyID, m.PublicID, m.ExternalID, ErasedPersonLabel(m.PublicID), from, to); err != nil {
 		return fmt.Errorf("redacting the audit trail: %w", err)
 	}
-	if err := scrubAssistantMentionsTx(tx, companyID, m); err != nil {
+	if err := scrubAssistantMentionsTx(tx, companyID, m, from, to); err != nil {
 		return fmt.Errorf("scrubbing assistant records: %w", err)
 	}
-	return recordDeletedSubjectTx(tx, companyID, m)
+	return recordDeletedSubjectTx(tx, companyID, m, createdAt, deletedAt)
+}
+
+// mentionPatterns builds the PostgreSQL regular expressions a deleted person's
+// assistant records are matched with: a member number, a request route naming
+// it, and a name. Empty means "do not match on this".
+//
+// WHOLE TOKENS, NEVER SUBSTRINGS. Member 1001 must not match 10012 or a phone
+// number, and Anna must not match Hannah. A number shorter than four characters
+// is matched only as a whole JSON string value ("12") or a whole route segment
+// (/people/12), never as a word in prose, or deleting member 12 would delete
+// every conversation that mentions twelve of anything. A name shorter than four
+// characters is not matched at all.
+func mentionPatterns(externalID, fullName string) (number, route, name string) {
+	externalID = strings.TrimSpace(externalID)
+	quoted := regexp.QuoteMeta(externalID)
+	const boundaryL, boundaryR = `(^|[^[:alnum:]])`, `([^[:alnum:]]|$)`
+	if externalID != "" {
+		if len(externalID) >= 4 {
+			number = boundaryL + quoted + boundaryR
+		} else {
+			number = `"` + quoted + `"`
+		}
+		route = `/` + quoted + `(/|\?|$)`
+	}
+	fullName = strings.TrimSpace(fullName)
+	if len(fullName) >= 4 {
+		name = boundaryL + regexp.QuoteMeta(fullName) + boundaryR
+	}
+	return number, route, name
 }
 
 // scrubAssistantMentionsTx removes the assistant's working copies of a deleted
 // person: whole conversations whose transcript names them, and the arguments
-// of tool calls and confirmations that do.
+// of tool calls and confirmations that do -- only those written inside the
+// person's lifetime [from, to], so a later holder of the same number keeps
+// theirs.
 //
 // BEST EFFORT, AND SAID SO. A transcript is free text: this finds the member
-// number and the full name as they were stored, and cannot find a paraphrase.
-// The guarantee is the assistant's short retention; this shortens the tail.
-//
-// A member number shorter than four characters is matched only as a whole JSON
-// string ("12"), never as a substring, or deleting member 12 would delete every
-// conversation that mentions a twelve. A name shorter than four characters is
-// not matched at all, for the same reason.
-func scrubAssistantMentionsTx(tx *sql.Tx, companyID int64, m erasedMember) error {
-	external := strings.TrimSpace(m.ExternalID)
-	if len(external) < 4 {
-		external = `"` + external + `"`
-	}
-	name := strings.ToLower(strings.TrimSpace(m.FullName))
-	if len(name) < 4 {
-		name = ""
+// number and the full name as stored, never a paraphrase. The guarantee is the
+// assistant's short retention; this shortens the tail.
+func scrubAssistantMentionsTx(tx *sql.Tx, companyID int64, m erasedMember, from, to time.Time) error {
+	number, route, name := mentionPatterns(m.ExternalID, m.FullName)
+	if number == "" && name == "" {
+		return nil
 	}
 
-	const mentions = `(strpos(%[1]s, $2) > 0 OR ($3 <> '' AND strpos(lower(%[1]s), $3) > 0))`
+	const mentions = `(($2 <> '' AND %[1]s ~ $2) OR ($3 <> '' AND %[1]s ~* $3))`
 
 	if _, err := tx.Exec(fmt.Sprintf(`
 		DELETE FROM assistant_conversations c
 		 WHERE c.company_id = $1
 		   AND EXISTS (SELECT 1 FROM assistant_messages msg
 		                WHERE msg.conversation_id = c.id
+		                  AND msg.created_at BETWEEN $4 AND $5
 		                  AND `+mentions+`)`, "msg.content::text"),
-		companyID, external, name); err != nil {
+		companyID, number, name, from, to); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`
 		UPDATE assistant_tool_calls
 		   SET arguments = '{"redacted": true}'::jsonb, route = ''
 		 WHERE company_id = $1
-		   AND (`+mentions+` OR strpos(route, $2) > 0)`, "arguments::text"),
-		companyID, external, name); err != nil {
+		   AND created_at BETWEEN $4 AND $5
+		   AND (`+mentions+` OR ($6 <> '' AND route ~ $6))`, "arguments::text"),
+		companyID, number, name, from, to, route); err != nil {
 		return err
 	}
 	_, err := tx.Exec(fmt.Sprintf(`
 		UPDATE assistant_confirmations
 		   SET arguments = '{"redacted": true}'::jsonb
 		 WHERE company_id = $1
+		   AND issued_at BETWEEN $4 AND $5
 		   AND `+mentions, "arguments::text"),
-		companyID, external, name)
+		companyID, number, name, from, to)
 	return err
 }
 
-func recordDeletedSubjectTx(tx *sql.Tx, companyID int64, m erasedMember) error {
+// recordDeletedSubjectTx records the deletion in the ledger, dated by the
+// person's ACTUAL deletion -- for somebody deleted before 039, that is the
+// original date, not the day erasure first ran. The date is what replay and
+// the late-event rule measure against, so getting it wrong turns a later,
+// live holder of the same number into somebody "created before the deletion".
+//
+// ONE ENTRY PER INCARNATION. If the ledger already records this person -- an
+// entry for the same number dated at or after their creation, which only their
+// own deletion can be -- that entry is re-pointed at the row instead of a new
+// one being written. A restored backup replayed repeatedly therefore never
+// grows the ledger.
+func recordDeletedSubjectTx(tx *sql.Tx, companyID int64, m erasedMember, createdAt, deletedAt time.Time) error {
 	keys, err := ledgerKeys(tx)
 	if err != nil {
 		return err
 	}
+	hashes := make([]string, 0, len(keys))
+	for _, k := range keys {
+		hashes = append(hashes, subjectHash(k, companyID, m.ExternalID))
+	}
+
+	var existing int64
+	err = tx.QueryRow(`
+		SELECT id FROM deleted_subjects
+		 WHERE company_id = $1 AND subject_hash = ANY($2::bpchar[]) AND deleted_at >= $3
+		 ORDER BY id LIMIT 1`, companyID, pqStringArray(hashes), createdAt).Scan(&existing)
+	if err == nil {
+		_, err = tx.Exec(`
+			UPDATE deleted_subjects
+			   SET person_id = $2, finalized_at = NULL, expires_at = NULL
+			 WHERE id = $1`, existing, m.ID)
+		return err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
 	key := keys[0]
 	_, err = tx.Exec(`
-		INSERT INTO deleted_subjects (company_id, subject_hash, key_id, person_id)
-		VALUES ($1, $2, $3, $4)`,
-		companyID, subjectHash(key, companyID, m.ExternalID), key.id, m.ID)
+		INSERT INTO deleted_subjects (company_id, subject_hash, key_id, person_id, deleted_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		companyID, subjectHash(key, companyID, m.ExternalID), key.id, m.ID, deletedAt)
 	return err
 }
 
@@ -456,9 +562,6 @@ func recordDeletedSubjectTx(tx *sql.Tx, companyID int64, m erasedMember) error {
 // somebody new. An event is the deleted member's when the ledger knows the
 // number AND either nobody live holds it now or the event happened before the
 // current holder existed. An event after that belongs to the new holder.
-//
-// Fails OPEN to "not erased" only on an empty number; any database error is
-// returned, and the caller decides.
 func IsErasedSubject(companyID int64, externalID string, occurredAt time.Time) (bool, error) {
 	externalID = strings.TrimSpace(externalID)
 	if externalID == "" {
@@ -473,10 +576,13 @@ func IsErasedSubject(companyID int64, externalID string, occurredAt time.Time) (
 		hashes = append(hashes, subjectHash(k, companyID, externalID))
 	}
 
+	// bpchar[] rather than text[]: subject_hash is CHAR(64), and comparing it
+	// as text would keep the (company_id, subject_hash) index from serving the
+	// lookup -- a scan of the company's whole ledger on every door event.
 	var known bool
 	if err := DB.QueryRow(`
 		SELECT EXISTS (SELECT 1 FROM deleted_subjects
-		                WHERE company_id = $1 AND subject_hash::text = ANY($2::text[]))`,
+		                WHERE company_id = $1 AND subject_hash = ANY($2::bpchar[]))`,
 		companyID, pqStringArray(hashes)).Scan(&known); err != nil {
 		return false, err
 	}
@@ -501,8 +607,33 @@ func IsErasedSubject(companyID int64, externalID string, occurredAt time.Time) (
 	return occurredAt.Before(createdAt), nil
 }
 
-// pqStringArray renders a Go slice as a PostgreSQL text[] literal. The values
-// are hex digests, so no quoting is ever needed beyond the braces.
+// LedgerKnowsSubject reports whether the deletion ledger records anybody, ever,
+// under this member number in this company -- with no judgement about whether
+// a live holder is the same person. Used where the question is "could this
+// report be about somebody deleted", not "is this event theirs".
+func LedgerKnowsSubject(companyID int64, externalID string) (bool, error) {
+	externalID = strings.TrimSpace(externalID)
+	if externalID == "" {
+		return false, nil
+	}
+	keys, err := ledgerKeys(DB)
+	if err != nil {
+		return false, err
+	}
+	hashes := make([]string, 0, len(keys))
+	for _, k := range keys {
+		hashes = append(hashes, subjectHash(k, companyID, externalID))
+	}
+	var known bool
+	err = DB.QueryRow(`
+		SELECT EXISTS (SELECT 1 FROM deleted_subjects
+		                WHERE company_id = $1 AND subject_hash = ANY($2::bpchar[]))`,
+		companyID, pqStringArray(hashes)).Scan(&known)
+	return known, err
+}
+
+// pqStringArray renders a Go slice as a PostgreSQL array literal. The values
+// are hex digests and key ids, so no quoting is ever needed beyond the braces.
 func pqStringArray(values []string) string {
 	return "{" + strings.Join(values, ",") + "}"
 }
@@ -511,14 +642,47 @@ func pqStringArray(values []string) string {
 // Phase 2: deleting the row once every terminal has let go
 // ---------------------------------------------------------------------------
 
-// FinalizeErasedPeople deletes erased members whose terminals have all
-// confirmed the removal, and returns how many it deleted.
+// terminalStillHolds is the predicate, over a live device `d` and the person
+// in `ds.person_id`, for "this terminal may still hold the person".
 //
-// A person is held while any LIVE terminal still owes the platform something
-// about them: a placement that is not yet REMOVED or FAILED, or a person job it
-// has not acknowledged. A deleted or released terminal owes nothing -- release
-// wipes the unit -- so it holds nobody.
+// A terminal holds somebody until it has ACKNOWLEDGED a DELETE for them that is
+// newer than the last thing it was sent about them. Short of that, any of these
+// keeps the person:
 //
+//   - a placement not yet REMOVED or FAILED -- the platform knows a finger is
+//     there;
+//   - a person job not yet acknowledged, whatever its type;
+//   - a DELETE that FAILED -- the terminal never confirmed the removal, and a
+//     job that ran out of attempts is not one that succeeded;
+//   - any job it was ever sent about the person (the stripped history erasure
+//     keeps) with no acknowledged DELETE after it -- which is what holds a
+//     paused or disabled terminal until it rejoins, is sent the DELETE by the
+//     roster reconciler, and acknowledges it.
+const terminalStillHolds = `(
+	EXISTS (SELECT 1 FROM credential_placements pl
+	          JOIN credentials c ON c.id = pl.credential_id
+	         WHERE c.person_id = ds.person_id AND pl.device_id = d.id
+	           AND pl.state IN ('PENDING', 'PLACED', 'REMOVING'))
+	OR EXISTS (SELECT 1 FROM sync_jobs j
+	            WHERE j.device_id = d.id AND j.entity_type = 'PERSON'
+	              AND j.entity_id = ds.person_id
+	              AND (j.status IN ('PENDING', 'IN_PROGRESS')
+	                   OR (j.status = 'FAILED' AND j.job_type = 'DELETE')))
+	OR EXISTS (SELECT 1 FROM sync_jobs sent
+	            WHERE sent.device_id = d.id AND sent.entity_type = 'PERSON'
+	              AND sent.entity_id = ds.person_id
+	              AND NOT EXISTS (SELECT 1 FROM sync_jobs ack
+	                               WHERE ack.device_id = d.id AND ack.entity_type = 'PERSON'
+	                                 AND ack.entity_id = ds.person_id
+	                                 AND ack.job_type = 'DELETE' AND ack.status = 'COMPLETED'
+	                                 AND ack.id > sent.id)
+	              AND sent.job_type <> 'DELETE')
+)`
+
+// FinalizeErasedPeople deletes erased members no live terminal still holds,
+// and returns how many it deleted.
+//
+// A deleted terminal holds nobody -- it is gone, or released, which wipes it.
 // Every deletion is its own transaction, so one person whose row cannot go does
 // not hold back the rest.
 func FinalizeErasedPeople(ctx context.Context, graceDays int) (int, error) {
@@ -526,19 +690,9 @@ func FinalizeErasedPeople(ctx context.Context, graceDays int) (int, error) {
 		SELECT ds.id, ds.company_id, ds.person_id
 		  FROM deleted_subjects ds
 		 WHERE ds.finalized_at IS NULL AND ds.person_id IS NOT NULL
-		   AND NOT EXISTS (
-		       SELECT 1 FROM credential_placements pl
-		         JOIN credentials c ON c.id = pl.credential_id
-		         JOIN devices d ON d.id = pl.device_id
-		        WHERE c.person_id = ds.person_id
-		          AND d.deleted_at IS NULL
-		          AND pl.state IN ('PENDING', 'PLACED', 'REMOVING'))
-		   AND NOT EXISTS (
-		       SELECT 1 FROM sync_jobs j
-		         JOIN devices d ON d.id = j.device_id
-		        WHERE j.entity_type = 'PERSON' AND j.entity_id = ds.person_id
-		          AND d.deleted_at IS NULL
-		          AND j.status IN ('PENDING', 'IN_PROGRESS'))
+		   AND NOT EXISTS (SELECT 1 FROM devices d
+		                    WHERE d.deleted_at IS NULL
+		                      AND `+terminalStillHolds+`)
 		 ORDER BY ds.id`)
 	if err != nil {
 		return 0, err
@@ -571,12 +725,13 @@ func FinalizeErasedPeople(ctx context.Context, graceDays int) (int, error) {
 // finalizeOneTx deletes one erased person, in the order the foreign keys and
 // the immutability triggers require.
 //
-//  1. Door history is anonymised again. Phase 0 did it, but a REMOVED report
-//     or a late event may have arrived since; the cascades below would
-//     otherwise have to UPDATE an immutable event, and would be refused.
+//  1. Door history is anonymised again, within the same lifetime bound phase 0
+//     used. A REMOVED report or a late event may have arrived since; the
+//     cascades below would otherwise have to UPDATE an immutable event.
 //  2. credentials, which cascades to credential_placements. events.
 //     credential_id is already NULL, so the SET NULL fires on nothing.
-//  3. Anything else still naming the person.
+//  3. Anything else still naming the person -- the stripped job history is no
+//     longer needed once every terminal has acknowledged.
 //  4. The person.
 //  5. The ledger entry is finalised and given its expiry.
 func finalizeOneTx(ctx context.Context, ledgerID, companyID, personID int64, graceDays int) error {
@@ -587,22 +742,26 @@ func finalizeOneTx(ctx context.Context, ledgerID, companyID, personID int64, gra
 	defer tx.Rollback()
 
 	var externalID string
-	err = tx.QueryRow(`SELECT external_id FROM people
+	var createdAt, deletedAt time.Time
+	err = tx.QueryRow(`SELECT external_id, created_at, deleted_at FROM people
 	                    WHERE id = $1 AND company_id = $2 AND deleted_at IS NOT NULL
-	                    FOR UPDATE`, personID, companyID).Scan(&externalID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Already gone -- deleted by an earlier pass that failed to record it.
-		externalID = ""
-	} else if err != nil {
+	                    FOR UPDATE`, personID, companyID).Scan(&externalID, &createdAt, &deletedAt)
+	gone := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !gone {
 		return err
 	}
 
-	if externalID != "" {
+	if !gone {
+		from, to, err := personLifetimeTx(tx, companyID, personID, externalID, createdAt, deletedAt)
+		if err != nil {
+			return err
+		}
 		steps := []struct {
 			query string
 			args  []any
 		}{
-			{`SELECT anonymize_person_history($1, $2, $3)`, []any{companyID, personID, externalID}},
+			{`SELECT anonymize_person_history($1, $2, $3, $4, $5)`,
+				[]any{companyID, personID, externalID, from, to}},
 			{`DELETE FROM credentials WHERE company_id = $1 AND person_id = $2`, []any{companyID, personID}},
 			{`DELETE FROM permissions WHERE company_id = $1 AND person_id = $2`, []any{companyID, personID}},
 			{`DELETE FROM enrollment_requests WHERE person_id = $1`, []any{personID}},
@@ -656,7 +815,9 @@ func PurgeExpiredDeletedSubjects(ctx context.Context) (int64, error) {
 // who still hold their name, email and phone. Returns how many it erased.
 //
 // Their DELETE jobs were queued when they were deleted, so none is queued
-// again; the finaliser then deletes them like anybody else.
+// again; an undelivered one is kept by erasePersonTx. Their original deletion
+// date is kept, which is what keeps a live member who was later given the same
+// number out of reach (personLifetimeTx, recordDeletedSubjectTx).
 func EraseLegacyDeletedPeople(ctx context.Context) (int, error) {
 	rows, err := DB.QueryContext(ctx, `
 		SELECT p.id, p.company_id, p.public_id, p.external_id, COALESCE(p.full_name, '')
@@ -713,13 +874,15 @@ func EraseLegacyDeletedPeople(ctx context.Context) (int, error) {
 // back rows deleted after the backup was taken, and this deletes them again.
 //
 // A live person is the deleted one -- rather than somebody new given the same
-// number -- only if they were created BEFORE the deletion. A restored row keeps
-// its original created_at, so this tells the two apart without the number.
+// number -- only if they were created no later than the deletion the entry
+// records. A restored row keeps its original created_at; a new holder's is
+// after the deletion. The entry's date is the ACTUAL deletion date, so this
+// holds for people deleted before 039 too.
 //
-// THE LEDGER MUST SURVIVE THE RESTORE for this to work, and a restore of the
-// whole database replaces it with the backup's copy. The procedure is in
-// docs/erasure.md: export deleted_subjects and deletion_ledger_keys before
-// restoring, import them after, then let this run.
+// Cost: one hash per live person per key, looked up in a map -- not people x
+// entries.
+//
+// THE LEDGER MUST SURVIVE THE RESTORE for this to work; see docs/erasure.md.
 func ReplayDeletedSubjects(ctx context.Context) (int, error) {
 	keys, err := ledgerKeys(DB)
 	if err != nil {
@@ -731,23 +894,26 @@ func ReplayDeletedSubjects(ctx context.Context) (int, error) {
 	}
 
 	type entry struct {
-		hash      string
 		keyID     string
 		deletedAt time.Time
 	}
-	ledger := map[int64][]entry{}
+	ledger := map[int64]map[string][]entry{} // company -> hash -> entries
 	rows, err := DB.QueryContext(ctx, `SELECT company_id, subject_hash, key_id, deleted_at FROM deleted_subjects`)
 	if err != nil {
 		return 0, err
 	}
 	for rows.Next() {
 		var companyID int64
+		var hash string
 		var e entry
-		if err := rows.Scan(&companyID, &e.hash, &e.keyID, &e.deletedAt); err != nil {
+		if err := rows.Scan(&companyID, &hash, &e.keyID, &e.deletedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		ledger[companyID] = append(ledger[companyID], e)
+		if ledger[companyID] == nil {
+			ledger[companyID] = map[string][]entry{}
+		}
+		ledger[companyID][hash] = append(ledger[companyID][hash], e)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -755,7 +921,7 @@ func ReplayDeletedSubjects(ctx context.Context) (int, error) {
 	}
 
 	replayed := 0
-	for companyID, entries := range ledger {
+	for companyID, byHash := range ledger {
 		people, err := DB.QueryContext(ctx, `
 			SELECT external_id, created_at FROM people
 			 WHERE company_id = $1 AND deleted_at IS NULL`, companyID)
@@ -770,14 +936,13 @@ func ReplayDeletedSubjects(ctx context.Context) (int, error) {
 				people.Close()
 				return replayed, err
 			}
-			for _, e := range entries {
-				k, ok := keyByID[e.keyID]
-				if !ok || createdAt.After(e.deletedAt) {
-					continue
-				}
-				if hmac.Equal([]byte(subjectHash(k, companyID, externalID)), []byte(e.hash)) {
-					doomed = append(doomed, externalID)
-					break
+		match:
+			for _, k := range keys {
+				for _, e := range byHash[subjectHash(k, companyID, externalID)] {
+					if e.keyID == k.id && !createdAt.After(e.deletedAt) {
+						doomed = append(doomed, externalID)
+						break match
+					}
 				}
 			}
 		}
@@ -804,10 +969,11 @@ func ReplayDeletedSubjects(ctx context.Context) (int, error) {
 // the audit trail now knows them by.
 //
 // Their audit rows are kept -- what was done, when, to what -- but the actor
-// becomes a pseudonym and loses their address and browser; rows ABOUT them lose
-// their email. Every other table that copied their email at the time gets the
-// pseudonym instead. Then the account row goes, and with it, by cascade, their
-// sessions, reset and invitation tokens, site grants and assistant records.
+// becomes a pseudonym and loses their address and browser; rows ABOUT them and
+// rows that recorded only their address lose it too. Every other table that
+// copied their address gets the pseudonym instead. Then the account row goes,
+// and with it, by cascade, their sessions, reset and invitation tokens, site
+// grants and assistant records.
 func DeleteUser(companyID, userID int64) (string, error) {
 	tx, err := DB.Begin()
 	if err != nil {
@@ -822,14 +988,37 @@ func DeleteUser(companyID, userID int64) (string, error) {
 	return pseudonym, tx.Commit()
 }
 
+// operatorLifetimeTx is personLifetimeTx for an operator's ADDRESS: an
+// address can be given to a new account once the old one is deleted, so a row
+// that carries only the address is the old account's only inside its own
+// lifetime, clamped against every other account that held the address.
+func operatorLifetimeTx(tx *sql.Tx, userID int64, email string,
+	createdAt, deletedAt time.Time) (time.Time, time.Time, error) {
+	var from, to time.Time
+	err := tx.QueryRow(`
+		SELECT GREATEST($3::timestamptz - make_interval(secs => $5),
+		                COALESCE((SELECT max(o.deleted_at) FROM users o
+		                           WHERE lower(o.email) = lower($2) AND o.id <> $1
+		                             AND o.deleted_at IS NOT NULL AND o.deleted_at <= $3),
+		                         '-infinity'::timestamptz)),
+		       LEAST($4::timestamptz + make_interval(secs => $5),
+		             COALESCE((SELECT min(o.created_at) FROM users o
+		                        WHERE lower(o.email) = lower($2) AND o.id <> $1
+		                          AND o.created_at > $3),
+		                      'infinity'::timestamptz))`,
+		userID, email, createdAt, deletedAt, lifetimeSlack.Seconds()).Scan(&from, &to)
+	return from, to, err
+}
+
 func deleteUserTx(tx *sql.Tx, companyID, userID int64, liveOnly bool) (string, error) {
 	var publicID, email string
-	query := `SELECT public_id, email FROM users
-	           WHERE id = $1 AND company_id = $2`
+	var createdAt, deletedAt time.Time
+	query := `SELECT public_id, email, created_at, COALESCE(deleted_at, CURRENT_TIMESTAMP)
+	            FROM users WHERE id = $1 AND company_id = $2`
 	if liveOnly {
 		query += ` AND deleted_at IS NULL`
 	}
-	err := tx.QueryRow(query+` FOR UPDATE`, userID, companyID).Scan(&publicID, &email)
+	err := tx.QueryRow(query+` FOR UPDATE`, userID, companyID).Scan(&publicID, &email, &createdAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", models.ErrUserNotFound
 	}
@@ -838,40 +1027,63 @@ func deleteUserTx(tx *sql.Tx, companyID, userID int64, liveOnly bool) (string, e
 	}
 	pseudonym := ErasedOperatorLabel(publicID)
 
-	if _, err := tx.Exec(`SELECT anonymize_audit_actor($1, $2, $3::uuid, $4)`,
-		companyID, userID, publicID, pseudonym); err != nil {
+	from, to, err := operatorLifetimeTx(tx, userID, email, createdAt, deletedAt)
+	if err != nil {
+		return "", fmt.Errorf("bounding the operator's lifetime: %w", err)
+	}
+
+	if _, err := tx.Exec(`SELECT anonymize_audit_actor($1, $2, $3::uuid, $4, $5, $6, $7)`,
+		companyID, userID, publicID, pseudonym, email, from, to); err != nil {
 		return "", fmt.Errorf("pseudonymising the audit trail: %w", err)
 	}
 
 	// The tables that copied the operator's address when they acted. Matched
-	// case-insensitively and scoped to this company, so an operator of another
-	// company with the same address is untouched.
+	// by the operator's own id wherever the row has one; by address only where
+	// it does not, and then only inside this account's lifetime -- so a new
+	// account later given the same address keeps its own attribution.
 	copies := []string{
 		`UPDATE api_credentials SET created_by_email = $3
-		  WHERE company_id = $1 AND lower(created_by_email) = lower($2)`,
+		  WHERE company_id = $1
+		    AND (created_by = $4 OR (created_by IS NULL AND lower(created_by_email) = lower($2)
+		                             AND created_at BETWEEN $5 AND $6))`,
 		`UPDATE device_claim_codes SET issued_by_email = $3
-		  WHERE company_id = $1 AND lower(issued_by_email) = lower($2)`,
+		  WHERE company_id = $1
+		    AND (issued_by = $4 OR (issued_by IS NULL AND lower(issued_by_email) = lower($2)
+		                            AND created_at BETWEEN $5 AND $6))`,
 		`UPDATE devices SET release_ordered_by_email = $3
 		  WHERE site_id IN (SELECT id FROM sites WHERE company_id = $1)
-		    AND lower(release_ordered_by_email) = lower($2)`,
+		    AND (release_ordered_by = $4
+		         OR (release_ordered_by IS NULL AND lower(release_ordered_by_email) = lower($2)
+		             AND release_ordered_at BETWEEN $5 AND $6))`,
 		`UPDATE enrollment_requests SET requested_by_email = $3
 		  WHERE person_id IN (SELECT id FROM people WHERE company_id = $1)
-		    AND lower(requested_by_email) = lower($2)`,
+		    AND (requested_by = $4 OR (requested_by IS NULL AND lower(requested_by_email) = lower($2)
+		                               AND created_at BETWEEN $5 AND $6))`,
 		`UPDATE sync_jobs SET requested_by_email = $3
 		  WHERE site_id IN (SELECT id FROM sites WHERE company_id = $1)
-		    AND lower(requested_by_email) = lower($2)`,
+		    AND (requested_by = $4 OR (requested_by IS NULL AND lower(requested_by_email) = lower($2)
+		                               AND created_at BETWEEN $5 AND $6))`,
 		`UPDATE terminal_announcements SET adopted_by_email = $3
-		  WHERE company_id = $1 AND lower(adopted_by_email) = lower($2)`,
+		  WHERE company_id = $1
+		    AND (adopted_by = $4 OR (adopted_by IS NULL AND lower(adopted_by_email) = lower($2)
+		                             AND created_at BETWEEN $5 AND $6))`,
 		`UPDATE terminal_announcements SET approved_by_email = $3
-		  WHERE company_id = $1 AND lower(approved_by_email) = lower($2)`,
+		  WHERE company_id = $1
+		    AND (approved_by = $4 OR (approved_by IS NULL AND lower(approved_by_email) = lower($2)
+		                              AND created_at BETWEEN $5 AND $6))`,
+		// No operator id is recorded for a rejection, so the address and the
+		// lifetime are all there is to go on ($4 is unused but typed).
 		`UPDATE terminal_announcements SET rejected_by_email = $3
-		  WHERE company_id = $1 AND lower(rejected_by_email) = lower($2)`,
+		  WHERE company_id = $1 AND lower(rejected_by_email) = lower($2)
+		    AND rejected_at BETWEEN $5 AND $6 AND $4::bigint IS NOT NULL`,
 		`UPDATE user_credential_tokens SET issued_by_email = $3
 		  WHERE user_id IN (SELECT id FROM users WHERE company_id = $1)
-		    AND lower(issued_by_email) = lower($2)`,
+		    AND (issued_by_user_id = $4
+		         OR (issued_by_user_id IS NULL AND lower(issued_by_email) = lower($2)
+		             AND created_at BETWEEN $5 AND $6))`,
 	}
 	for _, q := range copies {
-		if _, err := tx.Exec(q, companyID, email, pseudonym); err != nil {
+		if _, err := tx.Exec(q, companyID, email, pseudonym, userID, from, to); err != nil {
 			return "", fmt.Errorf("replacing a copied operator address: %w", err)
 		}
 	}
@@ -884,7 +1096,9 @@ func deleteUserTx(tx *sql.Tx, companyID, userID int64, liveOnly bool) (string, e
 }
 
 // EraseLegacyDeletedOperators deletes operators soft-deleted before 039, the
-// same way DeleteUser deletes a live one. Returns how many.
+// same way DeleteUser deletes a live one -- dated by their ORIGINAL deletion,
+// so a new account later given the same address is untouched. Returns how
+// many.
 func EraseLegacyDeletedOperators(ctx context.Context) (int, error) {
 	rows, err := DB.QueryContext(ctx,
 		`SELECT id, company_id FROM users WHERE deleted_at IS NOT NULL ORDER BY id`)

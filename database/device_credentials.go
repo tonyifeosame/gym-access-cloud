@@ -333,22 +333,58 @@ func RecordPlacement(deviceID int64, report PlacementReport) (*PendingPlacement,
 	// Tenancy is unchanged: company_id still comes from the authenticated
 	// device's own row, never from the body.
 	personQuery := `
-		SELECT id FROM people
-		 WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL`
+		SELECT id, TRUE FROM people
+		 WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL
+		   AND $3::bigint IS NOT NULL`
 	if report.State == models.PlacementRemoved {
+		// TWO ROWS CAN SHARE A NUMBER once its holder is deleted and it is
+		// given to somebody new (039). A removal is about the row the platform
+		// ASKED this terminal to remove -- the one with a REMOVING placement
+		// here -- and failing that the deleted row, never a live member picked
+		// at random. The second column says whether the chosen row is one this
+		// terminal was asked to remove.
 		personQuery = `
-			SELECT id FROM people
-			 WHERE company_id = $1 AND external_id = $2`
+			SELECT p.id,
+			       EXISTS (SELECT 1 FROM credential_placements pl
+			                 JOIN credentials c ON c.id = pl.credential_id
+			                WHERE c.person_id = p.id AND pl.device_id = $3
+			                  AND pl.state = 'REMOVING')
+			  FROM people p
+			 WHERE p.company_id = $1 AND p.external_id = $2
+			 ORDER BY 2 DESC, (p.deleted_at IS NOT NULL) DESC, p.id DESC
+			 LIMIT 1`
 	}
 
 	var personID int64
-	err = tx.QueryRow(personQuery,
-		companyID, strings.TrimSpace(report.ExternalID)).Scan(&personID)
+	var removalRequested bool
+	externalID := strings.TrimSpace(report.ExternalID)
+	err = tx.QueryRow(personQuery, companyID, externalID, deviceID).Scan(&personID, &removalRequested)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrPersonNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// A REMOVED report that resolved to a LIVE member this terminal was not
+	// asked to remove, for a number the deletion ledger knows, is the deleted
+	// holder's late confirmation -- not news about the live one. Their
+	// placement is left alone; the handler accepts the report as erased.
+	if report.State == models.PlacementRemoved && !removalRequested {
+		var live bool
+		if err := tx.QueryRow(`SELECT deleted_at IS NULL FROM people WHERE id = $1`,
+			personID).Scan(&live); err != nil {
+			return nil, err
+		}
+		if live {
+			known, err := LedgerKnowsSubject(companyID, externalID)
+			if err != nil {
+				return nil, err
+			}
+			if known {
+				return nil, models.ErrPersonNotFound
+			}
+		}
 	}
 
 	credentialID, err := resolveOrCreateCredentialTx(tx, companyID, personID, deviceID, report)

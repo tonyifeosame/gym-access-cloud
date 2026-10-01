@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"time"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/models"
@@ -194,8 +193,8 @@ func ReportCredentialPlacement(c *gin.Context) {
 		// left to record it against, and that is the point -- so it is
 		// accepted, not refused.
 		if req.State == models.PlacementRemoved {
-			if erased, lookupErr := database.IsErasedSubject(
-				c.GetInt64("company_id"), req.MemberID, time.Time{}); lookupErr == nil && erased {
+			if erased, lookupErr := database.LedgerKnowsSubject(
+				c.GetInt64("company_id"), req.MemberID); lookupErr == nil && erased {
 				c.JSON(http.StatusOK, gin.H{"recorded": false, "erased": true})
 				return
 			}

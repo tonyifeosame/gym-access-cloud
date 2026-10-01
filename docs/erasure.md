@@ -12,30 +12,60 @@ Everything below happens **in the delete's own transaction**:
 | Name, email, phone, category, validity, locator | Removed from the person row. The member number stays until finalisation. |
 | Sealed template material (026) | Destroyed (`destroySealedMaterialTx`). |
 | Permissions, enrolment requests | Deleted. |
-| Person sync jobs | Delivered, failed and pending jobs are deleted. In-flight jobs keep their row with a payload of the member number only. |
+| Person sync jobs | **Kept**, every row, with the payload stripped to the member number. They are the only record of which terminals were sent the person: the roster reconciler sends a DELETE from them when a paused or disabled terminal rejoins. Undelivered upserts are cancelled; an undelivered DELETE is kept. |
 | DELETE sync job | Queued to every terminal. Payload is the member number only. |
 | Door history (`events`, `access_logs`) | Kept, but anonymised: person, credential and member number are removed (`anonymize_person_history`). |
 | Audit trail | Kept. The member's label becomes `deleted-person:<public id>` and their personal fields leave `changes` (`redact_person_audit`). |
-| Assistant conversations and tool records | Conversations naming the member are deleted, and tool and confirmation arguments naming them are redacted. Best effort: paraphrases are not found. |
-| Ledger | An HMAC of (company, member number) is recorded in `deleted_subjects`. |
+| Assistant conversations and tool records | Conversations naming the member are deleted, and tool and confirmation arguments naming them are redacted. Matching is by whole token. Best effort: paraphrases are not found. |
+| Ledger | An HMAC of (company, member number) is recorded in `deleted_subjects`, dated by the **actual** deletion (the original date for people deleted before 039). |
 
-**Finalisation** (maintenance task `erasure`, hourly) deletes the row once no
-live terminal still holds a placement that is not REMOVED/FAILED, and none has
-an unacknowledged job for the person. Credentials and placements go with it.
-A terminal that never comes back keeps the person until it is released or
-deleted. The console shows that terminal as still holding the person.
+**A reused member number never reaches a live member.** A number can pass to
+somebody new once its holder is deleted. Rows linked to the person, by id,
+credential or public id, are theirs. Rows that only name the number are theirs
+only if written inside the person's own lifetime, `created_at` to `deleted_at`.
+That window is widened by a minute and clamped so it never reaches into another
+holder's lifetime (`personLifetimeTx`). The same rule applies to an operator's
+address (`operatorLifetimeTx`).
+
+**Finalisation** (maintenance task `erasure`, hourly) deletes the row once
+every live terminal has let go. A terminal has let go once it has acknowledged
+a DELETE newer than the last thing it was sent about the person. Until then
+the person is held by any of:
+
+* a placement that is not REMOVED or FAILED;
+* an unacknowledged person job;
+* a FAILED DELETE;
+* job history with no acknowledged DELETE after it.
+
+A deleted or released terminal holds nobody. A terminal that never comes back
+holds the person until it is released or deleted.
+
+**Ordering at the terminal.** No job for a member number is handed out while an
+older DELETE for the same number is pending for that terminal. So a DELETE for
+an old holder can never arrive after the CREATE for the new one. The reconciler
+does not re-queue a DELETE the terminal has acknowledged.
 
 **Late uploads.** A door event naming a deleted member's number is stored with
 no member. This applies when the event happened before anybody new was given
-that number. A REMOVED report for a finalised member is accepted (200) without
-being recorded.
+that number. A REMOVED report about a number the ledger knows is resolved to
+the row the terminal was asked to remove. If that resolves to a live member it
+was not asked to remove, the report is accepted (200) without touching them.
 
 ## An operator
 
 The account row is deleted. Sessions, reset and invitation tokens, site grants
 and assistant records go with it by cascade. Their audit rows are kept with the
 actor replaced by `deleted-operator:<public id>`, and with no IP address or
-browser. Every other table that copied their email gets the pseudonym instead.
+browser. This covers rows that recorded only their address (terminal claimed
+or collected), within their account's lifetime. Their address also leaves
+other operators' audit diffs. Every other table that copied their email gets
+the pseudonym, matched by their user id or, where none is recorded, by address
+within their lifetime. A new account later given the same address keeps its
+own attribution.
+
+The history tables' trigger admits only what erasure does: an actor or label
+can change only to a `deleted-…` pseudonym, `changes` can only lose keys, and
+the actor id, IP address and browser can only become NULL.
 
 ## Rows deleted before 039
 

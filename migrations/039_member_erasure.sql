@@ -62,9 +62,17 @@ BEGIN
                 RETURN NEW;
             END IF;
         ELSIF TG_TABLE_NAME = 'audit_events' THEN
-            -- Who acted, and the label and diff of what they acted on. The
-            -- action, the time, the target's type and id and the request id
-            -- are never editable.
+            -- ONLY the two operations erasure performs, and nothing that could
+            -- pass for an edit:
+            --
+            --   * a person or operator becomes a PSEUDONYM -- actor_email and
+            --     target_label may change only to a 'deleted-...' label;
+            --   * personal fields LEAVE the diff -- the new changes must be
+            --     contained in the old (keys removed, never added or altered);
+            --   * the actor's id, address and browser may only become NULL.
+            --
+            -- The action, the time, the target's type and id and the request
+            -- id are never editable by this route.
             unchanged := (to_jsonb(NEW) - ARRAY['actor_user_id', 'actor_email', 'ip_address',
                                                 'user_agent', 'target_label', 'changes'])
                        = (to_jsonb(OLD) - ARRAY['actor_user_id', 'actor_email', 'ip_address',
@@ -72,7 +80,13 @@ BEGIN
             IF unchanged
                AND (NEW.actor_user_id IS NULL OR NEW.actor_user_id = OLD.actor_user_id)
                AND (NEW.ip_address IS NULL OR NEW.ip_address = OLD.ip_address)
-               AND (NEW.user_agent IS NULL OR NEW.user_agent = OLD.user_agent) THEN
+               AND (NEW.user_agent IS NULL OR NEW.user_agent = OLD.user_agent)
+               AND (NEW.actor_email IS NOT DISTINCT FROM OLD.actor_email
+                    OR NEW.actor_email LIKE 'deleted-operator:%')
+               AND (NEW.target_label IS NOT DISTINCT FROM OLD.target_label
+                    OR NEW.target_label LIKE 'deleted-person:%'
+                    OR NEW.target_label LIKE 'deleted-operator:%')
+               AND (NEW.changes IS NULL OR (OLD.changes IS NOT NULL AND NEW.changes <@ OLD.changes)) THEN
                 RETURN NEW;
             END IF;
         END IF;
@@ -88,12 +102,23 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- A deleted member's door history keeps what happened and loses who it
--- happened to. Matches the person's own rows, rows that name their member
--- number with no person attached (an attempt recorded before the link
--- resolved), and rows that carry one of their credentials.
+-- happened to.
+--
+-- IDENTITY-SAFE BY CONSTRUCTION. Rows LINKED to the person (their id, or one
+-- of their credentials) are theirs whenever they happened. Rows that only NAME
+-- their member number, with no person attached, are theirs only if they
+-- happened inside [p_from, p_to] -- the person's own lifetime, bounded so it
+-- cannot reach a previous or a later holder of the same number. A live member
+-- given the number afterwards is never touched.
+DROP FUNCTION IF EXISTS anonymize_person_history(BIGINT, BIGINT, VARCHAR);
+DROP FUNCTION IF EXISTS redact_person_audit(BIGINT, VARCHAR, VARCHAR);
+DROP FUNCTION IF EXISTS anonymize_audit_actor(BIGINT, BIGINT, UUID, VARCHAR);
+
 CREATE OR REPLACE FUNCTION anonymize_person_history(p_company_id BIGINT,
                                                     p_person_id BIGINT,
-                                                    p_external_id VARCHAR)
+                                                    p_external_id VARCHAR,
+                                                    p_from TIMESTAMPTZ,
+                                                    p_to TIMESTAMPTZ)
 RETURNS BIGINT AS $$
 DECLARE
     events_changed BIGINT := 0;
@@ -105,21 +130,23 @@ BEGIN
        SET person_id = NULL, credential_id = NULL, subject_external_id = NULL
      WHERE company_id = p_company_id
        AND (person_id = p_person_id
+            OR credential_id IN (SELECT id FROM credentials WHERE person_id = p_person_id)
             OR (person_id IS NULL AND p_external_id IS NOT NULL
-                AND subject_external_id = p_external_id)
-            OR credential_id IN (SELECT id FROM credentials WHERE person_id = p_person_id));
+                AND subject_external_id = p_external_id
+                AND occurred_at BETWEEN p_from AND p_to));
     GET DIAGNOSTICS events_changed = ROW_COUNT;
 
     PERFORM set_config('accesslink.anonymizing', 'off', true);
 
     -- access_logs has no immutability trigger; the same rows lose the same
-    -- identity.
+    -- identity, under the same bound.
     UPDATE access_logs
        SET person_id = NULL, person_external_id = NULL
      WHERE company_id = p_company_id
        AND (person_id = p_person_id
             OR (person_id IS NULL AND p_external_id IS NOT NULL
-                AND person_external_id = p_external_id));
+                AND person_external_id = p_external_id
+                AND occurred_at BETWEEN p_from AND p_to));
     GET DIAGNOSTICS logs_changed = ROW_COUNT;
 
     RETURN events_changed + logs_changed;
@@ -129,9 +156,16 @@ $$ LANGUAGE plpgsql;
 -- A deleted member's audit trail keeps every action, its time and the operator
 -- who took it. What goes is the member: the label that named them becomes
 -- p_label, and their personal fields leave the diff.
+--
+-- IDENTITY-SAFE BY CONSTRUCTION, as above: a row is the person's if it carries
+-- their public id, or if it is labelled with their member number AND was
+-- written inside [p_from, p_to].
 CREATE OR REPLACE FUNCTION redact_person_audit(p_company_id BIGINT,
+                                               p_public_id UUID,
                                                p_external_id VARCHAR,
-                                               p_label VARCHAR)
+                                               p_label VARCHAR,
+                                               p_from TIMESTAMPTZ,
+                                               p_to TIMESTAMPTZ)
 RETURNS BIGINT AS $$
 DECLARE
     changed BIGINT := 0;
@@ -146,7 +180,8 @@ BEGIN
                      END
      WHERE company_id = p_company_id
        AND target_type IN ('PERSON', 'PERMISSION', 'CREDENTIAL')
-       AND target_label = p_external_id;
+       AND (target_public_id = p_public_id
+            OR (target_label = p_external_id AND occurred_at BETWEEN p_from AND p_to));
     GET DIAGNOSTICS changed = ROW_COUNT;
 
     PERFORM set_config('accesslink.anonymizing', 'off', true);
@@ -159,35 +194,69 @@ $$ LANGUAGE plpgsql;
 -- see that one account did a sequence of things -- just not whose it was. The
 -- actor's address and browser go, and their user id is released so the account
 -- row can be deleted.
+--
+-- Three kinds of row are theirs:
+--   * rows they took (actor_user_id), whenever;
+--   * rows ABOUT them (OPERATOR targets with their public id), whenever;
+--   * rows that carry their ADDRESS with no user id -- a terminal claimed or
+--     collected records only the address -- and only inside [p_from, p_to],
+--     their account's lifetime, so a later account given the same address is
+--     never touched.
+-- In all three, the address also leaves the diff wherever the diff names it.
 CREATE OR REPLACE FUNCTION anonymize_audit_actor(p_company_id BIGINT,
                                                  p_user_id BIGINT,
                                                  p_user_public_id UUID,
-                                                 p_pseudonym VARCHAR)
+                                                 p_pseudonym VARCHAR,
+                                                 p_email VARCHAR,
+                                                 p_from TIMESTAMPTZ,
+                                                 p_to TIMESTAMPTZ)
 RETURNS BIGINT AS $$
 DECLARE
     acted BIGINT := 0;
     targeted BIGINT := 0;
+    addressed BIGINT := 0;
+    email_keys TEXT[] := ARRAY['email', 'full_name', 'name', 'issued_by', 'approved_by',
+                               'adopted_by', 'rejected_by', 'requested_by', 'created_by',
+                               'revoked_by', 'actor_email'];
 BEGIN
     PERFORM set_config('accesslink.anonymizing', 'on', true);
 
     UPDATE audit_events
        SET actor_user_id = NULL, actor_email = p_pseudonym,
-           ip_address = NULL, user_agent = NULL
-     WHERE company_id = p_company_id AND actor_user_id = p_user_id;
+           ip_address = NULL, user_agent = NULL,
+           changes = CASE WHEN changes IS NULL THEN NULL
+                          WHEN EXISTS (SELECT 1 FROM jsonb_each_text(changes) kv
+                                        WHERE lower(kv.value) = lower(p_email))
+                          THEN changes - email_keys
+                          ELSE changes END
+     WHERE company_id = p_company_id
+       AND (actor_user_id = p_user_id
+            OR (actor_user_id IS NULL AND lower(actor_email) = lower(p_email)
+                AND occurred_at BETWEEN p_from AND p_to));
     GET DIAGNOSTICS acted = ROW_COUNT;
 
     UPDATE audit_events
        SET target_label = p_pseudonym,
            changes = CASE WHEN changes IS NULL THEN NULL
-                          ELSE changes - ARRAY['email', 'full_name', 'name']
+                          ELSE changes - email_keys
                      END
      WHERE company_id = p_company_id
        AND target_type = 'OPERATOR'
        AND target_public_id = p_user_public_id;
     GET DIAGNOSTICS targeted = ROW_COUNT;
 
+    -- Rows somebody ELSE took whose diff names this operator's address.
+    UPDATE audit_events
+       SET changes = changes - email_keys
+     WHERE company_id = p_company_id
+       AND changes IS NOT NULL
+       AND occurred_at BETWEEN p_from AND p_to
+       AND EXISTS (SELECT 1 FROM jsonb_each_text(changes) kv
+                    WHERE lower(kv.value) = lower(p_email));
+    GET DIAGNOSTICS addressed = ROW_COUNT;
+
     PERFORM set_config('accesslink.anonymizing', 'off', true);
-    RETURN acted + targeted;
+    RETURN acted + targeted + addressed;
 END;
 $$ LANGUAGE plpgsql;
 
