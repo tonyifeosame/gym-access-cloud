@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>The console has moved · AccessLink</title>
+    <!--
+      THE CONSOLE USED TO LIVE ON THIS DOMAIN. Password-reset and invitation
+      emails, Google sign-in returns and bookmarks all point at console paths
+      here (/redeem?token=..., /login, /people/...). render.yaml rewrites those
+      paths to this page, which sends the browser to the same path, query and
+      fragment on app.accesslink.store.
+
+      A SCRIPT RATHER THAN A RENDER REDIRECT because Render does not document
+      whether a redirect keeps the query string, and the query is where a
+      reset token travels. location.replace keeps all three parts and leaves
+      no history entry for this page.
+    -->
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/site.css" />
+    <script src="/console-redirect.js"></script>
+  </head>
+  <body>
+    <main id="main" class="notfound">
+      <div class="wrap">
+        <h1 class="notfound__title">The console has moved</h1>
+        <!--
+          TRUE WITH OR WITHOUT SCRIPT. With it, console-redirect.js has already
+          replaced this page with the same address on app.accesslink.store and
+          pointed the link there too. Without it, the link is the console's
+          home: the original path and query cannot be rebuilt without script,
+          so this page does not claim to be taking anybody anywhere.
+        -->
+        <p class="notfound__lead">The AccessLink Console is now at app.accesslink.store.</p>
+        <div class="actions">
+          <a class="button button--primary" id="console-link" href="https://app.accesslink.store/">Go to the console</a>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

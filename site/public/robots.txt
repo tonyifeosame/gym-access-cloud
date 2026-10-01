@@ -1,0 +1,6 @@
+# accesslink.store: the public site and the API reference under /docs.
+# The operator console is on app.accesslink.store and answers for itself.
+User-agent: *
+Allow: /
+
+Sitemap: https://accesslink.store/sitemap.xml

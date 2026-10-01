@@ -26,6 +26,7 @@ the spend.
 - [Health checks](#health-checks)
 - [Connecting api.accesslink.store](#connecting-apiaccesslinkstore)
 - [DNS records to create in Namecheap](#dns-records-to-create-in-namecheap)
+- [Splitting the public site from the console](#splitting-the-public-site-from-the-console)
 - [What the ESP32 needs before it can talk to this](#what-the-esp32-needs-before-it-can-talk-to-this)
 - [What could stop this working](#what-could-stop-this-working)
 
@@ -365,6 +366,114 @@ Notes that matter:
 `deploy/README.md` documents an `A` record for the same hostname pointing at a
 VPS. Both cannot be live at once. Nothing has been created for either, so there
 is nothing to undo — but only one is our answer, and for now it is this one.
+
+---
+
+## Splitting the public site from the console
+
+Target layout:
+
+| Name | Service | What answers |
+|---|---|---|
+| `accesslink.store`, `www.accesslink.store` | `accesslink-site` (static, `site/`) | The pre-launch page, `/docs` (the API reference), `robots.txt`, `sitemap.xml`, a real 404 |
+| `app.accesslink.store` | `accesslink-console` (static, `web/`) | The operator console, `noindex` |
+| `api.accesslink.store` | `accesslink-api` | The API — unchanged |
+
+Until the steps below are done, `accesslink.store` is still attached to the
+console service, which is why the console build keeps publishing its own copy of
+`/docs`. **The order matters**: the API emits `doc_url`s on
+`https://accesslink.store/docs/errors/<code>`, and reset and invitation emails
+carry links on whatever `CONSOLE_URL` is.
+
+### Before merging the change that adds `accesslink-site`
+
+What merging does depends on how these services were created, which the
+repository cannot tell you. Render's documentation says
+([Blueprints](https://render.com/docs/infrastructure-as-code)):
+
+- A Blueprint **auto-syncs by default** on every push to its linked branch
+  (Blueprint → Settings → *Auto Sync*).
+- A sync **creates** any service newly defined in the file. `accesslink-site` is
+  new, so an auto-syncing Blueprint linked to `main` would create it on merge.
+  It would have no custom domain, so nothing that answers today would change.
+- `autoDeploy: false` only stops deploys on later commits. Render's
+  documentation does not say whether a service the Blueprint *creates* gets an
+  initial build; assume it may.
+- A sync **applies the whole file**, not just what changed. Dashboard settings
+  on `accesslink-api` or `accesslink-console` that conflict with
+  `render.yaml` would be overwritten. Routes and headers not in the file are
+  kept, and `sync: false` variables are ignored after the Blueprint is first
+  created.
+- A sync **recreates** a defined service that was deleted by hand. Check
+  `accesslink-docs` in particular: `docs.accesslink.store` answered 404 on
+  2026-10-01 instead of redirecting.
+
+Blueprint sync is one mechanism; each service's own **Auto-Deploy** setting is
+another, and it applies whether or not a Blueprint exists. Render's
+documentation ([Deploys](https://render.com/docs/deploys)) says that by default
+a push or merge to a service's linked branch rebuilds and redeploys it, unless
+Auto-Deploy is *Off* (the other values are *On Commit* and *After CI Checks
+Pass*). So merging to `main` may deploy `accesslink-api` or
+`accesslink-console` with no Blueprint involved. If that deploys the console
+before the cutover, it is safe: the console build still carries its own copy
+of `/docs` until step 6. Without a Blueprint, merging does not *create*
+`accesslink-site`; step 1 below then means creating it by hand.
+
+Check, in this order:
+
+1. **Dashboard → Blueprints.** Is there a Blueprint for this repository?
+2. If there is one: its **linked branch** and whether **Auto Sync** is on.
+3. Which services it manages, and whether each one's dashboard settings match
+   `render.yaml`. This means branch, build command, publish path, env vars,
+   routes and headers. Anything that differs will be reset by the next sync.
+4. **Each service's own Auto-Deploy setting** (the service's Settings page →
+   Auto-Deploy), for `accesslink-api`, `accesslink-console` and, if it exists,
+   `accesslink-docs`. Anything other than *Off* means merging to its branch can
+   deploy it.
+5. Whether `accesslink-docs` still exists.
+6. The workspace's custom-domain allowance. Five names are in use or planned:
+   the apex, `www`, `app`, `api` and `docs`.
+
+### Steps
+
+1. **Create `accesslink-site`.** Sync the Blueprint (or create a static site by
+   hand with the same settings: root `site`, build `npm run build`, publish
+   `./dist`, `NODE_VERSION=20`, and the routes and headers from `render.yaml`).
+   Deploy it and check it on its `*.onrender.com` address, **before any domain
+   moves**:
+   - `/`, `/docs/`, `/docs/errors/resource_not_found`: 200.
+   - `/no-such-page`, `/docs/no-such-page`, `/404`: **must be 404 and show the
+     AccessLink "Page not found" page.** This is the one behaviour the build
+     cannot prove. Render is expected to put `404.html` in its not-found
+     response, but that is not in its static-site documentation. If it shows a
+     plain "Not Found" instead, stop: the status is still right, but the page
+     needs a different approach before launch.
+   - `/redeem?token=x&next=%2Fpeople#y` must land on
+     `https://app.accesslink.store/redeem?token=x&next=%2Fpeople#y`.
+   - `curl -sI <address>/` shows the `Content-Security-Policy` from
+     `render.yaml`.
+2. **Confirm `app.accesslink.store` is on `accesslink-console`** (Settings →
+   Custom Domains). It answers today; this only confirms which service holds it.
+3. **Point the API at the console's new home.** On `accesslink-api` set
+   `CONSOLE_URL=https://app.accesslink.store` and make sure
+   `CORS_ALLOWED_ORIGINS` contains `https://app.accesslink.store` (keep
+   `https://accesslink.store` in the list until step 6). Redeploy the API.
+   Google sign-in's redirect URI is on the API and does not change.
+4. **Move the apex.** Remove `accesslink.store` and `www.accesslink.store` from
+   `accesslink-console`, add them to `accesslink-site`, and update DNS to
+   exactly the records Render displays for that service.
+5. **Deploy `accesslink-console`** from the same commit, so it carries
+   `noindex`, its favicon and the new 404 handling.
+6. **Afterwards**, as a separate change: drop the console's `postbuild` docs copy
+   and give it a `/docs` and `/docs/*` redirect to
+   `https://accesslink.store/docs/*`; remove `https://accesslink.store` from
+   `CORS_ALLOWED_ORIGINS`; retire `accesslink-docs`. Never do the redirect while
+   the apex still points at the console — `accesslink.store/docs` would redirect
+   to itself.
+
+Still to decide before launch, and deliberately absent from the page: privacy
+policy and terms (and links to them), contact details, analytics and any cookie
+consent it needs, and an approved image for link previews (`og:image`).
 
 ---
 

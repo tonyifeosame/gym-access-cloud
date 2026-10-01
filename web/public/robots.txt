@@ -1,0 +1,9 @@
+# app.accesslink.store: the AccessLink operator console.
+#
+# Every page here is behind sign-in and says <meta name="robots"
+# content="noindex"> itself. Crawling is left open ON PURPOSE: a crawler that
+# is disallowed never fetches a page, so it never reads that noindex, and a
+# URL linked from elsewhere can then be listed without it. The public site and
+# its sitemap are at https://accesslink.store.
+User-agent: *
+Allow: /

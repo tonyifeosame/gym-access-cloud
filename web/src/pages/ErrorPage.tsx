@@ -56,3 +56,31 @@ export function NotFound() {
     </div>
   )
 }
+
+/**
+ * The same dead end for somebody who is NOT signed in.
+ *
+ * An unknown address used to send a signed-out visitor to the sign-in page as
+ * though the address were a real screen they lacked a session for, so a
+ * mistyped or stale link said "sign in" rather than "there is nothing here".
+ * This renders outside the shell -- there is no session to build one from --
+ * in the sign-in screen's own frame, and offers the two ways onward.
+ */
+export function PublicNotFound() {
+  return (
+    <main className="login">
+      <div className="login__card">
+        <h1 className="login__title">Page not found</h1>
+        <p className="login__subtitle">That address does not match anything in the AccessLink Console.</p>
+
+        <Link className="button button--primary login__secondary" to="/login">
+          Sign in
+        </Link>
+
+        <p className="login__note">
+          <a href="https://accesslink.store/">AccessLink home</a>
+        </p>
+      </div>
+    </main>
+  )
+}

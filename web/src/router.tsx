@@ -1,4 +1,4 @@
-import { Navigate, createBrowserRouter } from 'react-router-dom'
+import { createBrowserRouter, type RouteObject } from 'react-router-dom'
 
 import { ForgotPasswordPage } from './auth/ForgotPasswordPage'
 import { LoginPage } from './auth/LoginPage'
@@ -6,8 +6,9 @@ import { RedeemPage } from './auth/RedeemPage'
 import { RegisterPage } from './auth/RegisterPage'
 import { RequireAuth, RequireRole } from './auth/guards'
 import { AppShell } from './layout/AppShell'
+import { DocumentTitle } from './layout/DocumentTitle'
 import { DashboardPage } from './pages/DashboardPage'
-import { Forbidden, NotFound } from './pages/ErrorPage'
+import { Forbidden, NotFound, PublicNotFound } from './pages/ErrorPage'
 import { ActivityPage } from './pages/activity/ActivityPage'
 import { SchedulesPage } from './pages/access/SchedulesPage'
 import { ApiCredentialDetailPage } from './pages/api-credentials/ApiCredentialDetailPage'
@@ -30,6 +31,7 @@ import { SiteDetailPage } from './pages/sites/SiteDetailPage'
 import { TerminalDetailPage } from './pages/terminals/TerminalDetailPage'
 import { TerminalsListPage } from './pages/terminals/TerminalsListPage'
 import { SitesListPage } from './pages/sites/SitesListPage'
+import { useSession } from './session/useSession'
 
 /**
  * Routes.
@@ -46,20 +48,20 @@ import { SitesListPage } from './pages/sites/SitesListPage'
  * Enabling and configuring capabilities is unaffected and lives, as it always
  * has, under /settings/applications.
  */
-export const router = createBrowserRouter([
-  { path: '/login', element: <LoginPage /> },
+const appRoutes: RouteObject[] = [
+  { path: '/login', element: <LoginPage />, handle: { title: 'Sign in' } },
 
   // Self-service signup, OUTSIDE the authenticated tree by necessity: somebody
   // creating their first account has nothing to authenticate with. It sits
   // beside /login rather than inside the console tree because it ends in a
   // session — the guard below is what they land behind once it succeeds.
-  { path: '/register', element: <RegisterPage /> },
+  { path: '/register', element: <RegisterPage />, handle: { title: 'Create an account' } },
 
   // Credential handover, OUTSIDE the authenticated tree by necessity. Somebody
   // redeeming an invitation has never had a password and somebody who has
   // forgotten theirs cannot sign in to ask — neither can be behind RequireAuth.
-  { path: '/forgot-password', element: <ForgotPasswordPage /> },
-  { path: '/redeem', element: <RedeemPage /> },
+  { path: '/forgot-password', element: <ForgotPasswordPage />, handle: { title: 'Reset your password' } },
+  { path: '/redeem', element: <RedeemPage />, handle: { title: 'Set your password' } },
 
   {
     path: '/',
@@ -69,26 +71,27 @@ export const router = createBrowserRouter([
       </RequireAuth>
     ),
     children: [
-      { index: true, element: <DashboardPage /> },
+      { index: true, element: <DashboardPage />, handle: { title: 'Overview' } },
 
       // People are addressed by external_id -- the identifier terminals hold
       // and sync against, and the one an operator already knows.
-      { path: 'people', element: <PeopleListPage /> },
-      { path: 'people/:externalId', element: <PersonDetailPage /> },
+      { path: 'people', element: <PeopleListPage />, handle: { title: 'People' } },
+      { path: 'people/:externalId', element: <PersonDetailPage />, handle: { title: 'Person' } },
       // Terminals are a PLATFORM resource. The serial is the path parameter
       // because it is what the API addresses a terminal by, and what is printed
       // on the hardware an operator is standing in front of.
-      { path: 'terminals', element: <TerminalsListPage /> },
-      { path: 'terminals/:serial', element: <TerminalDetailPage /> },
+      { path: 'terminals', element: <TerminalsListPage />, handle: { title: 'Terminals' } },
+      { path: 'terminals/:serial', element: <TerminalDetailPage />, handle: { title: 'Terminal' } },
       // Sites are a PLATFORM resource: every deployment has locations,
       // whatever it uses the platform for. The lifecycle writes behind these
       // screens are ADMIN-gated in the UI and enforced by the API regardless.
-      { path: 'sites', element: <SitesListPage /> },
-      { path: 'sites/:siteId', element: <SiteDetailPage /> },
+      { path: 'sites', element: <SitesListPage />, handle: { title: 'Sites' } },
+      { path: 'sites/:siteId', element: <SiteDetailPage />, handle: { title: 'Site' } },
       // ADMIN, matching the server's route group. RequireRole is a courtesy --
       // the API refuses every one of these regardless of what the router allows.
       {
         path: 'operators',
+        handle: { title: 'Operators' },
         element: (
           <RequireRole minimum="ADMIN">
             <OperatorsListPage />
@@ -97,6 +100,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'operators/:operatorId',
+        handle: { title: 'Operator' },
         element: (
           <RequireRole minimum="ADMIN">
             <OperatorDetailPage />
@@ -106,18 +110,19 @@ export const router = createBrowserRouter([
       // The door log. VIEWER, unlike Activity below, which is ADMIN — an event
       // trail says what happened in the field, while an audit trail names which
       // operators changed what.
-      { path: 'events', element: <EventsPage /> },
+      { path: 'events', element: <EventsPage />, handle: { title: 'Events' } },
 
       // Who may go where, and when. MANAGER to change, VIEWER to read, and the
       // write gate lives on the controls rather than the route so a viewer can
       // still answer "why was she refused".
-      { path: 'access/schedules', element: <SchedulesPage /> },
+      { path: 'access/schedules', element: <SchedulesPage />, handle: { title: 'Schedules' } },
 
       // ADMIN, matching the server's route group: an audit trail names which
       // operators did what, which is administrative information rather than
       // something every viewer needs.
       {
         path: 'activity',
+        handle: { title: 'Activity' },
         element: (
           <RequireRole minimum="ADMIN">
             <ActivityPage />
@@ -127,7 +132,7 @@ export const router = createBrowserRouter([
 
       // Your own account and your company, plus signposts to the other
       // configuration scopes. No role gate: it holds your own password.
-      { path: 'settings', element: <SettingsPage /> },
+      { path: 'settings', element: <SettingsPage />, handle: { title: 'Settings' } },
 
       // ADMIN to READ, OWNER to change -- the write gate lives on the controls
       // rather than the route, so an administrator can see what the company is
@@ -138,6 +143,7 @@ export const router = createBrowserRouter([
       // why they left the site-key tree.
       {
         path: 'settings/firmware',
+        handle: { title: 'Firmware' },
         element: (
           <RequireRole minimum="ADMIN">
             <FirmwarePage />
@@ -147,6 +153,7 @@ export const router = createBrowserRouter([
 
       {
         path: 'settings/applications',
+        handle: { title: 'Features' },
         element: (
           <RequireRole minimum="ADMIN">
             <ApplicationsPage />
@@ -155,6 +162,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'settings/applications/:slug',
+        handle: { title: 'Feature' },
         element: (
           <RequireRole minimum="ADMIN">
             <ApplicationDetailPage />
@@ -168,6 +176,7 @@ export const router = createBrowserRouter([
       // colleague a request that would fail.
       {
         path: 'settings/api-credentials',
+        handle: { title: 'API access' },
         element: (
           <RequireRole minimum="ADMIN">
             <ApiCredentialsListPage />
@@ -176,6 +185,7 @@ export const router = createBrowserRouter([
       },
       {
         path: 'settings/api-credentials/:credentialId',
+        handle: { title: 'API credential' },
         element: (
           <RequireRole minimum="ADMIN">
             <ApiCredentialDetailPage />
@@ -183,9 +193,7 @@ export const router = createBrowserRouter([
         ),
       },
 
-      { path: 'forbidden', element: <Forbidden /> },
-
-      { path: '*', element: <NotFound /> },
+      { path: 'forbidden', element: <Forbidden />, handle: { title: 'Not available' } },
     ],
   },
 
@@ -200,6 +208,7 @@ export const router = createBrowserRouter([
   */
   {
     path: '/platform/login',
+    handle: { title: 'Platform sign in' },
     element: (
       <PlatformSessionProvider>
         <PlatformLoginPage />
@@ -214,10 +223,49 @@ export const router = createBrowserRouter([
       </PlatformSessionProvider>
     ),
     children: [
-      { index: true, element: <CompaniesPage /> },
-      { path: 'companies/:companyId', element: <CompanyDetailPage /> },
+      { index: true, element: <CompaniesPage />, handle: { title: 'Companies' } },
+      { path: 'companies/:companyId', element: <CompanyDetailPage />, handle: { title: 'Company' } },
     ],
   },
 
-  { path: '*', element: <Navigate to="/" replace /> },
-])
+  /*
+    EVERY ADDRESS THAT MATCHES NOTHING, signed in or not.
+
+    This used to be two routes: a catch-all inside the console tree, which a
+    signed-out visitor never reached because RequireAuth sent them to sign in
+    first, and a redirect to the root for anything outside it. So a mistyped or
+    stale link said "sign in" to somebody without a session, as though the
+    address existed. Now the session decides the FRAME and the answer is the
+    same: the console's own page inside the shell for an operator, the public
+    one for anybody else.
+  */
+  {
+    element: <NotFoundFrame />,
+    children: [{ path: '*', element: <NotFound />, handle: { title: 'Page not found' } }],
+  },
+]
+
+/**
+ * Every route sits under DocumentTitle, which names the browser tab from the
+ * matched route's `handle.title`. Exported so a test can drive the real table
+ * through a memory router; `router` below is the one the app mounts.
+ */
+export const routes: RouteObject[] = [{ element: <DocumentTitle />, children: appRoutes }]
+
+export const router = createBrowserRouter(routes)
+
+/**
+ * The frame an unmatched address is shown in. A signed-out visitor gets the
+ * public page; everybody else goes through RequireAuth exactly as a real
+ * screen would -- including its loading, unreachable-API and forced password
+ * change states -- and sees NotFound inside the shell.
+ */
+function NotFoundFrame() {
+  const { status } = useSession()
+  if (status === 'anonymous') return <PublicNotFound />
+  return (
+    <RequireAuth>
+      <AppShell />
+    </RequireAuth>
+  )
+}
