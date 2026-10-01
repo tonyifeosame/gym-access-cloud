@@ -65,3 +65,16 @@
 .markdown pre {
   overflow-wrap: anywhere;
 }
+
+/* Every section heading has a hover/focus "Copy link" button (30px wide)
+   positioned absolutely after its last word. In Scalar's one-column layout the
+   heading runs to the screen edge, so a last line that ends near the edge put
+   the invisible button past it and the page scrolled sideways -- 3px at 360px
+   with DejaVu Sans. Reserving the button's width lets the heading wrap before
+   it, so the button always fits and stays fully visible when focused. Scoped
+   to the container query Scalar itself uses for that layout. */
+@container narrow-references-container (max-width: 900px) {
+  .section-header {
+    padding-inline-end: 30px;
+  }
+}
