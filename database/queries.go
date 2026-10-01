@@ -336,11 +336,8 @@ func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) 
 		return false, fmt.Errorf("marking placements for removal after delete: %w", err)
 	}
 
-	if err := destroySealedMaterialTx(tx, companyID, member.ID); err != nil {
-		return false, fmt.Errorf("destroying sealed material after delete: %w", err)
-	}
-
-	// Everything personal goes now, in this transaction; the row keeps only the
+	// Everything personal goes now, in this transaction -- the sealed template
+	// included (erasePersonTx destroys it first); the row keeps only the
 	// member number until the terminals have let go (FinalizeErasedPeople).
 	// Before the DELETE is queued, because erasure clears the person's
 	// existing sync jobs and must not clear this one.

@@ -312,6 +312,12 @@ type erasedMember struct {
 // person finds nothing left to remove and writes one more ledger entry, which
 // matches the same hash and changes nothing.
 func erasePersonTx(tx *sql.Tx, companyID int64, m erasedMember) error {
+	// The sealed template first, on every route into erasure -- a delete made
+	// now and one made before 039 alike.
+	if err := destroySealedMaterialTx(tx, companyID, m.ID); err != nil {
+		return fmt.Errorf("destroying sealed material: %w", err)
+	}
+
 	steps := []struct {
 		what  string
 		query string
@@ -326,18 +332,23 @@ func erasePersonTx(tx *sql.Tx, companyID int64, m erasedMember) error {
 			[]any{m.ID}},
 
 		// Delivered and failed person jobs carry the person's name in their
-		// payload; pending ones are superseded by the DELETE queued next. A job
-		// a terminal has already taken keeps its row -- its acknowledgement
-		// has to find it -- but loses everything in the payload but the number.
+		// payload; pending upserts are superseded by the DELETE. A PENDING
+		// DELETE is NOT removed: for somebody deleted before 039 it is the
+		// only instruction an offline terminal will ever get to forget them,
+		// and nothing re-queues it. It keeps its row, and -- like a job a
+		// terminal has already taken, whose acknowledgement has to find it --
+		// loses everything in the payload but the number.
 		{"finished sync jobs", `
 			DELETE FROM sync_jobs
 			 WHERE entity_type = 'PERSON' AND entity_id = $1
-			   AND status IN ('PENDING', 'COMPLETED', 'FAILED', 'CANCELLED')`,
+			   AND (status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+			        OR (status = 'PENDING' AND job_type <> 'DELETE'))`,
 			[]any{m.ID}},
-		{"in-flight sync jobs", `
+		{"in-flight and undelivered DELETE jobs", `
 			UPDATE sync_jobs
 			   SET payload = jsonb_build_object('member_id', entity_external_id, 'deleted', TRUE)
-			 WHERE entity_type = 'PERSON' AND entity_id = $1 AND status = 'IN_PROGRESS'`,
+			 WHERE entity_type = 'PERSON' AND entity_id = $1
+			   AND (status = 'IN_PROGRESS' OR (status = 'PENDING' AND job_type = 'DELETE'))`,
 			[]any{m.ID}},
 
 		// The person row keeps the member number and nothing else of theirs.

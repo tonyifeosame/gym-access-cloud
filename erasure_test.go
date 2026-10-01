@@ -1008,3 +1008,86 @@ func TestDeletedSubjectGraceDefaultsToNever(t *testing.T) {
 		t.Errorf("DELETED_SUBJECT_GRACE_DAYS default = %d, want 0 (never expire)", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Rows deleted before 039: the two things the legacy path must not lose
+// ---------------------------------------------------------------------------
+
+// softDeleteTheOldWay deletes P-DELETE as the platform did before 039: the
+// row is only marked, the DELETE job is queued with the full payload, and the
+// terminal has not collected it yet.
+func (f *deletionFixture) softDeleteTheOldWay(t *testing.T) {
+	t.Helper()
+	f.giveContactDetails(t)
+	mustExec(t, `UPDATE people SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1`, f.personID)
+	mustExec(t, `UPDATE credential_placements SET state = 'REMOVING'
+	              WHERE credential_id = (SELECT id FROM credentials WHERE public_id = $1::uuid)`, f.credential)
+	mustExec(t, `INSERT INTO sync_jobs (site_id, device_id, job_type, entity_type, entity_id,
+	                                    entity_external_id, payload, protocol_version, status)
+	             SELECT d.site_id, d.id, 'DELETE', 'PERSON', $1, $2,
+	                    jsonb_build_object('member_id', $5::text, 'full_name', $3::text, 'deleted', TRUE),
+	                    1, 'PENDING'
+	               FROM devices d WHERE d.id = $4`, f.personID, f.externalID, erasedName, f.deviceID, f.externalID)
+}
+
+// TestLegacyErasureKeepsAnUndeliveredDeleteJob: an offline terminal's only
+// instruction to forget a person deleted before 039 survives their erasure,
+// stripped to the member number -- and finalisation waits for it.
+func TestLegacyErasureKeepsAnUndeliveredDeleteJob(t *testing.T) {
+	f := newDeletionFixture(t)
+	f.softDeleteTheOldWay(t)
+
+	if n, err := database.EraseLegacyDeletedPeople(context.Background()); err != nil || n != 1 {
+		t.Fatalf("legacy erasure = %d (err %v), want 1", n, err)
+	}
+
+	var payload string
+	mustScan(t, `SELECT payload::text FROM sync_jobs
+	              WHERE entity_type = 'PERSON' AND entity_id = `+itoa(f.personID)+`
+	                AND job_type = 'DELETE' AND status = 'PENDING'`, &payload)
+	if strings.Contains(payload, "full_name") || strings.Contains(payload, "Okonkwo") {
+		t.Errorf("the kept DELETE job still carries the name: %s", payload)
+	}
+	if !strings.Contains(payload, f.externalID) {
+		t.Errorf("the kept DELETE job lost the member number: %s", payload)
+	}
+
+	// The terminal reports the removal, but has not collected the DELETE:
+	// the person is not finalised while that instruction is outstanding.
+	f.reportRemoved(t)
+	if n := finalize(t); n != 0 {
+		t.Fatalf("finalised %d with the DELETE job undelivered", n)
+	}
+
+	// The terminal collects it -- and gets the member number, nothing more.
+	jobs := pollJobs(t, f.env, f.deviceKey)
+	delivered := false
+	for _, job := range jobs {
+		if job["job_type"] == "DELETE" && job["entity_external_id"] == f.externalID {
+			delivered = true
+		}
+		id, _ := job["id"].(float64)
+		ackJob(t, f.env, f.deviceKey, id, map[string]any{"status": "COMPLETED"})
+	}
+	if !delivered {
+		t.Fatalf("the terminal was not given the DELETE: %v", jobs)
+	}
+	if n := finalize(t); n != 1 {
+		t.Errorf("finalised %d once the DELETE was acknowledged, want 1", n)
+	}
+}
+
+// TestLegacyErasureDestroysSealedMaterial: a person deleted before 039 loses
+// their sealed template on the legacy path exactly as a delete made now does.
+func TestLegacyErasureDestroysSealedMaterial(t *testing.T) {
+	f := newDeletionFixture(t)
+	giveSealedMaterial(t, f.credential, digestOne)
+	f.softDeleteTheOldWay(t)
+
+	if n, err := database.EraseLegacyDeletedPeople(context.Background()); err != nil || n != 1 {
+		t.Fatalf("legacy erasure = %d (err %v), want 1", n, err)
+	}
+	if s := sealedStateOf(t, f.credential); s.holdsAnyMaterial() {
+		t.Errorf("a legacy-deleted person's credential still holds sealed material: %+v", s)
+	}
+}
