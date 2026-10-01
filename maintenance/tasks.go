@@ -47,6 +47,21 @@ const (
 	// to delete.
 	defaultRetentionPurgeInterval = 1 * time.Hour
 
+	// The door-history window for a company that has not chosen one (038).
+	//
+	// ONE YEAR. Before 038 such a company kept every door event for ever, which
+	// is personal data held with no end date. A company's own
+	// event_retention_days still wins, in either direction, and
+	// EVENT_RETENTION_DEFAULT_DAYS=0 restores keep-for-ever for companies
+	// without one.
+	//
+	// A year is the conservative choice: long enough to cover an annual
+	// membership, a billing dispute or an incident reported months late, and
+	// it deletes nothing a company has asked to keep. It is a platform default,
+	// not a legal determination -- how long a customer must or may keep access
+	// records is their question, and they answer it with their own setting.
+	defaultEventRetentionDays = 365
+
 	// Provisioning housekeeping: announcements and claim codes.
 	//
 	// EVERY MINUTE, and deliberately not load-bearing. The provisioning paths do
@@ -120,6 +135,11 @@ type Config struct {
 	ReconcileInterval      time.Duration
 	RetentionPurgeInterval time.Duration
 
+	// EventRetentionDefaultDays is the door-history window for a company that
+	// has not set event_retention_days. Zero means no default: such a company
+	// keeps everything.
+	EventRetentionDefaultDays int
+
 	ProvisioningSweepInterval time.Duration
 	ProvisioningRetentionDays int
 
@@ -147,6 +167,8 @@ func LoadConfig() Config {
 			defaultReconcileInterval),
 		RetentionPurgeInterval: envDuration("RETENTION_PURGE_INTERVAL_SECONDS",
 			defaultRetentionPurgeInterval),
+		EventRetentionDefaultDays: envInt("EVENT_RETENTION_DEFAULT_DAYS",
+			defaultEventRetentionDays),
 
 		ProvisioningSweepInterval: envDuration("PROVISIONING_SWEEP_INTERVAL_SECONDS",
 			defaultProvisioningSweepInterval),
@@ -269,15 +291,21 @@ func (c Config) Tasks() []Task {
 	// trigger honours, which keeps "remove rows past their window" expressible
 	// and "remove the row that incriminates me" not.
 	//
-	// A company with no retention configured keeps everything, which is the
-	// default and is what the purge functions already encode -- so this task is
-	// a no-op on an installation where nobody has chosen a window.
+	// Door history -- events and the legacy access_logs, on one window -- uses
+	// the company's own event_retention_days, or EventRetentionDefaultDays when
+	// it has none (038). Audit records have no platform default: a company
+	// without an audit window keeps its audit trail.
 	if c.RetentionPurgeInterval > 0 {
+		defaultDays := c.EventRetentionDefaultDays
 		tasks = append(tasks, Task{
 			Name:     "retention_purge",
 			Interval: c.RetentionPurgeInterval,
 			Run: func(ctx context.Context) (string, error) {
-				events, err := database.PurgeEvents(ctx)
+				events, err := database.PurgeEvents(ctx, defaultDays)
+				if err != nil {
+					return "", err
+				}
+				logs, err := database.PurgeAccessLogs(ctx, defaultDays)
 				if err != nil {
 					return "", err
 				}
@@ -285,11 +313,11 @@ func (c Config) Tasks() []Task {
 				if err != nil {
 					return "", err
 				}
-				if events == 0 && audits == 0 {
+				if events == 0 && logs == 0 && audits == 0 {
 					return "", nil
 				}
-				return fmt.Sprintf("purged %d event(s) and %d audit record(s) past retention",
-					events, audits), nil
+				return fmt.Sprintf("purged %d event(s), %d access log(s) and %d audit record(s) past retention",
+					events, logs, audits), nil
 			},
 		})
 	}

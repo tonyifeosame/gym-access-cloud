@@ -317,7 +317,7 @@ export function EditCompanyDialog({
           onChange={(value) => form.setValue('event_retention_days', value)}
           onBlur={() => form.touch('event_retention_days')}
           disabled={form.submitting}
-          hint="Blank means keep for ever, which is the default. Once a period is set, this form cannot return it to indefinite — the API has no way to express that."
+          hint="Covers access events and the legacy access log. Blank uses the platform default. Once a period is set, this form cannot return it to the default — the API has no way to express that."
         />
 
         <TextField

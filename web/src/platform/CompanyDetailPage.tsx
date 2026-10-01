@@ -303,11 +303,12 @@ export function CompanyDetailPage() {
           </div>
           <div className="detail-list__row">
             <dt>Event retention</dt>
-            {/* Null means keep for ever. Rendering it as a number nobody chose,
-                or as 0, would read as a policy that had been set. */}
+            {/* Null means this company has not chosen a window, so the
+                platform default applies (038). Rendering that default as a
+                number would read as a policy the company had set. */}
             <dd>
               {company.event_retention_days === null ? (
-                <span className="muted">Indefinite</span>
+                <span className="muted">Platform default</span>
               ) : (
                 `${company.event_retention_days} days`
               )}

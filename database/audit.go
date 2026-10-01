@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log"
+	"math"
 	"time"
 
 	"access-terminal-cloud-api/models"
@@ -222,10 +223,36 @@ func PurgeAuditEvents(ctx context.Context) (int64, error) {
 	return removed, err
 }
 
-// PurgeEvents applies each company's configured retention window to field
-// events. Same mechanism, same reasoning.
-func PurgeEvents(ctx context.Context) (int64, error) {
+// PurgeEvents applies each company's retention window to field events. Same
+// mechanism, same reasoning.
+//
+// defaultDays is the window for a company that has not set one (038). Zero
+// means no default: such a company keeps everything, exactly as before 038.
+func PurgeEvents(ctx context.Context, defaultDays int) (int64, error) {
 	var removed int64
-	err := DB.QueryRowContext(ctx, `SELECT purge_events(NULL)`).Scan(&removed)
+	err := DB.QueryRowContext(ctx, `SELECT purge_events(NULL, $1)`,
+		retentionDefaultArg(defaultDays)).Scan(&removed)
 	return removed, err
+}
+
+// PurgeAccessLogs applies the same window to the legacy access_logs table,
+// which the device upload path still writes beside events (038). A door event
+// is the same personal data in either table, so it is kept for the same time.
+func PurgeAccessLogs(ctx context.Context, defaultDays int) (int64, error) {
+	var removed int64
+	err := DB.QueryRowContext(ctx, `SELECT purge_access_logs(NULL, $1)`,
+		retentionDefaultArg(defaultDays)).Scan(&removed)
+	return removed, err
+}
+
+// retentionDefaultArg is the platform default as the purge functions take it:
+// NULL, not 0, when there is none.
+func retentionDefaultArg(days int) sql.NullInt32 {
+	if days <= 0 {
+		return sql.NullInt32{}
+	}
+	if days > math.MaxInt32 {
+		days = math.MaxInt32
+	}
+	return sql.NullInt32{Int32: int32(days), Valid: true}
 }

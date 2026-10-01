@@ -319,10 +319,60 @@ func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) 
 		return false, fmt.Errorf("marking placements for removal after delete: %w", err)
 	}
 
+	if err := destroySealedMaterialTx(tx, companyID, member.ID); err != nil {
+		return false, fmt.Errorf("destroying sealed material after delete: %w", err)
+	}
+
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// destroySealedMaterialTx discards the sealed biometric material held for a
+// deleted person's credentials (026).
+//
+// THE PERSON IS SOFT-DELETED, THEIR TEMPLATE IS NOT. A soft delete keeps the
+// row so that history, audit and the terminals' REMOVED reports still resolve;
+// none of those needs the template, and a template kept for a person an
+// operator removed is biometric data retained with no purpose left. So the
+// ciphertext, the label of the key that sealed it and the digest of the
+// plaintext all go, in the delete's own transaction.
+//
+// THE CREDENTIAL ROW STAYS, AND STAYS AS IT WAS. Its status and deleted_at are
+// untouched on purpose: a terminal's REMOVED report finds the credential by
+// exactly those (resolveOrCreateCredentialTx), and a credential it could not
+// find would be re-created PENDING purely to record the removal -- leaving the
+// real placement stuck in REMOVING for ever.
+//
+// template_format is the one other column that moves. With the material gone
+// it can no longer say VENDOR_TEMPLATE -- there is no template here -- and
+// SENSOR_LOCAL is the truthful answer: the only copies left are on the sensors
+// whose placements this delete has just marked REMOVING. It is also what keeps
+// 020's substance check satisfied for a non-PENDING credential, which must carry
+// material, an identifier, or SENSOR_LOCAL. A credential with an identifier
+// keeps its format; the identifier is its substance.
+//
+// Scoped to this person in this company. A person with no sealed material --
+// every person until a firmware uploads any -- matches nothing, which is
+// success.
+func destroySealedMaterialTx(tx *sql.Tx, companyID, personID int64) error {
+	_, err := tx.Exec(`
+		UPDATE credentials
+		   SET sealed_material  = NULL,
+		       sealed_key_id    = NULL,
+		       sealed_algorithm = NULL,
+		       material_digest  = NULL,
+		       template_format  = CASE
+		           WHEN identifier IS NULL THEN $3
+		           ELSE template_format
+		       END,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE company_id = $1
+		   AND person_id = $2
+		   AND (sealed_material IS NOT NULL OR material_digest IS NOT NULL)`,
+		companyID, personID, models.TemplateFormatSensorLocal)
+	return err
 }
 
 // Enrollment Queries
