@@ -367,7 +367,7 @@ func TestBootstrapRunsAgainOnceEveryOperatorIsRetired(t *testing.T) {
 	// redeploy with the variables set. It requires database access, which is
 	// already full-trust -- there is deliberately no flag that forces a
 	// re-bootstrap over live accounts.
-	if err := database.SoftDeleteUser(one, existing.ID); err != nil {
+	if _, err := database.DeleteUser(one, existing.ID); err != nil {
 		t.Fatalf("retiring the last operator: %v", err)
 	}
 

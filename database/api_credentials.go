@@ -1069,3 +1069,31 @@ func isUniqueViolation(err error, constraint string) bool {
 	}
 	return pqErr.Code == "23505" && pqErr.Constraint == constraint
 }
+
+// PurgeRetiredAPICredentials deletes integration keys that stopped working more
+// than retentionDays ago -- revoked, expired, or superseded past their grace --
+// with their usage rollup and idempotency records (cascade). Returns how many.
+//
+// A dead key authenticates nothing; what its row still holds is the name an
+// operator gave it, who created it and the last address that used it. The
+// audit trail names the key by its public id and outlives the row, which is the
+// record of what happened to it. A key that is still live is unreachable by
+// this predicate at any setting.
+func PurgeRetiredAPICredentials(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	res, err := DB.ExecContext(ctx, `
+		DELETE FROM api_credentials
+		 WHERE (revoked_at IS NOT NULL
+		        AND revoked_at < CURRENT_TIMESTAMP - make_interval(days => $1))
+		    OR (expires_at IS NOT NULL
+		        AND expires_at < CURRENT_TIMESTAMP - make_interval(days => $1))
+		    OR (grace_expires_at IS NOT NULL
+		        AND grace_expires_at < CURRENT_TIMESTAMP - make_interval(days => $1))`,
+		retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

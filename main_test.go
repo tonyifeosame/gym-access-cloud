@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -61,6 +63,17 @@ type testEnv struct {
 
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
+
+	// The deletion ledger key is REQUIRED (039), as it is in production, so
+	// the suite runs with one: random per run, never written anywhere. Tests
+	// about the key's absence unset it themselves.
+	if os.Getenv("DELETION_LEDGER_KEY") == "" {
+		ledgerKey := make([]byte, 32)
+		if _, err := rand.Read(ledgerKey); err != nil {
+			panic(err)
+		}
+		os.Setenv("DELETION_LEDGER_KEY", base64.StdEncoding.EncodeToString(ledgerKey))
+	}
 
 	// The suite reads its database configuration the same way the server does,
 	// but it must not depend on main() having loaded .env: main() never runs in

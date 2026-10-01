@@ -255,7 +255,9 @@ func UpdateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 	return enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, member, false)
 }
 
-// DeleteMember soft-deletes a member and queues a DELETE sync job.
+// DeleteMember erases a member and queues a DELETE sync job (039: see
+// database/deletion.go for what erasure removes and what it keeps until the
+// terminals let go).
 //
 // The DELETE job is the only way a terminal ever learns about a removal --
 // GET /members/changes cannot express one, because a deleted row simply stops
@@ -274,6 +276,20 @@ func DeleteMember(companyID int64, memberID string) error {
 	return tx.Commit()
 }
 
+// PersonPublicID resolves a live person's public id, or "" when there is none.
+// A delete's audit record is labelled with it (ErasedPersonLabel), so it has
+// to be read before the delete, while the person still resolves.
+func PersonPublicID(companyID int64, externalID string) (string, error) {
+	var publicID string
+	err := DB.QueryRow(`SELECT public_id FROM people
+	                     WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL`,
+		companyID, externalID).Scan(&publicID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return publicID, err
+}
+
 // DeleteMemberTx is DeleteMember inside a transaction the caller owns.
 //
 // Reports whether a row was deleted, because the two callers want different
@@ -281,9 +297,10 @@ func DeleteMember(companyID int64, memberID string) error {
 // the service layer answers not-found so an integrator learns the id was wrong.
 func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) {
 	var member models.Member
-	query := `UPDATE people SET deleted_at = CURRENT_TIMESTAMP
-	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
-	          RETURNING id, public_id, external_id, full_name, membership_type, active, updated_at`
+	query := `SELECT id, public_id, external_id, full_name, membership_type, active, updated_at
+	            FROM people
+	           WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
+	           FOR UPDATE`
 
 	err := tx.QueryRow(query, memberID, companyID).Scan(
 		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
@@ -321,6 +338,17 @@ func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) 
 
 	if err := destroySealedMaterialTx(tx, companyID, member.ID); err != nil {
 		return false, fmt.Errorf("destroying sealed material after delete: %w", err)
+	}
+
+	// Everything personal goes now, in this transaction; the row keeps only the
+	// member number until the terminals have let go (FinalizeErasedPeople).
+	// Before the DELETE is queued, because erasure clears the person's
+	// existing sync jobs and must not clear this one.
+	if err := erasePersonTx(tx, companyID, erasedMember{
+		ID: member.ID, PublicID: member.PublicID,
+		ExternalID: member.MemberID, FullName: member.FullName,
+	}); err != nil {
+		return false, err
 	}
 
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {

@@ -318,7 +318,7 @@ export function CompanyDetailPage() {
             <dt>Audit retention</dt>
             <dd>
               {company.audit_retention_days === null ? (
-                <span className="muted">Indefinite</span>
+                <span className="muted">Platform default</span>
               ) : (
                 `${company.audit_retention_days} days`
               )}

@@ -493,10 +493,10 @@ describe('administering a company', () => {
     renderPlatform('/platform/companies/company-1')
 
     await screen.findByRole('heading', { name: 'Details' })
-    // Event retention falls back to the platform default (038); audit
-    // retention has none, so NULL there still keeps everything.
-    expect(screen.getAllByText('Platform default')).toHaveLength(1)
-    expect(screen.getAllByText('Indefinite')).toHaveLength(1)
+    // Both fall back to a platform default: event retention since 038, audit
+    // retention since 039.
+    expect(screen.getAllByText('Platform default')).toHaveLength(2)
+    expect(screen.queryByText('Indefinite')).not.toBeInTheDocument()
   })
 
   it('refuses to offer a slug change, and says why', async () => {

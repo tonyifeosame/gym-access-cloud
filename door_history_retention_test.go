@@ -269,24 +269,60 @@ func TestRetentionPurgeIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestRetentionPurgeLeavesTheAuditTrailAlone: door-history retention is not
-// audit retention. A company with no audit window keeps its audit trail however
-// old, whatever the door-history default is.
-func TestRetentionPurgeLeavesTheAuditTrailAlone(t *testing.T) {
+// TestAuditRetentionHasItsOwnDefault: door-history retention is not audit
+// retention. The audit trail has its own platform default (039) and floor;
+// with no default it keeps everything, and a company's own window wins.
+func TestAuditRetentionHasItsOwnDefault(t *testing.T) {
 	newTestEnv(t)
-	company := companyIDBySlug(t, "two")
-	mustExec(t, `INSERT INTO audit_events (company_id, action, actor_email, occurred_at)
-	             VALUES ($1, 'SITE_CREATED', 'ops@example.com', $2)`, company, daysAgo(4000))
+	unconfigured := companyIDBySlug(t, "two")
+	configured := companyIDBySlug(t, "one")
+	mustExec(t, `UPDATE companies SET audit_retention_days = 30 WHERE id = $1`, configured)
 
-	purgeDoorHistory(t, 1)
-	if _, err := database.PurgeAuditEvents(context.Background()); err != nil {
-		t.Fatalf("purging audit events: %v", err)
+	for _, company := range []int64{unconfigured, configured} {
+		for _, age := range []int{4000, 100, 10} {
+			mustExec(t, `INSERT INTO audit_events (company_id, action, actor_email, occurred_at)
+			             VALUES ($1, 'SITE_CREATED', 'ops@example.com', $2)`, company, daysAgo(age))
+		}
+	}
+	countAudit := func(company int64) int {
+		var n int
+		mustScan(t, `SELECT count(*) FROM audit_events WHERE company_id = `+itoa(company), &n)
+		return n
 	}
 
-	var left int
-	mustScan(t, `SELECT count(*) FROM audit_events WHERE company_id = `+itoa(company), &left)
-	if left != 1 {
-		t.Errorf("an audit record was purged with no audit window configured: %d left", left)
+	// Purging door history never touches the audit trail.
+	purgeDoorHistory(t, 1)
+	if countAudit(unconfigured) != 3 {
+		t.Fatalf("a door-history purge removed audit records")
+	}
+
+	// No audit default: the unconfigured company keeps everything; the
+	// configured one loses only what is past its own 30 days.
+	if _, err := database.PurgeAuditEvents(context.Background(), 0); err != nil {
+		t.Fatalf("purging audit events: %v", err)
+	}
+	if got := countAudit(unconfigured); got != 3 {
+		t.Errorf("with no default the unconfigured company kept %d audit records, want 3", got)
+	}
+	if got := countAudit(configured); got != 1 {
+		t.Errorf("the 30-day company kept %d audit records, want 1", got)
+	}
+
+	// The 365-day default: only the 4000-day record goes.
+	if _, err := database.PurgeAuditEvents(context.Background(), 365); err != nil {
+		t.Fatalf("purging audit events: %v", err)
+	}
+	if got := countAudit(unconfigured); got != 2 {
+		t.Errorf("with a 365-day default the unconfigured company kept %d audit records, want 2", got)
+	}
+
+	// Below the 30-day floor a default is ignored, exactly as a company's own
+	// setting may not go below it.
+	if _, err := database.PurgeAuditEvents(context.Background(), 5); err != nil {
+		t.Fatalf("purging audit events: %v", err)
+	}
+	if got := countAudit(unconfigured); got != 2 {
+		t.Errorf("a 5-day default (below the floor) purged audit records: %d left, want 2", got)
 	}
 }
 
@@ -306,6 +342,11 @@ func TestEventRetentionDefaultIsAYearAndConfigurable(t *testing.T) {
 	t.Setenv("EVENT_RETENTION_DEFAULT_DAYS", "0")
 	if got := maintenance.LoadConfig().EventRetentionDefaultDays; got != 0 {
 		t.Errorf("EVENT_RETENTION_DEFAULT_DAYS=0 gave %d, want 0 (no default)", got)
+	}
+
+	t.Setenv("AUDIT_RETENTION_DEFAULT_DAYS", "")
+	if got := maintenance.LoadConfig().AuditRetentionDefaultDays; got != 365 {
+		t.Errorf("audit default = %d days, want 365", got)
 	}
 
 	// Garbage falls back to the default rather than to "keep for ever" or to a

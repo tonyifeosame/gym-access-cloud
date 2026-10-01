@@ -46,7 +46,18 @@ func backoffFor(attempts int) time.Duration {
 }
 
 // personSyncPayload builds the snapshot a terminal applies for a person change
+//
+// A DELETE carries the member number and nothing else (039). The terminal acts
+// on the job envelope's entity_external_id alone, and a deletion that shipped
+// the person's name to every door in the company would be the opposite of one.
 func personSyncPayload(member *models.Member, deleted bool) ([]byte, error) {
+	if deleted {
+		return json.Marshal(models.PersonSyncPayload{
+			MemberID:  member.MemberID,
+			Deleted:   true,
+			UpdatedAt: member.UpdatedAt,
+		})
+	}
 	payload := models.PersonSyncPayload{
 		MemberID:            member.MemberID,
 		FullName:            member.FullName,

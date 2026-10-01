@@ -327,7 +327,7 @@ func TestOperatorAuthenticationOutcomes(t *testing.T) {
 	}
 	mustExec(t, `UPDATE companies SET active = TRUE WHERE id = $1`, one)
 
-	if err := database.SoftDeleteUser(one, user.ID); err != nil {
+	if _, err := database.DeleteUser(one, user.ID); err != nil {
 		t.Fatalf("soft-deleting operator: %v", err)
 	}
 	if _, err := database.AuthenticatePassword("auth@example.com", testPassword); !errors.Is(err, models.ErrInvalidCredentials) {
@@ -739,13 +739,13 @@ func TestSessionRevocationOnAccountChanges(t *testing.T) {
 	t.Run("deleting an operator cuts off every session", func(t *testing.T) {
 		user := mustCreateOperator(t, one, "gone@example.com", models.RoleViewer)
 		creds, _ := mustOpenSession(t, user.ID)
-		if err := database.SoftDeleteUser(one, user.ID); err != nil {
+		if _, err := database.DeleteUser(one, user.ID); err != nil {
 			t.Fatalf("deleting: %v", err)
 		}
 		if alive(creds.Token) {
 			t.Error("a deleted operator's session still authenticates")
 		}
-		if err := database.SoftDeleteUser(one, user.ID); !errors.Is(err, models.ErrUserNotFound) {
+		if _, err := database.DeleteUser(one, user.ID); !errors.Is(err, models.ErrUserNotFound) {
 			t.Errorf("deleting twice = %v, want ErrUserNotFound", err)
 		}
 	})

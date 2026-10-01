@@ -217,9 +217,13 @@ func ListAuditEvents(companyID int64, query AuditQuery) (*AuditPage, error) {
 // audit_events refuses DELETE by trigger. The function sets the session flag the
 // trigger honours, which keeps "remove rows past their window" expressible and
 // "remove the row that incriminates me" not.
-func PurgeAuditEvents(ctx context.Context) (int64, error) {
+//
+// defaultDays is the window for a company that has not set one (039). Zero
+// means no default: such a company keeps its audit trail.
+func PurgeAuditEvents(ctx context.Context, defaultDays int) (int64, error) {
 	var removed int64
-	err := DB.QueryRowContext(ctx, `SELECT purge_audit_events(NULL)`).Scan(&removed)
+	err := DB.QueryRowContext(ctx, `SELECT purge_audit_events(NULL, $1)`,
+		retentionDefaultArg(defaultDays)).Scan(&removed)
 	return removed, err
 }
 

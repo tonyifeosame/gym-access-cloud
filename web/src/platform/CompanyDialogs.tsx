@@ -328,7 +328,7 @@ export function EditCompanyDialog({
           onChange={(value) => form.setValue('audit_retention_days', value)}
           onBlur={() => form.touch('audit_retention_days')}
           disabled={form.submitting}
-          hint="Blank means keep for ever. An audit trail is usually kept longer than events."
+          hint="Blank uses the platform default. The minimum is 30 days: an audit trail shorter than an incident review is not one."
         />
 
         {/* The slug's absence, explained. A missing field with no reason reads
