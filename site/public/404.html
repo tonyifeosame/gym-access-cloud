@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Page not found · AccessLink</title>
+    <!-- EXPECTED, NOT YET VERIFIED: Render is expected to serve this page, with
+         a 404 status, for every path that matches no file and no rule -- at
+         that path, which is why every reference below is absolute. That
+         behaviour is not in Render's static-site documentation; confirm it on
+         the service's *.onrender.com address before any domain moves
+         (docs/render-free-deployment.md). -->
+    <meta name="robots" content="noindex" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/site.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="wrap masthead__inner">
+        <a class="brand" href="/" aria-label="AccessLink home">
+          <img class="brand__mark" src="/favicon.svg" alt="" width="28" height="28" />
+          <span class="brand__name">AccessLink</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="main" class="notfound">
+      <div class="wrap">
+        <h1 class="notfound__title">Page not found</h1>
+        <p class="notfound__lead">There is nothing at this address. It may have been mistyped, or the page may have moved.</p>
+        <div class="actions">
+          <a class="button button--primary" href="/">AccessLink home</a>
+          <a class="button" href="/docs/">API documentation</a>
+          <a class="button" href="https://app.accesslink.store/login">Operator sign in</a>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

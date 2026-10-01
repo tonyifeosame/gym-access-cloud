@@ -193,10 +193,16 @@ services:
       - key: VITE_API_BASE_URL
         value: https://api.accesslink.store
 
-    # THE PUBLIC API DOCUMENTATION LIVES HERE TOO, at /docs. The console build
-    # publishes ../apidocs into dist/docs/ (web/scripts/build-docs.mjs, run as
-    # its postbuild hook), so https://accesslink.store/docs/... are real files,
-    # which Render serves before it consults any rule below.
+    # A COPY OF THE PUBLIC API DOCUMENTATION, at /docs, FOR THE TRANSITION.
+    # The reference's home is accesslink-site below (https://accesslink.store
+    # /docs). The console build still publishes ../apidocs into dist/docs/
+    # (web/scripts/build-docs.mjs, its postbuild hook) because until the apex
+    # domain is moved to accesslink-site it is still THIS service answering
+    # accesslink.store, and the API's doc_url points there. Every page in it
+    # carries a canonical link to accesslink.store, so the copy on
+    # app.accesslink.store does not compete with it in search. Remove the
+    # postbuild hook and add a /docs redirect to the apex once the apex has
+    # moved -- not before, or accesslink.store/docs would redirect to itself.
     #
     # src/router.tsx uses createBrowserRouter with real paths. Without the
     # rewrite, /sites/:siteId and /redeem 404 on refresh and on any shared deep
@@ -252,6 +258,115 @@ services:
       # Two years, this host only. NOT preload and NOT includeSubDomains: this
       # service does not own the apex and has no business making a commitment
       # for sibling names it does not control.
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000
+
+      # NOT an X-Robots-Tag here, although the console is never meant to be
+      # indexed: until the apex moves, this service also serves the reference at
+      # accesslink.store/docs, and a header on /* would de-index it. The SPA
+      # shell says noindex in its own <meta name="robots"> (web/index.html),
+      # which reaches every console page and none of the reference.
+
+  # ---------------------------------------------------------------------------
+  # accesslink.store -- the public site, and the API reference at /docs.
+  #
+  # Custom domains: accesslink.store and www.accesslink.store. The console is
+  # app.accesslink.store (accesslink-console above); the API is
+  # api.accesslink.store. Moving the apex here from the console service is a
+  # dashboard step -- see docs/render-free-deployment.md, "Splitting the public
+  # site from the console", for the order it has to happen in.
+  #
+  # Static files only. No catch-all rewrite, ON PURPOSE: a path that matches no
+  # file and no rule below gets Render's not-found response, a real 404. That
+  # Render puts public/404.html in that response is EXPECTED, NOT YET VERIFIED
+  # on this account: it is not in Render's static-site documentation, so it
+  # has to be seen on the service's *.onrender.com address before the domain
+  # moves (docs/render-free-deployment.md). The console needed the catch-all
+  # because it routes in the browser; this site does not route at all.
+  # ---------------------------------------------------------------------------
+  - name: accesslink-site
+    type: web
+    runtime: static
+    branch: main
+    autoDeploy: false
+
+    rootDir: site
+    # Nothing to install for the page itself; the reference's build installs
+    # its own dependencies in ../apidocs (web/scripts/build-docs.mjs).
+    buildCommand: npm run build
+    staticPublishPath: ./dist
+
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+
+    routes:
+      # The reference, exactly as the console has served it: the bare /docs to
+      # the directory, and the API's doc_url form /docs/errors/<code> to the
+      # page that exists. See the note on accesslink-console for why Render
+      # needs both spelled out.
+      - type: redirect
+        source: /docs
+        destination: /docs/
+      - type: rewrite
+        source: /docs/errors/*
+        destination: /docs/errors/*/index.html
+
+      # THE CONSOLE'S OLD ADDRESSES. Reset and invitation emails already sent,
+      # Google sign-in returns made before CONSOLE_URL changes, and bookmarks
+      # all point at these paths on this domain. Each is rewritten to a page
+      # that forwards the browser to the same path, query and fragment on
+      # app.accesslink.store (public/console-redirect.html says why that is a
+      # script and not a redirect rule). One pair per top-level route in
+      # web/src/router.tsx; a path not listed here is a 404, which is right.
+      - { type: rewrite, source: /login, destination: /console-redirect.html }
+      - { type: rewrite, source: /register, destination: /console-redirect.html }
+      - { type: rewrite, source: /forgot-password, destination: /console-redirect.html }
+      - { type: rewrite, source: /redeem, destination: /console-redirect.html }
+      - { type: rewrite, source: /forbidden, destination: /console-redirect.html }
+      - { type: rewrite, source: /events, destination: /console-redirect.html }
+      - { type: rewrite, source: /activity, destination: /console-redirect.html }
+      - { type: rewrite, source: /people, destination: /console-redirect.html }
+      - { type: rewrite, source: /people/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /terminals, destination: /console-redirect.html }
+      - { type: rewrite, source: /terminals/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /sites, destination: /console-redirect.html }
+      - { type: rewrite, source: /sites/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /operators, destination: /console-redirect.html }
+      - { type: rewrite, source: /operators/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /access/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /settings, destination: /console-redirect.html }
+      - { type: rewrite, source: /settings/*, destination: /console-redirect.html }
+      - { type: rewrite, source: /platform, destination: /console-redirect.html }
+      - { type: rewrite, source: /platform/*, destination: /console-redirect.html }
+
+    headers:
+      # The console's policy without the API origin: nothing on this site
+      # calls the API. 'unsafe-inline' styles and data: images are for the
+      # reference (Scalar), which apidocs/scripts/check-site.mjs renders under
+      # this exact policy when run against this service.
+      - path: /*
+        name: Content-Security-Policy
+        value: >-
+          default-src 'none'; script-src 'self'; connect-src 'self';
+          img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self';
+          frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self';
+          frame-ancestors 'none'
+
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+
+      # The console-redirect page carries a reset token in its query string
+      # for the moment it takes to forward it; nothing here should ever send
+      # a Referer.
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+
+      # This host only. NOT includeSubDomains: that would be a commitment for
+      # every name under accesslink.store, made by a static page.
       - path: /*
         name: Strict-Transport-Security
         value: max-age=63072000

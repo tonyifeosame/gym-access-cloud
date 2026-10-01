@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>AccessLink Console</title>
+    <!--
+      The console is an authenticated application on app.accesslink.store; none
+      of it belongs in a search index. A meta tag rather than a header on the
+      static site, because until accesslink.store moves to its own service this
+      same site also serves the public API reference at /docs, which must stay
+      indexable (see render.yaml). public/robots.txt leaves crawling open so
+      this is seen.
+    -->
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   </head>
   <body>
     <div id="root"></div>

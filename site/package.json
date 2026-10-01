@@ -1,0 +1,11 @@
+{
+  "name": "accesslink-site",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "accesslink.store: the public pre-launch page, with the API reference published under /docs. No dependencies of its own: the build and the check use what ../apidocs installs.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/check.mjs"
+  }
+}

@@ -23,6 +23,12 @@
  *     /docs/errors/<code> (with and without a trailing slash) answer;
  *   - the collapsible reference notes render as real <details> elements.
  *
+ * DOCS_SERVICE names the render.yaml service whose routes and headers are
+ * emulated: accesslink-console by default, or accesslink-site -- the public
+ * site that is the reference's home once accesslink.store moves off the
+ * console. A service without the SPA catch-all answers an unmatched path with
+ * 404 and its 404.html, as Render does.
+ *
  * DOCS_SITE_ROOT, when set, names a directory to serve as the whole origin --
  * the console's web/dist after its build, which contains docs/ -- so the very
  * artefact that is deployed is what gets checked. Without it, dist/ is
@@ -46,16 +52,17 @@ const doc = YAML.parse(readFileSync(join(ROOT, 'openapi.yaml'), 'utf8'))
 // static site, so the console service's headers -- above all its
 // Content-Security-Policy -- are the ones that apply.
 const render = YAML.parse(readFileSync(join(ROOT, '..', 'render.yaml'), 'utf8'))
-const consoleService = render.services.find((svc) => svc.name === 'accesslink-console')
+const SERVICE = process.env.DOCS_SERVICE || 'accesslink-console'
+const consoleService = render.services.find((svc) => svc.name === SERVICE)
 if (!consoleService) {
-  console.error('render.yaml has no accesslink-console service')
+  console.error(`render.yaml has no ${SERVICE} service`)
   process.exit(1)
 }
 const deployedHeaders = (consoleService.headers ?? [])
   .filter((h) => h.path === '/*')
   .map((h) => [h.name, String(h.value).replace(/\s+/g, ' ').trim()])
 if (!deployedHeaders.some(([name]) => name === 'Content-Security-Policy')) {
-  console.error('render.yaml: accesslink-console declares no Content-Security-Policy')
+  console.error(`render.yaml: ${SERVICE} declares no Content-Security-Policy`)
   process.exit(1)
 }
 // THE ROUTING IS RENDER'S, AS OBSERVED IN PRODUCTION, NOT AS ONE MIGHT HOPE.
@@ -71,9 +78,22 @@ if (!deployedHeaders.some(([name]) => name === 'Content-Security-Policy')) {
 // for exactly the URLs production would fail for.
 const SITE_ROOT = process.env.DOCS_SITE_ROOT ? resolve(process.env.DOCS_SITE_ROOT) : null
 const routes = consoleService.routes ?? []
-if (routes.length === 0 || routes[routes.length - 1].source !== '/*') {
+const hasCatchAll = routes.length > 0 && routes[routes.length - 1].source === '/*'
+if (SERVICE === 'accesslink-console' && !hasCatchAll) {
   console.error('render.yaml: accesslink-console must end its routes with the /* catch-all')
   process.exit(1)
+}
+// Render's answer for a path no file and no rule matches: its 404, carrying
+// the site's own 404.html when it has one.
+const notFound = (res) => {
+  const page = SITE_ROOT ? join(SITE_ROOT, '404.html') : null
+  if (page && existsSync(page)) {
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'X-Not-Found-Page': '404.html' })
+    res.end(readFileSync(page))
+    return
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' })
+  res.end('not found')
 }
 // A Render rule: `*` in the source matches any string from that position on;
 // `*` in the destination is replaced by what the source's `*` captured.
@@ -152,8 +172,7 @@ const server = createServer((req, res) => {
     }
   }
   if (!file) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' })
-    res.end('not found')
+    notFound(res)
     return
   }
   res.writeHead(200, {
@@ -180,8 +199,14 @@ check(bare.status === 301 && bare.headers.get('location') === `${BASE}/`,
   `GET ${BASE} must redirect to ${BASE}/ (got ${bare.status} ${bare.headers.get('location') ?? ''}); the bare path is not a file and would fall into the console`)
 check(await isDocs(`${BASE}`), `GET ${BASE} (following the redirect) did not reach the reference`)
 check(await isDocs(`${BASE}/`), `GET ${BASE}/ did not reach the reference (fell through to the console)`)
-const notDocs = await fetch(origin + '/settings/api-credentials')
-check(notDocs.status === 200 && notDocs.headers.get('x-fallback') === 'console', 'a console route no longer falls through to the console shell')
+if (hasCatchAll) {
+  const notDocs = await fetch(origin + '/settings/api-credentials')
+  check(notDocs.status === 200 && notDocs.headers.get('x-fallback') === 'console', 'a console route no longer falls through to the console shell')
+} else {
+  // No SPA behind the reference: a mistyped docs path is a real 404.
+  const missing = await fetch(`${origin}${BASE}/no-such-page`)
+  check(missing.status === 404, `GET ${BASE}/no-such-page answered ${missing.status}; without a catch-all it must be a 404`)
+}
 const bogus = await fetch(`${origin}${BASE}/errors/no_such_code`)
 check(bogus.status === 404, `an unknown error code answered ${bogus.status}; the rewrite must not fall into the console shell or invent a page`)
 const fetchStatus = async (path) => (await fetch(origin + path)).status
@@ -202,7 +227,13 @@ for (const c of doc['x-accesslink-error-codes']) {
     check(res.status === 200 && res.headers.get('x-fallback') !== 'console' && html.includes(`<code>${c.code}</code>`) && html.includes(String(c.status)),
       `${path} is missing or does not name the code and status`)
     check(!/docs\.accesslink\.store|onrender\.com/.test(html), `${path} names a hosting hostname`)
+    check(new RegExp(`<meta name="description" content="AccessLink API error ${c.code} \\(HTTP ${c.status}\\): `).test(html),
+      `${path} has no description naming the code and status`)
   }
+}
+check(/<meta name="description" content="[^"]{50,}">/.test(await (await fetch(`${origin}${BASE}/errors/`)).text()), `${BASE}/errors/ has no description`)
+for (const asset of ['favicon.svg', 'favicon.ico', 'apple-touch-icon.png']) {
+  check((await fetchStatus(`${BASE}/${asset}`)) === 200, `GET ${BASE}/${asset} is not 200`)
 }
 
 // --- the reference in a browser -------------------------------------------

@@ -44,15 +44,22 @@ const TYPE_NOTES = {
   api_error: 'The failure is on our side. Retry after `Retry-After` on a 503; quote the `request_id` to support on a 500.',
 }
 
-const page = ({ title, heading, body, canonical }) => `<!doctype html>
+// The description is built from the registered code, status and message only,
+// so a page never says more than openapi.yaml does. The pages stay indexable:
+// they are in the sitemap, and a developer searching an error code should land
+// on its page.
+const page = ({ title, description, heading, body, canonical }) => `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>${escape(title)}</title>
+<meta name="description" content="${escape(description)}">
 <link rel="canonical" href="${canonical}">
+<link rel="icon" href="${BASE}/favicon.ico" sizes="32x32">
 <link rel="icon" href="${BASE}/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="${BASE}/apple-touch-icon.png">
 <style>
   :root { color-scheme: light dark; --accent: #2f5bd7; --muted: #5d6b7b; --line: #d6dde6; --code: #f1f4f8; }
   @media (prefers-color-scheme: dark) { :root { --accent: #7d9bf0; --muted: #97a4b4; --line: #2b3542; --code: #161d27; } }
@@ -114,7 +121,13 @@ for (const c of codes) {
   // Written twice, as errors/<code>/index.html and errors/<code>.html: the
   // API's doc_url has no trailing slash, and static hosts differ on which of
   // the two files answers a clean URL. Both forms resolve either way.
-  const html = page({ title: `${c.code} — AccessLink API errors`, heading: c.code, body, canonical: `${site}/errors/${c.code}` })
+  const html = page({
+    title: `${c.code} — AccessLink API errors`,
+    description: `AccessLink API error ${c.code} (HTTP ${c.status}): ${c.message}`,
+    heading: c.code,
+    body,
+    canonical: `${site}/errors/${c.code}`,
+  })
   writeFileSync(join(dir, 'index.html'), html)
   writeFileSync(join(DIST, 'errors', `${c.code}.html`), html)
 }
@@ -135,6 +148,7 @@ writeFileSync(
   join(DIST, 'errors', 'index.html'),
   page({
     title: 'Error codes — AccessLink API',
+    description: 'Every AccessLink public-API error code, grouped by type, with its HTTP status and a page for the doc_url each error body carries.',
     heading: '',
     canonical: `${site}/errors/`,
     body: `
