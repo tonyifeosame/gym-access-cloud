@@ -241,6 +241,15 @@ func main() {
 	// NOT fatal on an installation with no sealing keys: that is simply a
 	// deployment which has not turned this feature on, and it is entitled to run
 	// exactly as it did before 026.
+	// The deletion ledger key (039). REQUIRED: without it a deletion cannot be
+	// recorded in a form that recognises the person later, so a late upload
+	// or a restored backup would bring them back. Refusing to start is the
+	// loud failure; a missing key found at the first deletion would be a quiet
+	// one. Development may opt in to a generated key instead.
+	if err := database.CheckLedgerKeyConfig(); err != nil {
+		log.Fatalf("DELETION LEDGER: %v", err)
+	}
+
 	refuse, checkErr := sealingKeyStartupFault()
 	if checkErr != nil {
 		// NOT FATAL. This check exists to catch a misconfiguration, and it is

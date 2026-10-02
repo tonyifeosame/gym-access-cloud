@@ -603,34 +603,6 @@ func SetUserRole(companyID, userID int64, role string) error {
 	return tx.Commit()
 }
 
-// SoftDeleteUser retires an operator, freeing their email address for reuse and
-// revoking every session they hold.
-func SoftDeleteUser(companyID, userID int64) error {
-	tx, err := DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	result, err := tx.Exec(`
-		UPDATE users
-		   SET deleted_at = CURRENT_TIMESTAMP, active = FALSE
-		 WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL`,
-		userID, companyID)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected == 0 {
-		return models.ErrUserNotFound
-	}
-
-	if err := revokeUserSessions(tx, userID, 0); err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
 // ListSiteGrants returns the sites an operator has been granted, resolved for
 // display.
 //

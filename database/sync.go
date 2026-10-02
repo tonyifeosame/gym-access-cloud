@@ -46,7 +46,18 @@ func backoffFor(attempts int) time.Duration {
 }
 
 // personSyncPayload builds the snapshot a terminal applies for a person change
+//
+// A DELETE carries the member number and nothing else (039). The terminal acts
+// on the job envelope's entity_external_id alone, and a deletion that shipped
+// the person's name to every door in the company would be the opposite of one.
 func personSyncPayload(member *models.Member, deleted bool) ([]byte, error) {
+	if deleted {
+		return json.Marshal(models.PersonSyncPayload{
+			MemberID:  member.MemberID,
+			Deleted:   true,
+			UpdatedAt: member.UpdatedAt,
+		})
+	}
 	payload := models.PersonSyncPayload{
 		MemberID:            member.MemberID,
 		FullName:            member.FullName,
@@ -375,6 +386,23 @@ func GetPendingJobsForDevice(deviceID int64, limit int) ([]models.SyncJob, error
 	               WHERE device_id = $1
 	                 AND status = 'PENDING'
 	                 AND next_attempt_at <= CURRENT_TIMESTAMP
+	                 -- NOTHING OVERTAKES A PENDING DELETE FOR THE SAME NUMBER
+	                 -- (039). A terminal knows a person only by their number,
+	                 -- and a number can pass from a deleted holder to somebody
+	                 -- new. A DELETE for the old holder that is waiting out a
+	                 -- backoff must not be overtaken by the CREATE for the new
+	                 -- one, or it would arrive afterwards and remove the live
+	                 -- member. Only an older pending DELETE holds a job back:
+	                 -- an enrolment queued behind its own person's CREATE is
+	                 -- still handed out in the same poll.
+	                 AND NOT (entity_type = 'PERSON' AND entity_external_id IS NOT NULL
+	                          AND EXISTS (SELECT 1 FROM sync_jobs older
+	                                       WHERE older.device_id = sync_jobs.device_id
+	                                         AND older.entity_type = 'PERSON'
+	                                         AND older.entity_external_id = sync_jobs.entity_external_id
+	                                         AND older.job_type = 'DELETE'
+	                                         AND older.status = 'PENDING'
+	                                         AND older.id < sync_jobs.id))
 	                 -- A LAPSED COMMAND IS NEVER HANDED OUT (024).
 	                 --
 	                 -- Every other job type describes STATE, so delivering it

@@ -255,7 +255,9 @@ func UpdateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 	return enqueuePersonChangeTx(tx, companyID, models.SyncJobUpdate, member, false)
 }
 
-// DeleteMember soft-deletes a member and queues a DELETE sync job.
+// DeleteMember erases a member and queues a DELETE sync job (039: see
+// database/deletion.go for what erasure removes and what it keeps until the
+// terminals let go).
 //
 // The DELETE job is the only way a terminal ever learns about a removal --
 // GET /members/changes cannot express one, because a deleted row simply stops
@@ -274,6 +276,20 @@ func DeleteMember(companyID int64, memberID string) error {
 	return tx.Commit()
 }
 
+// PersonPublicID resolves a live person's public id, or "" when there is none.
+// A delete's audit record is labelled with it (ErasedPersonLabel), so it has
+// to be read before the delete, while the person still resolves.
+func PersonPublicID(companyID int64, externalID string) (string, error) {
+	var publicID string
+	err := DB.QueryRow(`SELECT public_id FROM people
+	                     WHERE company_id = $1 AND external_id = $2 AND deleted_at IS NULL`,
+		companyID, externalID).Scan(&publicID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return publicID, err
+}
+
 // DeleteMemberTx is DeleteMember inside a transaction the caller owns.
 //
 // Reports whether a row was deleted, because the two callers want different
@@ -281,9 +297,10 @@ func DeleteMember(companyID int64, memberID string) error {
 // the service layer answers not-found so an integrator learns the id was wrong.
 func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) {
 	var member models.Member
-	query := `UPDATE people SET deleted_at = CURRENT_TIMESTAMP
-	          WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
-	          RETURNING id, public_id, external_id, full_name, membership_type, active, updated_at`
+	query := `SELECT id, public_id, external_id, full_name, membership_type, active, updated_at
+	            FROM people
+	           WHERE external_id = $1 AND company_id = $2 AND deleted_at IS NULL
+	           FOR UPDATE`
 
 	err := tx.QueryRow(query, memberID, companyID).Scan(
 		&member.ID, &member.PublicID, &member.MemberID, &member.FullName,
@@ -319,10 +336,68 @@ func DeleteMemberTx(tx *sql.Tx, companyID int64, memberID string) (bool, error) 
 		return false, fmt.Errorf("marking placements for removal after delete: %w", err)
 	}
 
+	// Everything personal goes now, in this transaction -- the sealed template
+	// included (erasePersonTx destroys it first); the row keeps only the
+	// member number until the terminals have let go (FinalizeErasedPeople).
+	// Before the DELETE is queued, because erasure clears the person's
+	// existing sync jobs and must not clear this one.
+	if err := erasePersonTx(tx, companyID, erasedMember{
+		ID: member.ID, PublicID: member.PublicID,
+		ExternalID: member.MemberID, FullName: member.FullName,
+	}); err != nil {
+		return false, err
+	}
+
 	if err := enqueuePersonChangeTx(tx, companyID, models.SyncJobDelete, &member, true); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// destroySealedMaterialTx discards the sealed biometric material held for a
+// deleted person's credentials (026).
+//
+// THE PERSON IS SOFT-DELETED, THEIR TEMPLATE IS NOT. A soft delete keeps the
+// row so that history, audit and the terminals' REMOVED reports still resolve;
+// none of those needs the template, and a template kept for a person an
+// operator removed is biometric data retained with no purpose left. So the
+// ciphertext, the label of the key that sealed it and the digest of the
+// plaintext all go, in the delete's own transaction.
+//
+// THE CREDENTIAL ROW STAYS, AND STAYS AS IT WAS. Its status and deleted_at are
+// untouched on purpose: a terminal's REMOVED report finds the credential by
+// exactly those (resolveOrCreateCredentialTx), and a credential it could not
+// find would be re-created PENDING purely to record the removal -- leaving the
+// real placement stuck in REMOVING for ever.
+//
+// template_format is the one other column that moves. With the material gone
+// it can no longer say VENDOR_TEMPLATE -- there is no template here -- and
+// SENSOR_LOCAL is the truthful answer: the only copies left are on the sensors
+// whose placements this delete has just marked REMOVING. It is also what keeps
+// 020's substance check satisfied for a non-PENDING credential, which must carry
+// material, an identifier, or SENSOR_LOCAL. A credential with an identifier
+// keeps its format; the identifier is its substance.
+//
+// Scoped to this person in this company. A person with no sealed material --
+// every person until a firmware uploads any -- matches nothing, which is
+// success.
+func destroySealedMaterialTx(tx *sql.Tx, companyID, personID int64) error {
+	_, err := tx.Exec(`
+		UPDATE credentials
+		   SET sealed_material  = NULL,
+		       sealed_key_id    = NULL,
+		       sealed_algorithm = NULL,
+		       material_digest  = NULL,
+		       template_format  = CASE
+		           WHEN identifier IS NULL THEN $3
+		           ELSE template_format
+		       END,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE company_id = $1
+		   AND person_id = $2
+		   AND (sealed_material IS NOT NULL OR material_digest IS NOT NULL)`,
+		companyID, personID, models.TemplateFormatSensorLocal)
+	return err
 }
 
 // Enrollment Queries

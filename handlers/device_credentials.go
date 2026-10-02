@@ -188,6 +188,17 @@ func ReportCredentialPlacement(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	case errors.Is(err, models.ErrPersonNotFound):
+		// A REMOVED report about somebody erased and already finalised (039)
+		// is the terminal confirming what the platform asked for. Nothing is
+		// left to record it against, and that is the point -- so it is
+		// accepted, not refused.
+		if req.State == models.PlacementRemoved {
+			if erased, lookupErr := database.LedgerKnowsSubject(
+				c.GetInt64("company_id"), req.MemberID); lookupErr == nil && erased {
+				c.JSON(http.StatusOK, gin.H{"recorded": false, "erased": true})
+				return
+			}
+		}
 		// A terminal must not retry a person that does not exist in its tenant.
 		// 404 rather than 500 is what stops it retrying forever.
 		c.JSON(http.StatusNotFound, gin.H{"error": "Member not found"})

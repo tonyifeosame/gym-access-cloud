@@ -488,13 +488,15 @@ describe('recovering a locked-out customer', () => {
 // ---------------------------------------------------------------------------
 
 describe('administering a company', () => {
-  it('renders NULL retention as indefinite rather than as a number nobody chose', async () => {
+  it('renders NULL retention as the default it falls back to, not as a number nobody chose', async () => {
     signInAsPlatform()
     renderPlatform('/platform/companies/company-1')
 
     await screen.findByRole('heading', { name: 'Details' })
-    const rows = screen.getAllByText('Indefinite')
-    expect(rows.length).toBe(2)
+    // Both fall back to a platform default: event retention since 038, audit
+    // retention since 039.
+    expect(screen.getAllByText('Platform default')).toHaveLength(2)
+    expect(screen.queryByText('Indefinite')).not.toBeInTheDocument()
   })
 
   it('refuses to offer a slug change, and says why', async () => {

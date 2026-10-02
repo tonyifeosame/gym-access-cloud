@@ -154,6 +154,16 @@ func LogAccess(c *gin.Context) {
 		memberID = &req.MemberID
 	}
 
+	// A deleted member's number is not stored (039); see LogDeviceAccess.
+	if memberID != nil {
+		if erased, err := database.IsErasedSubject(c.GetInt64("company_id"), *memberID,
+			time.Time{}); err != nil {
+			logError(c, "deleted-subject lookup", err)
+		} else if erased {
+			memberID = nil
+		}
+	}
+
 	log := models.AccessLog{
 		MemberID: memberID,
 		Granted:  req.Granted,
@@ -292,6 +302,21 @@ func LogDeviceAccess(c *gin.Context) {
 	companyID := c.GetInt64("company_id")
 	siteID := c.GetInt64("site_id")
 	deviceID := c.GetInt64("device_id")
+
+	// A DELETED MEMBER'S NUMBER IS NOT STORED (039). A terminal that was offline
+	// when somebody was deleted uploads the door events it queued before it
+	// heard, and storing them against the number would recreate exactly the
+	// history the deletion removed. The event is kept -- the door did open or
+	// refuse -- with nobody attached. A lookup failure keeps the number: an
+	// event is never lost to a ledger error, and the erasure can be re-run.
+	if memberID != nil {
+		if erased, err := database.IsErasedSubject(companyID, *memberID, occurredAt); err != nil {
+			logError(c, "deleted-subject lookup", err)
+		} else if erased {
+			memberID = nil
+			req.MemberID = ""
+		}
+	}
 
 	// THE ATTRIBUTION GUARD (032). A terminal transferred from another company
 	// on firmware that does not wipe its queue can upload the previous owner's

@@ -860,16 +860,26 @@ func ConsoleUpdatePerson(c *gin.Context) {
 // Soft delete, and the existing call enqueues the DELETE sync job that is the
 // only way an offline terminal ever learns to forget a credential.
 func ConsoleDeletePerson(c *gin.Context) {
-	if err := database.DeleteMember(c.GetInt64("company_id"), c.Param("external_id")); err != nil {
+	companyID := c.GetInt64("company_id")
+	publicID, err := database.PersonPublicID(companyID, c.Param("external_id"))
+	if err != nil {
+		logError(c, "console delete person", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete person"})
+		return
+	}
+	if err := database.DeleteMember(companyID, c.Param("external_id")); err != nil {
 		logError(c, "console delete person", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete person"})
 		return
 	}
 
-	// The record OUTLIVES the row, which is the point. A soft-deleted person is
-	// invisible to every console query, so without this the only trace that they
-	// ever existed would be the sync job that told the terminals to forget them.
-	recordAudit(c, auditPersonDeleted, auditTargetPerson, "", c.Param("external_id"), nil)
+	// The record OUTLIVES the person, which is the point -- but it names them
+	// by the pseudonym their earlier audit rows were just given, not by the
+	// member number the deletion removed (039).
+	if publicID != "" {
+		recordAudit(c, auditPersonDeleted, auditTargetPerson, "",
+			database.ErasedPersonLabel(publicID), nil)
+	}
 
 	c.Status(http.StatusNoContent)
 }
@@ -1217,7 +1227,8 @@ func ConsoleDeleteOperator(c *gin.Context) {
 		return
 	}
 
-	if err := database.SoftDeleteUser(c.GetInt64("company_id"), target.ID); err != nil {
+	pseudonym, err := database.DeleteUser(c.GetInt64("company_id"), target.ID)
+	if err != nil {
 		if errors.Is(err, models.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Operator not found"})
 			return
@@ -1228,10 +1239,10 @@ func ConsoleDeleteOperator(c *gin.Context) {
 	}
 
 	// The role goes into the record because the account is gone by the time
-	// anybody reads it. audit_events denormalises its actor for the same reason,
-	// in the other direction.
+	// anybody reads it. The operator is named by the pseudonym every other audit
+	// row about them now carries, not by the address the deletion removed (039).
 	recordAudit(c, auditOperatorDeleted, auditTargetOperator, target.PublicID,
-		target.Email, gin.H{"role": target.Role})
+		pseudonym, gin.H{"role": target.Role})
 
 	c.Status(http.StatusNoContent)
 }

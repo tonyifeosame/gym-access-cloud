@@ -86,6 +86,17 @@ func LoggingMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// THE ROUTE, NOT THE URL (039). A URL carries the ids in it --
+		// /console/people/<member number> -- and request logs sit with the
+		// host, outside every retention and erasure rule this platform
+		// enforces. The route template says the same thing about the request
+		// without naming anybody. An unmatched path has no template and is
+		// logged as it arrived: it reached no handler, so it named nobody the
+		// platform holds.
+		if route := c.FullPath(); route != "" {
+			path = route
+		}
+
 		status := c.Writer.Status()
 		latency := time.Since(start)
 

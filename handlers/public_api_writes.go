@@ -244,13 +244,24 @@ func PublicDeleteMember(c *gin.Context) {
 		return
 	}
 	memberID := c.Param("member_id")
+	// Read before the delete: the audit record names the person by the
+	// pseudonym erasure gives them, and only the live row can supply it (039).
+	publicID, err := database.PersonPublicID(tc.CompanyID(), memberID)
+	if err != nil {
+		RespondServiceError(c, "public delete member", err)
+		return
+	}
 	removed, err := publicAPI().members.Delete(c.Request.Context(), tc, memberID)
 	if err != nil {
 		RespondServiceError(c, "public delete member", err)
 		return
 	}
 	if removed {
-		recordIntegrationAudit(c, tc, auditPersonDeleted, auditTargetPerson, "", memberID, nil)
+		label := memberID
+		if publicID != "" {
+			label = database.ErasedPersonLabel(publicID)
+		}
+		recordIntegrationAudit(c, tc, auditPersonDeleted, auditTargetPerson, "", label, nil)
 	}
 	c.Status(http.StatusNoContent)
 }

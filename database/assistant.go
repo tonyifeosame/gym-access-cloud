@@ -345,9 +345,40 @@ func SettleAssistantConfirmation(id int64, outcome string) error {
 
 // --- retention -------------------------------------------------------------------
 
+// PurgeAssistantRecordsContext deletes tool-call and confirmation records older
+// than the retention window (039).
+//
+// They outlive their conversation by design -- the conversation's purge only
+// unlinks them -- and they carry the arguments the model chose, which name
+// people, plus the operator's address and browser. Kept for the same window
+// as the conversation they came from, and no longer: the action itself is in
+// the audit trail, which is the record.
+func PurgeAssistantRecordsContext(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		return 0, nil
+	}
+	calls, err := DB.ExecContext(ctx, `
+		DELETE FROM assistant_tool_calls
+		 WHERE created_at < CURRENT_TIMESTAMP - make_interval(days => $1)`, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	confirmations, err := DB.ExecContext(ctx, `
+		DELETE FROM assistant_confirmations
+		 WHERE issued_at < CURRENT_TIMESTAMP - make_interval(days => $1)
+		   AND (consumed_at IS NOT NULL OR expires_at < CURRENT_TIMESTAMP)`, retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	n1, _ := calls.RowsAffected()
+	n2, _ := confirmations.RowsAffected()
+	return n1 + n2, nil
+}
+
 // PurgeAssistantConversationsContext deletes conversations idle for longer
 // than the retention window. Messages go with them; tool calls and
 // confirmations keep their rows with the conversation reference nulled.
+// PurgeAssistantRecordsContext removes those rows on the same window.
 func PurgeAssistantConversationsContext(ctx context.Context, retentionDays int) (int64, error) {
 	if retentionDays <= 0 {
 		return 0, nil

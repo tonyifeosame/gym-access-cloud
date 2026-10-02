@@ -47,6 +47,66 @@ const (
 	// to delete.
 	defaultRetentionPurgeInterval = 1 * time.Hour
 
+	// The door-history window for a company that has not chosen one (038).
+	//
+	// ONE YEAR. Before 038 such a company kept every door event for ever, which
+	// is personal data held with no end date. A company's own
+	// event_retention_days still wins, in either direction, and
+	// EVENT_RETENTION_DEFAULT_DAYS=0 restores keep-for-ever for companies
+	// without one.
+	//
+	// A year is the conservative choice: long enough to cover an annual
+	// membership, a billing dispute or an incident reported months late, and
+	// it deletes nothing a company has asked to keep. It is a platform default,
+	// not a legal determination -- how long a customer must or may keep access
+	// records is their question, and they answer it with their own setting.
+	defaultEventRetentionDays = 365
+
+	// The operator audit trail for a company that has not chosen a window
+	// (039). One year, matching door history: an incident is usually reported
+	// within it, and a deleted operator's pseudonymous rows do not outlive it.
+	// A company's own audit_retention_days (floor 30) still wins, and
+	// AUDIT_RETENTION_DEFAULT_DAYS=0 restores keep-for-ever.
+	defaultAuditRetentionDays = 365
+
+	// How long a finalised deleted-subject ledger entry is kept (039; see
+	// database/deletion.go and docs/erasure.md). ZERO MEANS NEVER EXPIRE, and
+	// that is the default.
+	//
+	// An entry is never removed before finalisation. After it, two things can
+	// still present the member number:
+	//
+	//   * Terminals on firmware 1.3.5 keep queued door events in flash across
+	//     reboots with no time limit. A network failure never spends one of an
+	//     event's twenty attempts; only a server's answer does, and the 32-entry
+	//     queue drops its oldest only when it overflows. A terminal that
+	//     confirms the removal and then goes offline can upload a pre-deletion
+	//     event at any later time -- so no finite window is safe while such
+	//     terminals are in service.
+	//   * A restored backup. Replay needs the entry, so it must outlive every
+	//     restorable backup taken before the deletion -- and manual dumps have
+	//     no expiry of their own, while the host's retention is unverified.
+	//
+	// An entry is a keyed hash and its timestamps: nothing else is kept for
+	// ever. Set a finite value only once both conditions are resolved, and
+	// then to at least the age of the oldest restorable backup.
+	defaultDeletedSubjectGraceDays = 0
+
+	// How often finalisation and the legacy sweeps run. Hourly: nothing is
+	// urgent once phase 0 has run -- the person is already gone from every
+	// screen and every terminal that is online.
+	defaultErasureInterval = 1 * time.Hour
+
+	// How often the ledger is replayed against live people. Daily, and at
+	// startup, which is when a restored backup first runs.
+	defaultErasureReplayInterval = 24 * time.Hour
+
+	// Retired integration keys (030). Ninety days, matching the API usage
+	// rollup: the usage history of a key and the key it belongs to go
+	// together, and a key revoked by mistake is still identifiable for a
+	// quarter if an integrator asks what happened to it.
+	defaultAPICredentialRetentionDays = 90
+
 	// Provisioning housekeeping: announcements and claim codes.
 	//
 	// EVERY MINUTE, and deliberately not load-bearing. The provisioning paths do
@@ -120,6 +180,21 @@ type Config struct {
 	ReconcileInterval      time.Duration
 	RetentionPurgeInterval time.Duration
 
+	// EventRetentionDefaultDays is the door-history window for a company that
+	// has not set event_retention_days. Zero means no default: such a company
+	// keeps everything.
+	EventRetentionDefaultDays int
+
+	// AuditRetentionDefaultDays is the audit window for a company that has
+	// not set audit_retention_days. Zero means no default.
+	AuditRetentionDefaultDays int
+
+	// Erasure (039).
+	ErasureInterval            time.Duration
+	ErasureReplayInterval      time.Duration
+	DeletedSubjectGraceDays    int
+	APICredentialRetentionDays int
+
 	ProvisioningSweepInterval time.Duration
 	ProvisioningRetentionDays int
 
@@ -147,6 +222,18 @@ func LoadConfig() Config {
 			defaultReconcileInterval),
 		RetentionPurgeInterval: envDuration("RETENTION_PURGE_INTERVAL_SECONDS",
 			defaultRetentionPurgeInterval),
+		EventRetentionDefaultDays: envInt("EVENT_RETENTION_DEFAULT_DAYS",
+			defaultEventRetentionDays),
+		AuditRetentionDefaultDays: envInt("AUDIT_RETENTION_DEFAULT_DAYS",
+			defaultAuditRetentionDays),
+		ErasureInterval: envDuration("ERASURE_INTERVAL_SECONDS",
+			defaultErasureInterval),
+		ErasureReplayInterval: envDuration("ERASURE_REPLAY_INTERVAL_SECONDS",
+			defaultErasureReplayInterval),
+		DeletedSubjectGraceDays: envInt("DELETED_SUBJECT_GRACE_DAYS",
+			defaultDeletedSubjectGraceDays),
+		APICredentialRetentionDays: envInt("API_CREDENTIAL_RETENTION_DAYS",
+			defaultAPICredentialRetentionDays),
 
 		ProvisioningSweepInterval: envDuration("PROVISIONING_SWEEP_INTERVAL_SECONDS",
 			defaultProvisioningSweepInterval),
@@ -224,11 +311,24 @@ func (c Config) Tasks() []Task {
 				if err != nil {
 					return "", err
 				}
-				if n == 0 {
+				// Platform-admin sessions and reset/invitation tokens, on the
+				// same window. Both had a purge function and nothing calling it
+				// (039), so their rows -- with the address that used them --
+				// accumulated for ever.
+				platform, err := database.PurgeExpiredPlatformSessions(c.SessionRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				tokens, err := database.PurgeExpiredCredentialTokens(c.SessionRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				if n == 0 && platform == 0 && tokens == 0 {
 					return "", nil
 				}
-				return fmt.Sprintf("purged %d dead operator session(s) older than %dd",
-					n, c.SessionRetentionDays), nil
+				return fmt.Sprintf("purged %d operator session(s), %d platform session(s) and "+
+					"%d credential token(s) dead for more than %dd",
+					n, platform, tokens, c.SessionRetentionDays), nil
 			},
 		})
 	}
@@ -269,27 +369,34 @@ func (c Config) Tasks() []Task {
 	// trigger honours, which keeps "remove rows past their window" expressible
 	// and "remove the row that incriminates me" not.
 	//
-	// A company with no retention configured keeps everything, which is the
-	// default and is what the purge functions already encode -- so this task is
-	// a no-op on an installation where nobody has chosen a window.
+	// Door history -- events and the legacy access_logs, on one window -- uses
+	// the company's own event_retention_days, or EventRetentionDefaultDays when
+	// it has none (038). Audit records the same way, on audit_retention_days
+	// or AuditRetentionDefaultDays (039).
 	if c.RetentionPurgeInterval > 0 {
+		defaultDays := c.EventRetentionDefaultDays
+		auditDefaultDays := c.AuditRetentionDefaultDays
 		tasks = append(tasks, Task{
 			Name:     "retention_purge",
 			Interval: c.RetentionPurgeInterval,
 			Run: func(ctx context.Context) (string, error) {
-				events, err := database.PurgeEvents(ctx)
+				events, err := database.PurgeEvents(ctx, defaultDays)
 				if err != nil {
 					return "", err
 				}
-				audits, err := database.PurgeAuditEvents(ctx)
+				logs, err := database.PurgeAccessLogs(ctx, defaultDays)
 				if err != nil {
 					return "", err
 				}
-				if events == 0 && audits == 0 {
+				audits, err := database.PurgeAuditEvents(ctx, auditDefaultDays)
+				if err != nil {
+					return "", err
+				}
+				if events == 0 && logs == 0 && audits == 0 {
 					return "", nil
 				}
-				return fmt.Sprintf("purged %d event(s) and %d audit record(s) past retention",
-					events, audits), nil
+				return fmt.Sprintf("purged %d event(s), %d access log(s) and %d audit record(s) past retention",
+					events, logs, audits), nil
 			},
 		})
 	}
@@ -305,11 +412,102 @@ func (c Config) Tasks() []Task {
 				if err != nil {
 					return "", err
 				}
+				records, err := database.PurgeAssistantRecordsContext(ctx, c.AssistantRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				if n == 0 && records == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("purged %d assistant conversation(s) and %d tool record(s) "+
+					"older than %dd", n, records, c.AssistantRetentionDays), nil
+			},
+		})
+	}
+
+	// Erasure (039): people soft-deleted before erasure existed are erased,
+	// operators likewise, erased people whose terminals have all let go are
+	// deleted, and expired ledger entries go. Order matters within the pass:
+	// a legacy person must be erased (and so enter the ledger) before the
+	// finaliser can see them.
+	if c.ErasureInterval > 0 {
+		tasks = append(tasks, Task{
+			Name:     "erasure",
+			Interval: c.ErasureInterval,
+			Run: func(ctx context.Context) (string, error) {
+				legacyPeople, err := database.EraseLegacyDeletedPeople(ctx)
+				if err != nil {
+					return "", err
+				}
+				legacyOperators, err := database.EraseLegacyDeletedOperators(ctx)
+				if err != nil {
+					return "", err
+				}
+				finalized, err := database.FinalizeErasedPeople(ctx, c.DeletedSubjectGraceDays)
+				if err != nil {
+					return "", err
+				}
+				expired, err := database.PurgeExpiredDeletedSubjects(ctx)
+				if err != nil {
+					return "", err
+				}
+				// A lost ledger key is reported as a FAILED pass, every pass,
+				// so it shows on the maintenance health check instead of
+				// scrolling past once. The work above has already been done.
+				lost, err := database.UnmatchableLedgerEntries(ctx)
+				if err != nil {
+					return "", err
+				}
+				if lost > 0 {
+					return "", fmt.Errorf("%d deleted-subject ledger entr(ies) were written under a key "+
+						"this process does not hold; restore it via DELETION_LEDGER_KEY or "+
+						"DELETION_LEDGER_PREVIOUS_KEYS (docs/erasure.md)", lost)
+				}
+				if legacyPeople == 0 && legacyOperators == 0 && finalized == 0 && expired == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("erased %d legacy person(s) and %d legacy operator(s), "+
+					"finalised %d erased person(s), expired %d ledger entr(ies)",
+					legacyPeople, legacyOperators, finalized, expired), nil
+			},
+		})
+	}
+
+	// The ledger replayed against live people: what deletes again anybody a
+	// restored backup brought back. Runs at startup, which is when a restore
+	// first serves.
+	if c.ErasureReplayInterval > 0 {
+		tasks = append(tasks, Task{
+			Name:     "erasure_replay",
+			Interval: c.ErasureReplayInterval,
+			Run: func(ctx context.Context) (string, error) {
+				n, err := database.ReplayDeletedSubjects(ctx)
+				if err != nil {
+					return "", err
+				}
 				if n == 0 {
 					return "", nil
 				}
-				return fmt.Sprintf("purged %d assistant conversation(s) idle for more than %dd",
-					n, c.AssistantRetentionDays), nil
+				return fmt.Sprintf("replayed %d deletion(s) a restore had undone", n), nil
+			},
+		})
+	}
+
+	// Retired integration keys.
+	if c.APICredentialRetentionDays > 0 {
+		tasks = append(tasks, Task{
+			Name:     "api_credential_purge",
+			Interval: c.SessionPurgeInterval,
+			Run: func(ctx context.Context) (string, error) {
+				n, err := database.PurgeRetiredAPICredentials(ctx, c.APICredentialRetentionDays)
+				if err != nil {
+					return "", err
+				}
+				if n == 0 {
+					return "", nil
+				}
+				return fmt.Sprintf("purged %d integration key(s) retired for more than %dd",
+					n, c.APICredentialRetentionDays), nil
 			},
 		})
 	}
