@@ -173,6 +173,7 @@ func TestPublicPatchIsPartialAndDeactivationReachesTheTerminal(t *testing.T) {
 	env.createMember(env.siteAKey, "P4-002", "Grace Hopper")
 	env.jobs(deviceKey) // drain the CREATE
 	secret := writerCredential(t, env, "one", "p4-patch@example.com")
+	managedBy(t, secret, "P4-002")
 
 	// Deactivate: only active changes; the name and type are kept.
 	status, _, body, raw := publicCall(t, env, secret, http.MethodPatch, "/api/public/v1/members/P4-002", `{"active":false}`, "")
@@ -206,7 +207,9 @@ func TestPublicPatchRefusals(t *testing.T) {
 	env := newTestEnv(t)
 	env.createMember(env.siteAKey, "P4-003", "One Person")
 	env.createMember(env.siteCKey, "P4-OTHER", "Other Company")
+	env.createMember(env.siteAKey, "P4-UNMANAGED", "Console Created")
 	secret := writerCredential(t, env, "one", "p4-patchref@example.com")
+	managedBy(t, secret, "P4-003")
 
 	cases := []struct {
 		name, path, body string
@@ -219,6 +222,7 @@ func TestPublicPatchRefusals(t *testing.T) {
 		{"unknown field", "/api/public/v1/members/P4-003", `{"active":true,"fingerprint_template":"x"}`, 400, models.CodeUnknownField, "fingerprint_template"},
 		{"unknown member", "/api/public/v1/members/P4-NOPE", `{"active":false}`, 404, models.CodeResourceNotFound, ""},
 		{"another company's member", "/api/public/v1/members/P4-OTHER", `{"active":false}`, 404, models.CodeResourceNotFound, ""},
+		{"a member this integration did not create", "/api/public/v1/members/P4-UNMANAGED", `{"active":false}`, 404, models.CodeResourceNotFound, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,8 +240,8 @@ func TestPublicPatchRefusals(t *testing.T) {
 	if got := queryString(t, `SELECT full_name FROM people WHERE external_id = 'P4-OTHER'`); got != "Other Company" {
 		t.Errorf("the foreign member was changed: %q", got)
 	}
-	if n := queryInt(t, `SELECT count(*) FROM people WHERE external_id = 'P4-OTHER' AND active`); n != 1 {
-		t.Error("the foreign member was deactivated")
+	if n := queryInt(t, `SELECT count(*) FROM people WHERE external_id IN ('P4-OTHER', 'P4-UNMANAGED') AND active`); n != 2 {
+		t.Error("a member this integration does not own was deactivated")
 	}
 }
 
@@ -250,8 +254,10 @@ func TestPublicDeleteRevokesIdempotentlyAndSilently(t *testing.T) {
 	deviceKey := env.registerDevice(env.siteAKey, "P4-TERM-3")
 	env.createMember(env.siteAKey, "P4-004", "To Revoke")
 	env.createMember(env.siteCKey, "P4-FOREIGN", "Foreign")
+	env.createMember(env.siteAKey, "P4-UNMANAGED", "Console Created")
 	env.jobs(deviceKey)
 	secret := writerCredential(t, env, "one", "p4-delete@example.com")
+	managedBy(t, secret, "P4-004")
 
 	// First delete removes; 204 with no body.
 	status, _, _, raw := publicCall(t, env, secret, http.MethodDelete, "/api/public/v1/members/P4-004", "", "")
@@ -286,6 +292,15 @@ func TestPublicDeleteRevokesIdempotentlyAndSilently(t *testing.T) {
 	if n := queryInt(t, `SELECT count(*) FROM people WHERE external_id = 'P4-FOREIGN' AND deleted_at IS NULL`); n != 1 {
 		t.Error("a foreign member was deleted through company one's credential")
 	}
+	// A live member of this company that the integration did not create is
+	// not-found, never a 204 that would claim it had been removed.
+	status, headers, body, _ := publicCall(t, env, secret, http.MethodDelete, "/api/public/v1/members/P4-UNMANAGED", "", "")
+	if code := publicError(t, status, headers, body, 404); code != models.CodeResourceNotFound {
+		t.Errorf("delete of an unowned member: code %s", code)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM people WHERE external_id = 'P4-UNMANAGED' AND deleted_at IS NULL`); n != 1 {
+		t.Error("a member this integration does not own was deleted")
+	}
 	if n := auditCount(t, "PERSON_DELETED", secret[:17]); n != 1 {
 		t.Errorf("PERSON_DELETED audit rows = %d, want exactly 1 (the removal, not the no-ops)", n)
 	}
@@ -294,6 +309,41 @@ func TestPublicDeleteRevokesIdempotentlyAndSilently(t *testing.T) {
 	env.createMember(env.siteAKey, "P4-005", "Stays")
 	if status, _, _, _ := publicCall(t, env, readOnly, http.MethodDelete, "/api/public/v1/members/P4-005", "", ""); status != 403 {
 		t.Errorf("delete without members:write = %d, want 403", status)
+	}
+}
+
+// One integration's members are its own: the integration that created a member
+// through the API may change and remove it; another integration in the same
+// company, with the same scopes, gets not-found and changes nothing.
+func TestPublicMemberWritesActOnlyOnTheIntegrationsOwnMembers(t *testing.T) {
+	env := newTestEnv(t)
+	owner := writerCredential(t, env, "one", "p4-owner@example.com")
+	other := publicCredential(t, env, "one", "p4-intruder@example.com", `{"name":"another integration","scopes":["members:write"]}`)
+	if status, _, _, raw := publicCall(t, env, owner, http.MethodPost, "/api/public/v1/members", `{"member_id":"P4-OWNED","full_name":"Owned"}`, ""); status != http.StatusCreated {
+		t.Fatalf("create = %d %s", status, raw)
+	}
+
+	status, headers, body, _ := publicCall(t, env, other, http.MethodPatch, "/api/public/v1/members/P4-OWNED", `{"active":false}`, "")
+	if code := publicError(t, status, headers, body, 404); code != models.CodeResourceNotFound {
+		t.Errorf("another integration's PATCH: code %s", code)
+	}
+	status, headers, body, _ = publicCall(t, env, other, http.MethodDelete, "/api/public/v1/members/P4-OWNED", "", "")
+	if code := publicError(t, status, headers, body, 404); code != models.CodeResourceNotFound {
+		t.Errorf("another integration's DELETE: code %s", code)
+	}
+	if n := queryInt(t, `SELECT count(*) FROM people WHERE external_id = 'P4-OWNED' AND active AND deleted_at IS NULL`); n != 1 {
+		t.Fatal("another integration changed or removed the member")
+	}
+	// Reading stays company-wide.
+	if status, _, _, raw := publicGet(t, env, other, "/api/public/v1/members/P4-OWNED"); status != 200 {
+		t.Errorf("another integration's read = %d %s", status, raw)
+	}
+
+	if status, _, body, raw := publicCall(t, env, owner, http.MethodPatch, "/api/public/v1/members/P4-OWNED", `{"active":false}`, ""); status != 200 || body["active"] != false {
+		t.Errorf("owner PATCH = %d %s", status, raw)
+	}
+	if status, _, _, raw := publicCall(t, env, owner, http.MethodDelete, "/api/public/v1/members/P4-OWNED", "", ""); status != http.StatusNoContent {
+		t.Errorf("owner DELETE = %d %s", status, raw)
 	}
 }
 

@@ -4200,6 +4200,7 @@ contract:
 | `active` on create | optional, default `false` | optional, default **`true`** |
 | update verb | `PUT`, full replacement; omitted `active` deactivates | **`PATCH`, partial**: absent fields keep their value; `member_id` cannot be changed |
 | delete of a missing member | `200` with a message, no job queued | **`204`, no body, no job queued** — idempotent, and the same answer for a member that never existed or exists in another company |
+| whose members | any member of the site's company | **only members this integration created** — see below |
 | unknown body field | ignored | `400 unknown_field` |
 | `fingerprint_template` | accepted | **not a field**; sending it is `400 unknown_field` |
 
@@ -4222,10 +4223,15 @@ non-secret key prefix as the actor.
   soft-deleted, removed from every terminal's roster and their stored
   templates erased there. To let them back in, create them again.
 
-**Members are company-wide.** A credential's site restriction narrows what
-it may read about sites and events; it does not narrow member writes, because
-a member belongs to the company rather than to a site. A restricted
-credential with `members:write` can create, change and remove any member.
+**Members are company-wide to read; an integration writes only its own.** A
+credential's site restriction narrows what it may read about sites and events;
+it does not narrow members, because a member belongs to the company rather
+than to a site. Any credential with `members:read` reads every member. But
+`PATCH` and `DELETE` act only on members **this integration created** through
+`POST /members` (ownership is defined under
+[Integration-managed access](#integration-managed-access)); a member added in
+the console, through the legacy API or by another integration is
+`404 resource_not_found` and is not changed. Creating is unrestricted.
 
 **Bodies are strict.** A body must be one JSON object; anything else is
 `400 invalid_field` on `param: "body"`. A field of the wrong type is
@@ -4347,7 +4353,9 @@ curl -X DELETE "http://localhost:8080/api/public/v1/members/MEM042" \
 ```
 → `204`, no body — whether the member was removed by this call, had already
 been removed, never existed, or belongs to another company. Only a removal
-queues a `DELETE` job and writes an audit record.
+queues a `DELETE` job and writes an audit record. The one exception: a live
+member of this company that this integration did not create is
+`404 resource_not_found` and stays — a `204` would claim it had been removed.
 
 | Error | Status | `code` |
 |---|---|---|
@@ -4357,6 +4365,7 @@ queues a `DELETE` job and writes an audit record.
 | body absent, not an object, or nothing to change on `PATCH` | `400` | `invalid_field` (`param: "body"`) |
 | `member_id` in a `PATCH` body | `400` | `invalid_field` |
 | a field this version does not define | `400` | `unknown_field` |
+| `PATCH`/`DELETE` of a member this integration did not create | `404` | `resource_not_found` |
 | `member_id` already used in this company | `409` | `member_id_already_exists` |
 | The change would give a terminal more people than it can hold | `409` | `roster_exceeds_terminal_capacity` |
 | `PATCH` of a missing member, or one in another company | `404` | `resource_not_found` |
@@ -4616,6 +4625,8 @@ integration can give or remove this access. Members created before this
 existed are owned only when the audit trail proves it unambiguously (exactly
 one `PERSON_CREATED` event, by an integration, through this API, whose key
 prefix matches exactly one key of the company); anyone else stays unowned.
+Ownership also bounds `PATCH`/`DELETE /members` and starting or cancelling an
+enrolment: an integration changes only the people it created.
 
 **The rule.** One company-wide `ALLOW`, or — for a site-restricted key — one
 site `ALLOW` per site of the key. There is no request body: nothing in the
@@ -4908,7 +4919,7 @@ Credential scope `enrollments:write`.
 | `member_id` absent | `400` | `missing_field` |
 | `expires_in_seconds` outside 30–3600 or not an integer | `400` | `invalid_field` |
 | Any other body field | `400` | `unknown_field` |
-| No such member in the company | `404` | `resource_not_found` |
+| No such member in the company, or one this integration did not create | `404` | `resource_not_found` |
 | No such terminal in the company, or outside the credential's sites | `404` | `resource_not_found` |
 | The terminal is disabled, retired, or holds no credential of its own (never provisioned, or revoked) | `409` | `terminal_not_enrollable` |
 | Site-restricted credential; the member's live enrolment is at a terminal outside its sites. Nothing is changed | `409` | `enrollment_in_progress_elsewhere` |
@@ -4927,7 +4938,8 @@ Credential scope `enrollments:write`. Cancels the member's live enrolment and
 withdraws its job; the terminal returns to checking fingers. → `200` with the
 enrolment, `status: "CANCELLED"`. Audited as `ENROLMENT_CANCELLED`.
 `404 resource_not_found` when nothing is live — including an enrolment that
-already `COMPLETED`, which cancelling never undoes.
+already `COMPLETED`, which cancelling never undoes — and for a member this
+integration did not create.
 
 ### Endpoints in this version
 

@@ -54,6 +54,8 @@ func newPubEnrolFixture(t *testing.T) *pubEnrolFixture {
 	f.full = publicCredential(t, env, "one", "pe-full@example.com", `{"name":"enrol","scopes":[`+enrolScopes+`]}`)
 	f.siteAOnly = publicCredential(t, env, "one", "pe-sitea@example.com",
 		`{"name":"enrol site a","scopes":[`+enrolScopes+`],"site_ids":["`+f.siteA+`"]}`)
+	sameIntegration(t, f.full, f.siteAOnly)
+	managedBy(t, f.full, enrolMember)
 	_, _, member, _ := publicGet(t, env, f.full, "/api/public/v1/members/"+enrolMember)
 	f.memberID, _ = member["id"].(string)
 	return f
@@ -226,6 +228,8 @@ func TestPublicStartEnrollmentRefusals(t *testing.T) {
 	f.env.createMember(f.env.siteCKey, "PE-OTHER", "Other Company")
 	readOnly := publicCredential(t, f.env, "one", "pe-ro@example.com", `{"name":"ro","scopes":["members:read","terminals:read"]}`)
 	memberWriter := publicCredential(t, f.env, "one", "pe-mw@example.com", `{"name":"mw","scopes":["members:write"]}`)
+	otherIntegration := publicCredential(t, f.env, "one", "pe-other@example.com", `{"name":"other","scopes":[`+enrolScopes+`]}`)
+	f.env.createMember(f.env.siteAKey, "PE-UNMANAGED", "Console Created")
 
 	cases := []struct {
 		name, secret, serial, body string
@@ -240,6 +244,8 @@ func TestPublicStartEnrollmentRefusals(t *testing.T) {
 		{"malformed json", f.full, termA1, `{"member_id":`, 400, models.CodeInvalidField, "body"},
 		{"member not found", f.full, termA1, `{"member_id":"PE-NOPE"}`, 404, models.CodeResourceNotFound, ""},
 		{"member in another company", f.full, termA1, `{"member_id":"PE-OTHER"}`, 404, models.CodeResourceNotFound, ""},
+		{"member this integration did not create", f.full, termA1, `{"member_id":"PE-UNMANAGED"}`, 404, models.CodeResourceNotFound, ""},
+		{"member another integration created", otherIntegration, termA1, "", 404, models.CodeResourceNotFound, ""},
 		{"terminal not found", f.full, "PE-NOPE", "", 404, models.CodeResourceNotFound, ""},
 		{"terminal in another company", f.full, termC1, "", 404, models.CodeResourceNotFound, ""},
 		{"terminal outside the site restriction", f.siteAOnly, termB1, "", 404, models.CodeResourceNotFound, ""},
@@ -383,6 +389,9 @@ func TestPublicCancelEnrollment(t *testing.T) {
 	expectPublicError(t, "outside the restriction", status, headers, body, 404, models.CodeResourceNotFound)
 	status, headers, body, _ = publicCall(t, f.env, f.full, http.MethodDelete, "/api/public/v1/members/PE-NOPE/enrollment", "", "")
 	expectPublicError(t, "unknown member", status, headers, body, 404, models.CodeResourceNotFound)
+	otherIntegration := publicCredential(t, f.env, "one", "pe-cancel-other@example.com", `{"name":"other","scopes":[`+enrolScopes+`]}`)
+	status, headers, body, _ = publicCall(t, f.env, otherIntegration, http.MethodDelete, statusPath, "", "")
+	expectPublicError(t, "another integration's member", status, headers, body, 404, models.CodeResourceNotFound)
 	if n := liveEnrollments(t); n != 1 {
 		t.Fatalf("refused cancels changed the live enrolment count to %d", n)
 	}
