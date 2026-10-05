@@ -94,6 +94,12 @@ func EventsAfter(q Querier, companyID int64, restrictedTo []int64, filter Public
 	// site_id or member_id belonging to another company matches nothing, so
 	// the answer is an empty page -- indistinguishable from a filter that
 	// simply has no events, which is the section 18 rule for foreign ids.
+	//
+	// member_id matches EVERY person that has held the id, deleted or not. The
+	// external id is unique only among live people, so a member deleted and
+	// re-created leaves two rows, and a scalar `=` subquery answered 500 for
+	// that id for ever. Each event still carries its own `member` public id,
+	// which is how a client tells one holder of the id from the next.
 	rows, err := q.Query(`
 		SELECT e.id, e.public_id::text, e.event_type, COALESCE(e.application, ''),
 		       e.decision, COALESCE(e.reason_code, ''), COALESCE(e.direction, ''),
@@ -107,8 +113,8 @@ func EventsAfter(q Querier, companyID int64, restrictedTo []int64, filter Public
 		  LEFT JOIN people  p ON p.id = e.person_id
 		 WHERE e.company_id = $1
 		   AND ($2::bigint[] IS NULL OR e.site_id = ANY($2::bigint[]))
-		   AND ($3 = '' OR e.person_id = (SELECT id FROM people
-		                                    WHERE company_id = $1 AND external_id = $3))
+		   AND ($3 = '' OR e.person_id IN (SELECT id FROM people
+		                                     WHERE company_id = $1 AND external_id = $3))
 		   AND ($4 = '' OR e.site_id = (SELECT id FROM sites
 		                                  WHERE company_id = $1 AND public_id::text = $4))
 		   AND ($5 = '' OR e.decision = $5)
