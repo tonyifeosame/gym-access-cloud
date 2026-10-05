@@ -53,7 +53,7 @@ for (const [t] of groupedTags) if (!declaredTags.has(t)) fail(`x-tagGroups names
 
 const consoleTags = new Set(groups.find((g) => g.name.startsWith('Console'))?.tags ?? [])
 const publicTags = new Set(groups.find((g) => g.name === 'Public API')?.tags ?? [])
-const scopes = new Set(['members:read', 'members:write', 'access:read', 'sites:read', 'events:read'])
+const scopes = new Set(['members:read', 'members:write', 'access:read', 'sites:read', 'events:read', 'terminals:read', 'enrollments:write'])
 const operationIds = new Set()
 let operations = 0
 
