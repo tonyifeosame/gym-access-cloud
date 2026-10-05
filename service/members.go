@@ -200,7 +200,8 @@ func (s *MemberService) Create(ctx context.Context, tc *TenantContext, in Member
 	return publicMember(&member), nil
 }
 
-// Update changes a member's name, type or active flag. Requires members:write.
+// Update changes a member's name, type or active flag. Requires members:write,
+// and only for a member this integration created: anyone else is not-found.
 // The member id itself is the lookup key and cannot be changed.
 func (s *MemberService) Update(ctx context.Context, tc *TenantContext, memberID string, in MemberInput) (*Member, error) {
 	if err := tc.RequireScope(models.ScopeMembersWrite); err != nil {
@@ -212,7 +213,7 @@ func (s *MemberService) Update(ctx context.Context, tc *TenantContext, memberID 
 
 	var out *Member
 	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
-		current, err := database.MemberInTenant(tx, tx.CompanyID(), memberID)
+		current, err := database.ManagedPersonTx(tx, tx.CompanyID(), memberID, tc.LineageID())
 		if err != nil {
 			return notFoundOrInternal(err)
 		}
@@ -238,7 +239,7 @@ func (s *MemberService) Update(ctx context.Context, tc *TenantContext, memberID 
 }
 
 // Delete soft-deletes a member and fans the removal out to terminals.
-// Requires members:write.
+// Requires members:write, and only for a member this integration created.
 //
 // IDEMPOTENT, AND SILENT ABOUT WHY. The contract (API_SPEC.md section 18) is
 // 204 for a member that was removed, a member that was already removed, and a
@@ -247,12 +248,23 @@ func (s *MemberService) Update(ctx context.Context, tc *TenantContext, memberID 
 // not be able to probe another tenant's ids by the difference between "gone"
 // and "never here". The returned bool says whether THIS call removed a row, so
 // the handler can audit the removal without auditing a no-op.
+//
+// ONE EXCEPTION TO THE SILENCE: a live member of this company that another
+// integration or an operator created is not-found, not 204. A 204 would tell
+// the caller a person it may not touch had been removed. It reveals nothing
+// members:read (which members:write implies) does not already show, and an id
+// in another company still answers 204.
 func (s *MemberService) Delete(ctx context.Context, tc *TenantContext, memberID string) (bool, error) {
 	if err := tc.RequireScope(models.ScopeMembersWrite); err != nil {
 		return false, err
 	}
 	removed := false
 	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
+		if _, err := database.ManagedPersonTx(tx, tx.CompanyID(), memberID, tc.LineageID()); errors.Is(err, sql.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return notFoundOrInternal(err)
+		}
 		deleted, err := database.DeleteMemberTx(tx.Tx, tx.CompanyID(), memberID)
 		if err != nil {
 			return writeFailure(err)

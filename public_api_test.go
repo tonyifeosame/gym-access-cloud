@@ -70,6 +70,28 @@ func publicCredential(t *testing.T, env *testEnv, slug, email, body string) stri
 	return secretOf(t, issueCredential(t, env, token, csrf, body))
 }
 
+// managedBy records that the integration holding secret created these members,
+// as its POST /members would have -- for fixtures that seed people another way.
+// Public member writes and enrolment act only on members an integration owns.
+func managedBy(t *testing.T, secret string, memberIDs ...string) {
+	t.Helper()
+	for _, id := range memberIDs {
+		mustExec(t, `UPDATE people SET managed_by_lineage_id = (SELECT lineage_id FROM api_credentials WHERE key_prefix = $1)
+		              WHERE external_id = $2 AND deleted_at IS NULL`, secret[:17], id)
+	}
+}
+
+// sameIntegration puts the credentials holding others into secret's lineage:
+// one integration holding differently restricted keys, so a fixture can test
+// site restriction on members that integration owns.
+func sameIntegration(t *testing.T, secret string, others ...string) {
+	t.Helper()
+	for _, other := range others {
+		mustExec(t, `UPDATE api_credentials SET lineage_id = (SELECT lineage_id FROM api_credentials WHERE key_prefix = $1)
+		              WHERE key_prefix = $2`, secret[:17], other[:17])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Authentication and scope at the route
 // ---------------------------------------------------------------------------

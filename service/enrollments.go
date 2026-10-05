@@ -86,7 +86,8 @@ func (s *EnrollmentService) Terminals(ctx context.Context, tc *TenantContext) ([
 // enrollments:write. A live enrolment for the member is superseded, exactly as
 // in the console, so a retry at another door simply moves it -- unless it is at
 // a terminal outside a site-restricted credential's sites, which is refused and
-// left running: a credential may not cancel what it cannot see.
+// left running: a credential may not cancel what it cannot see. Only a member
+// this integration created can be enrolled; anyone else is not-found.
 func (s *EnrollmentService) Start(ctx context.Context, tc *TenantContext, serial string, in EnrollmentInput) (*Enrollment, error) {
 	if err := tc.RequireScope(models.ScopeEnrollmentsWrite); err != nil {
 		return nil, err
@@ -116,7 +117,7 @@ func (s *EnrollmentService) Start(ctx context.Context, tc *TenantContext, serial
 			return ErrTerminalNotEnrollable()
 		}
 		deviceID = terminal.DeviceID
-		if member, err = database.MemberInTenant(tx, tx.CompanyID(), in.MemberID); err != nil {
+		if member, err = database.ManagedPersonTx(tx, tx.CompanyID(), in.MemberID, tc.LineageID()); err != nil {
 			return notFoundOrInternal(err)
 		}
 		return nil
@@ -161,13 +162,13 @@ func (s *EnrollmentService) Get(ctx context.Context, tc *TenantContext, memberID
 }
 
 // Cancel ends a member's live enrolment and cancels the terminal's job. Scope
-// enrollments:write. Nothing live is 404; the terminal returns to checking
-// fingers at its door.
+// enrollments:write, for a member this integration created. Nothing live is
+// 404; the terminal returns to checking fingers at its door.
 func (s *EnrollmentService) Cancel(ctx context.Context, tc *TenantContext, memberID string) (*Enrollment, error) {
 	if err := tc.RequireScope(models.ScopeEnrollmentsWrite); err != nil {
 		return nil, err
 	}
-	member, err := s.visibleMember(ctx, tc, memberID)
+	member, err := s.managedMember(ctx, tc, memberID)
 	if err != nil {
 		return nil, err
 	}
@@ -186,10 +187,24 @@ func (s *EnrollmentService) Cancel(ctx context.Context, tc *TenantContext, membe
 }
 
 func (s *EnrollmentService) visibleMember(ctx context.Context, tc *TenantContext, memberID string) (*models.Member, error) {
+	return s.member(ctx, tc, func(tx *database.ScopedTx) (*models.Member, error) {
+		return database.MemberInTenant(tx, tx.CompanyID(), memberID)
+	})
+}
+
+// managedMember is visibleMember for a write: only a member this integration
+// created. Anyone else is not-found, exactly as on the access endpoints.
+func (s *EnrollmentService) managedMember(ctx context.Context, tc *TenantContext, memberID string) (*models.Member, error) {
+	return s.member(ctx, tc, func(tx *database.ScopedTx) (*models.Member, error) {
+		return database.ManagedPersonTx(tx, tx.CompanyID(), memberID, tc.LineageID())
+	})
+}
+
+func (s *EnrollmentService) member(ctx context.Context, tc *TenantContext, lookup func(*database.ScopedTx) (*models.Member, error)) (*models.Member, error) {
 	var member *models.Member
 	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
 		var err error
-		if member, err = database.MemberInTenant(tx, tx.CompanyID(), memberID); err != nil {
+		if member, err = lookup(tx); err != nil {
 			return notFoundOrInternal(err)
 		}
 		return nil

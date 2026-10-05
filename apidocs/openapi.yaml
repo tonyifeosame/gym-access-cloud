@@ -1617,7 +1617,8 @@ paths:
         `{"active": false}` **deactivates**: reversible; the person stays on
         every terminal, marked inactive, and is refused with reason
         `PERSON_INACTIVE`. Whitespace around `full_name` and `membership_type`
-        is trimmed.
+        is trimmed. Only a member **this integration created** can be changed;
+        anyone else is `404 resource_not_found`.
       security:
         - IntegrationCredential: []
       x-scope: members:write
@@ -1686,7 +1687,8 @@ paths:
 
         Idempotent: `204` with no body whether the member was removed by this
         call, had already been removed, never existed, or belongs to another
-        company.
+        company. A live member of this company that **this integration did not
+        create** is `404 resource_not_found` and is not removed.
       security:
         - IntegrationCredential: []
       x-scope: members:write
@@ -1705,6 +1707,7 @@ paths:
                 $ref: "#/components/schemas/Error"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: "`idempotency_key_reuse` or `idempotency_in_progress`."
           content:
@@ -2137,7 +2140,8 @@ paths:
         already has — except, for a site-restricted key, one at a terminal
         outside its sites: that is `409 enrollment_in_progress_elsewhere`, and
         the other enrolment, its job and this request's terminal are untouched. A terminal in another company or outside the key's site
-        restriction is `404 resource_not_found`, as is an unknown member.
+        restriction is `404 resource_not_found`, as is an unknown member or one
+        this integration did not create.
       security:
         - IntegrationCredential: []
       x-scope: enrollments:write
@@ -2229,7 +2233,8 @@ paths:
         Requires scope `enrollments:write`. Cancels the live enrolment and
         withdraws its job; the terminal returns to checking fingers.
         `404 resource_not_found` when nothing is live — including an enrolment
-        that already completed, which cancelling never undoes.
+        that already completed, which cancelling never undoes — and for a
+        member this integration did not create.
       security:
         - IntegrationCredential: []
       x-scope: enrollments:write
