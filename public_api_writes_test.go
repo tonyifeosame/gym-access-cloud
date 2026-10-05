@@ -619,6 +619,72 @@ func TestPublicEventsHonourTheCredentialSiteRestriction(t *testing.T) {
 	}
 }
 
+// A member id deleted and created again leaves two people rows behind it. The
+// member_id filter answered 500 for that id from then on -- which is
+// exactly the DataVase returning-customer path. Both holders' events come back,
+// each under its own `member`; a deleted-only holder keeps its history.
+func TestPublicEventsMemberFilterSurvivesADeletedAndRecreatedMemberID(t *testing.T) {
+	env := newTestEnv(t)
+	one, _ := seedPublicEvents(t, env)
+	secret := publicCredential(t, env, "one", "p4-reuse@example.com", `{"name":"reuse","scopes":["members:read","members:write","events:read"]}`)
+	base := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	personOf := func() (id int64, publicID string) {
+		mustScan(t, `SELECT id, public_id::text FROM people WHERE external_id = 'P4-REUSE' AND deleted_at IS NULL`, &id, &publicID)
+		return id, publicID
+	}
+	eventsFor := func() []any {
+		t.Helper()
+		status, _, body, raw := publicGet(t, env, secret, "/api/public/v1/events?member_id=P4-REUSE")
+		if status != 200 {
+			t.Fatalf("events?member_id=P4-REUSE = %d %s", status, raw)
+		}
+		return listOf(t, body, "data")
+	}
+
+	// Member A holds the id, is enrolled, then deleted.
+	if status, _, _, raw := publicCall(t, env, secret, http.MethodPost, "/api/public/v1/members", `{"member_id":"P4-REUSE","full_name":"First Holder"}`, ""); status != http.StatusCreated {
+		t.Fatalf("create A = %d %s", status, raw)
+	}
+	personA, publicA := personOf()
+	seedEvent(t, one.companyID, one.siteID, one.deviceID, personA, models.EventEnrolled, models.DecisionRecorded, "", base)
+	if status, _, _, raw := publicCall(t, env, secret, http.MethodDelete, "/api/public/v1/members/P4-REUSE", "", ""); status != http.StatusNoContent {
+		t.Fatalf("delete A = %d %s", status, raw)
+	}
+
+	// Only a deleted holder: its history is still there.
+	if data := eventsFor(); len(data) != 1 || data[0].(map[string]any)["member"] != publicA {
+		t.Fatalf("deleted-only history = %v, want A's one event", data)
+	}
+
+	// Member B takes the same id and is enrolled in turn.
+	if status, _, _, raw := publicCall(t, env, secret, http.MethodPost, "/api/public/v1/members", `{"member_id":"P4-REUSE","full_name":"Second Holder"}`, ""); status != http.StatusCreated {
+		t.Fatalf("create B = %d %s", status, raw)
+	}
+	personB, publicB := personOf()
+	if personB == personA {
+		t.Fatal("re-creating the id reused the deleted person")
+	}
+	seedEvent(t, one.companyID, one.siteID, one.deviceID, personB, models.EventEnrolled, models.DecisionRecorded, "", base.Add(time.Hour))
+
+	data := eventsFor()
+	if len(data) != 2 {
+		t.Fatalf("events after re-creation = %d, want 2: %v", len(data), data)
+	}
+	newest, oldest := data[0].(map[string]any), data[1].(map[string]any)
+	if newest["member"] != publicB || oldest["member"] != publicA || newest["member_id"] != "P4-REUSE" || oldest["member_id"] != "P4-REUSE" {
+		t.Errorf("events = %v; want B's then A's, both under P4-REUSE", data)
+	}
+	// The member itself resolves to the current holder only.
+	if status, _, body, raw := publicGet(t, env, secret, "/api/public/v1/members/P4-REUSE"); status != 200 || body["id"] != publicB {
+		t.Errorf("GET member = %d %s, want B", status, raw)
+	}
+	// And the other filters still combine with it.
+	status, _, body, raw := publicGet(t, env, secret, "/api/public/v1/events?member_id=P4-REUSE&from=2026-09-02T12:30:00Z")
+	if got := listOf(t, body, "data"); status != 200 || len(got) != 1 || got[0].(map[string]any)["member"] != publicB {
+		t.Errorf("member_id+from = %d %s, want only B's", status, raw)
+	}
+}
+
 // The unauthenticated and wrong-credential answers on the new routes are the
 // section 18 401s, with the challenge, exactly as on the read routes.
 func TestPublicWriteRoutesRefuseWithoutACredential(t *testing.T) {
