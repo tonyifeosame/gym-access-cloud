@@ -613,13 +613,14 @@ func RotateAPICredential(companyID int64, publicID string, grace time.Duration,
 		expiresAt    sql.NullTime
 		revokedAt    sql.NullTime
 		supersededAt sql.NullTime
+		lineageID    int64
 	)
 	err = tx.QueryRow(`
-		SELECT name, environment, scopes, expires_at, revoked_at, superseded_at
+		SELECT name, environment, scopes, expires_at, revoked_at, superseded_at, lineage_id
 		  FROM api_credentials
 		 WHERE company_id = $1 AND id = $2
 		 FOR UPDATE`, companyID, oldID).
-		Scan(&name, &environment, &scopes, &expiresAt, &revokedAt, &supersededAt)
+		Scan(&name, &environment, &scopes, &expiresAt, &revokedAt, &supersededAt, &lineageID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, models.ErrAPICredentialNotFound
 	}
@@ -652,16 +653,17 @@ func RotateAPICredential(companyID int64, publicID string, grace time.Duration,
 		return nil, fmt.Errorf("superseding integration credential: %w", err)
 	}
 
+	// The replacement continues its predecessor's lineage: same integration.
 	var newID int64
 	err = tx.QueryRow(`
 		INSERT INTO api_credentials
 		    (company_id, name, environment, key_hash, key_prefix, scopes,
-		     created_by, created_by_email, expires_at)
+		     created_by, created_by_email, expires_at, lineage_id)
 		VALUES ($1, $2, $3, $4, $5, $6,
-		        NULLIF($7, 0)::bigint, NULLIF($8, ''), $9)
+		        NULLIF($7, 0)::bigint, NULLIF($8, ''), $9, $10)
 		RETURNING id`,
 		companyID, name, environment, hash, prefix, scopes,
-		actorUserID, actorEmail, nullTime(expiresAt)).Scan(&newID)
+		actorUserID, actorEmail, nullTime(expiresAt), lineageID).Scan(&newID)
 	if err != nil {
 		return nil, fmt.Errorf("inserting rotated credential: %w", err)
 	}
@@ -827,7 +829,7 @@ func AuthenticateAPICredential(presented, environment string) (*models.APICreden
 	)
 	err := DB.QueryRow(`
 		SELECT c.id, c.public_id::text, c.company_id, c.name, c.key_prefix,
-		       c.environment, c.scopes
+		       c.environment, c.scopes, c.lineage_id
 		  FROM api_credentials c
 		  JOIN companies co ON co.id = c.company_id
 		 WHERE c.key_hash = $1
@@ -837,7 +839,7 @@ func AuthenticateAPICredential(presented, environment string) (*models.APICreden
 		   AND co.active
 		   AND co.deleted_at IS NULL`, HashAPIKey(presented)).
 		Scan(&identity.ID, &identity.PublicID, &identity.CompanyID, &identity.Name,
-			&identity.KeyPrefix, &identity.Environment, &scopes)
+			&identity.KeyPrefix, &identity.Environment, &scopes, &identity.LineageID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

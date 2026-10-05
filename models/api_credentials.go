@@ -236,6 +236,10 @@ type APICredentialIdentity struct {
 	KeyPrefix   string
 	Environment string
 
+	// LineageID is the first credential of this key's rotation chain: the
+	// integration's identity for ownership, stable across rotation.
+	LineageID int64
+
 	// Scopes is the stored, already-expanded set. A permission check is a
 	// membership test against this slice with no inference in it.
 	Scopes []string

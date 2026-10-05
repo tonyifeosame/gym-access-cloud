@@ -151,11 +151,29 @@ const deviceIsSyncable = `
 // only what is missing and delete only what should not be there, so a converged
 // terminal produces zero jobs.
 func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
-	// Added: people who belong on the roster and have no live job saying so.
-	//
-	// The NOT EXISTS against sync_jobs is what makes this idempotent -- running
-	// it twice before the terminal has polled must not queue the person twice.
-	addResult, err := DB.Exec(`
+	return reconcileDeviceRoster(DB, deviceID, 0)
+}
+
+// lastPersonJobOnDevice is what the terminal was last told about a person: the
+// newest job it has been sent or has applied (PENDING, DELIVERED or COMPLETED).
+// NULL means it was never told; a FAILED or CANCELLED job told it nothing. The
+// diff compares this with the permissions, so a converged terminal -- including
+// one that has acknowledged everything -- produces no jobs at all.
+const lastPersonJobOnDevice = `(
+	SELECT j.job_type FROM sync_jobs j
+	 WHERE j.device_id = d.id AND j.entity_type = 'PERSON' AND j.entity_id = p.id
+	   AND j.status IN ('PENDING', 'DELIVERED', 'COMPLETED')
+	 ORDER BY j.id DESC LIMIT 1)`
+
+// reconcileDeviceRoster is the one roster diff. q is the database or an open
+// transaction (so a grant and the jobs it causes commit together); personID
+// narrows it to one person, 0 meaning everybody.
+func reconcileDeviceRoster(q Querier, deviceID, personID int64) (added, removed int, err error) {
+	// Added: people who belong on the roster but whom the terminal was last
+	// told nothing about, or told to delete. Comparing with the LAST job, not
+	// with live jobs only, is what keeps this idempotent after the terminal
+	// acknowledges: a person it holds is never re-sent.
+	addResult, err := q.Exec(`
 		INSERT INTO sync_jobs
 		    (site_id, device_id, job_type, entity_type, entity_id, entity_external_id,
 		     payload, protocol_version, status, next_attempt_at)
@@ -174,18 +192,12 @@ func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
 		  JOIN sites s ON s.id = d.site_id
 		  JOIN people p ON p.company_id = s.company_id
 		 WHERE d.id = $2
+		   AND ($3::bigint = 0 OR p.id = $3)
 		   AND p.deleted_at IS NULL
 		   AND `+deviceIsSyncable+`
 		   AND `+rosterMembershipPredicate+`
-		   AND NOT EXISTS (
-		        SELECT 1 FROM sync_jobs j
-		         WHERE j.device_id = d.id
-		           AND j.entity_type = 'PERSON'
-		           AND j.entity_id = p.id
-		           AND j.job_type <> 'DELETE'
-		           AND j.status IN ('PENDING', 'DELIVERED')
-		   )`,
-		models.SyncProtocolVersion, deviceID)
+		   AND COALESCE(`+lastPersonJobOnDevice+`, 'DELETE') = 'DELETE'`,
+		models.SyncProtocolVersion, deviceID, personID)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -198,7 +210,7 @@ func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
 	//
 	// Bounded to people the terminal has actually been sent, so a reconcile does
 	// not queue a DELETE for everybody in the company who was never on it.
-	removeResult, err := DB.Exec(`
+	removeResult, err := q.Exec(`
 		INSERT INTO sync_jobs
 		    (site_id, device_id, job_type, entity_type, entity_id, entity_external_id,
 		     payload, protocol_version, status, next_attempt_at)
@@ -217,24 +229,11 @@ func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
 		  JOIN sites s ON s.id = d.site_id
 		  JOIN people p ON p.company_id = s.company_id
 		 WHERE d.id = $2
+		   AND ($3::bigint = 0 OR p.id = $3)
 		   AND `+deviceIsSyncable+`
 		   AND NOT (`+rosterMembershipPredicate+`)
-		   AND EXISTS (
-		        SELECT 1 FROM sync_jobs j
-		         WHERE j.device_id = d.id
-		           AND j.entity_type = 'PERSON'
-		           AND j.entity_id = p.id
-		           AND j.job_type <> 'DELETE'
-		   )
-		   AND NOT EXISTS (
-		        SELECT 1 FROM sync_jobs j
-		         WHERE j.device_id = d.id
-		           AND j.entity_type = 'PERSON'
-		           AND j.entity_id = p.id
-		           AND j.job_type = 'DELETE'
-		           AND j.status IN ('PENDING', 'DELIVERED')
-		   )`,
-		models.SyncProtocolVersion, deviceID)
+		   AND COALESCE(`+lastPersonJobOnDevice+`, 'DELETE') <> 'DELETE'`,
+		models.SyncProtocolVersion, deviceID, personID)
 	if err != nil {
 		return int(addedRows), 0, err
 	}
@@ -252,7 +251,23 @@ func ReconcileDeviceRoster(deviceID int64) (added, removed int, err error) {
 // operator or a scheduled task wants to see -- "reconciled 40 terminals, 2
 // changed" is actionable; "reconciled 40 terminals" is not.
 func ReconcileCompanyRosters(companyID int64) (terminals, added, removed int, err error) {
-	rows, err := DB.Query(`
+	return reconcileRosters(DB, companyID, 0)
+}
+
+// ReconcilePersonRoster brings every terminal of a company up to date for one
+// person, now rather than at the next sweep -- what a permission change needs.
+func ReconcilePersonRoster(companyID, personID int64) (terminals, added, removed int, err error) {
+	return reconcileRosters(DB, companyID, personID)
+}
+
+// ReconcilePersonRosterTx is ReconcilePersonRoster inside the caller's
+// transaction, so the change and the jobs it causes commit or roll back together.
+func ReconcilePersonRosterTx(q Querier, companyID, personID int64) (terminals, added, removed int, err error) {
+	return reconcileRosters(q, companyID, personID)
+}
+
+func reconcileRosters(q Querier, companyID, personID int64) (terminals, added, removed int, err error) {
+	rows, err := q.Query(`
 		SELECT d.id
 		  FROM devices d
 		  JOIN sites s ON s.id = d.site_id
@@ -281,7 +296,7 @@ func ReconcileCompanyRosters(companyID int64) (terminals, added, removed int, er
 	// reconcile writes to sync_jobs and holding a read cursor open across those
 	// writes is how a long transaction turns into a lock nobody expected.
 	for _, deviceID := range deviceIDs {
-		a, r, err := ReconcileDeviceRoster(deviceID)
+		a, r, err := reconcileDeviceRoster(q, deviceID, personID)
 		if err != nil {
 			return terminals, added, removed, err
 		}

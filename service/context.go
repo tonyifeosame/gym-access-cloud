@@ -27,6 +27,7 @@ import (
 type TenantContext struct {
 	companyID    int64
 	credentialID int64
+	lineageID    int64
 	keyPrefix    string
 	environment  string
 	scopes       []string
@@ -46,6 +47,7 @@ func FromCredential(identity *models.APICredentialIdentity, requestID string) *T
 	return &TenantContext{
 		companyID:    identity.CompanyID,
 		credentialID: identity.ID,
+		lineageID:    identity.LineageID,
 		keyPrefix:    identity.KeyPrefix,
 		environment:  identity.Environment,
 		scopes:       append([]string(nil), identity.Scopes...),
@@ -57,6 +59,10 @@ func FromCredential(identity *models.APICredentialIdentity, requestID string) *T
 // CompanyID is the tenant. It is read by the service layer to open a scoped
 // transaction and by nothing above it.
 func (t *TenantContext) CompanyID() int64 { return t.companyID }
+
+// LineageID is the integration's identity for ownership: the root of the
+// credential's rotation chain, the same before and after a rotation.
+func (t *TenantContext) LineageID() int64 { return t.lineageID }
 
 // CredentialID identifies the credential for usage accounting and idempotency.
 func (t *TenantContext) CredentialID() int64 { return t.credentialID }

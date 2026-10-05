@@ -58,6 +58,7 @@ func TestEveryRegisteredScopeIsWellFormed(t *testing.T) {
 func TestScopeSetMatchesTheDocumentedV1Set(t *testing.T) {
 	want := []string{
 		"access:read",
+		"access:write",
 		"enrollments:write",
 		"events:read",
 		"members:read",

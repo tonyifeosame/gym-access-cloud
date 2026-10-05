@@ -3798,6 +3798,7 @@ requires; a credential without it is refused **before any lookup**.
 | `enrollments:write` | starting and cancelling fingerprint enrolment at a terminal. **Does not imply `members:read`**: reading an enrolment's status needs that scope too. Separate from `members:write` because it commands hardware — the chosen terminal stops checking fingers at its door until the enrolment ends |
 | `events:read` | reading the activity trail — **no route in this version** |
 | `access:read` | reading access logs — **no route in this version** |
+| `access:write` | giving the members **this integration created** the standard access its key covers, and removing it — see [Integration-managed access](#integration-managed-access). **Admin to issue**; site-restrictable; implies nothing |
 | `webhooks:manage` | managing webhook endpoints — **no route in this version** |
 
 | Refusal | Status | `code` |
@@ -4599,6 +4600,52 @@ this API carries the company's default rule (a company-wide `ALLOW`, unless
 the company's default policy says otherwise), which is why a fresh member has
 one rule here.
 
+#### Integration-managed access
+
+A company that signs up starts with **no default access** for new people, and
+that is deliberate. An integration that manages its own members — a gym system,
+say — can instead be allowed to give **the members it created** the standard
+access its key covers. The company consents once, by issuing the key with
+`access:write` (an **Admin** decision). Nothing else about the company changes:
+its default stays as it is, and people added any other way get nothing.
+
+**Ownership.** Every member created through `POST /members` records the
+integration that created it: the first key of that key's rotation chain, so a
+rotated key keeps ownership and a new key is a different integration. Only that
+integration can give or remove this access. Members created before this
+existed are owned only when the audit trail proves it unambiguously (exactly
+one `PERSON_CREATED` event, by an integration, through this API, whose key
+prefix matches exactly one key of the company); anyone else stays unowned.
+
+**The rule.** One company-wide `ALLOW`, or — for a site-restricted key — one
+site `ALLOW` per site of the key. There is no request body: nothing in the
+request can widen it. Whether the member may enter still depends on `active`,
+which the integration controls through `PATCH /members`; an operator `DENY`
+still outweighs the integration's `ALLOW`, and every rule an operator set is left
+alone. Revoking the key removes nothing.
+
+**Creation.** `POST /members` with a key that holds `access:write` writes the
+rule in the same request, so the new member reaches the terminals at once.
+
+##### `PUT /api/public/v1/members/{member_id}/access`
+
+Credential scope `access:write`. Gives the rule; idempotent (already in place
+changes nothing, and is not audited). Terminals are updated in the same request.
+→ `200` with the member and **only this integration's rules** (the same shape
+as `GET …/access`). Audited as `PERMISSION_CREATED`, actor `INTEGRATION`.
+
+##### `DELETE /api/public/v1/members/{member_id}/access`
+
+Credential scope `access:write`. Removes only the rules this integration wrote
+(within the key's sites); terminals are updated in the same request. → `200`
+with the member and an empty `rules`. Audited as `PERMISSION_DELETED`.
+
+| Refusal | Status | `code` |
+|---|---|---|
+| The key lacks `access:write` | `403` | `insufficient_scope` |
+| No such member, another company's, or one this integration did not create | `404` | `resource_not_found` |
+| `Idempotency-Key` misuse | `409` | `idempotency_key_reuse` / `idempotency_in_progress` |
+
 ### Events
 
 The record of what happened at the doors — every presentation a terminal
@@ -4892,6 +4939,8 @@ already `COMPLETED`, which cancelling never undoes.
 | `PATCH` | `/api/public/v1/members/{member_id}` | `members:write` |
 | `DELETE` | `/api/public/v1/members/{member_id}` | `members:write` |
 | `GET` | `/api/public/v1/members/{member_id}/access` | `access:read` |
+| `PUT` | `/api/public/v1/members/{member_id}/access` | `access:write` |
+| `DELETE` | `/api/public/v1/members/{member_id}/access` | `access:write` |
 | `GET` | `/api/public/v1/sites` | `sites:read` |
 | `GET` | `/api/public/v1/sites/{site_id}` | `sites:read` |
 | `GET` | `/api/public/v1/events` | `events:read` |

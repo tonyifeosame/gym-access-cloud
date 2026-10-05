@@ -839,6 +839,13 @@ func NewRouter() *gin.Engine {
 		{
 			terminals.GET("", handlers.PublicListTerminals)
 		}
+		// Giving and removing integration-managed access: its own scope, and
+		// only ever for members this integration created (service.AccessService).
+		accessWrites := publicAPI.Group("/members", middleware.RequireScope(models.ScopeAccessWrite))
+		{
+			accessWrites.PUT("/:member_id/access", handlers.PublicGrantMemberAccess)
+			accessWrites.DELETE("/:member_id/access", handlers.PublicRevokeMemberAccess)
+		}
 		// Starting and cancelling enrolment command a terminal -- it stops
 		// checking fingers at its door until the enrolment ends -- so both carry
 		// their own scope rather than members:write.

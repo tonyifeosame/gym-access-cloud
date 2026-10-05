@@ -43,6 +43,9 @@ type AccessRule struct {
 
 // MemberAccess is the answer to GET /members/{member_id}/access.
 type MemberAccess struct {
+	// PersonPublicID is for the audit line only; never serialized.
+	PersonPublicID string `json:"-"`
+
 	MemberID string       `json:"member_id"`
 	Active   bool         `json:"active"`
 	Rules    []AccessRule `json:"rules"`
@@ -125,4 +128,64 @@ func standingOf(p *models.Permission, now time.Time) string {
 	default:
 		return StandingInForce
 	}
+}
+
+// integrationGrant is what this credential may give: its lineage and its sites.
+func integrationGrant(tc *TenantContext) *database.IntegrationGrant {
+	return &database.IntegrationGrant{LineageID: tc.LineageID(), SiteIDs: restriction(tc)}
+}
+
+// Grant gives a member this integration created the standard access its
+// credential covers (access:write). Idempotent: already in place is a no-op.
+// A member the integration cannot prove it created is not-found. Terminal
+// rosters are brought up to date in the same transaction. Returns the
+// integration's own rules and how many were added.
+func (s *AccessService) Grant(ctx context.Context, tc *TenantContext, memberID string) (*MemberAccess, int, error) {
+	return s.changeManagedAccess(ctx, tc, memberID, database.GrantIntegrationAccessTx)
+}
+
+// Revoke removes only the rules this integration wrote for the member, within
+// its credential's reach; operator rules are never touched.
+func (s *AccessService) Revoke(ctx context.Context, tc *TenantContext, memberID string) (*MemberAccess, int, error) {
+	return s.changeManagedAccess(ctx, tc, memberID, database.RevokeIntegrationAccessTx)
+}
+
+func (s *AccessService) changeManagedAccess(ctx context.Context, tc *TenantContext, memberID string,
+	change func(database.Querier, int64, int64, database.IntegrationGrant) (int, error)) (*MemberAccess, int, error) {
+	if err := tc.RequireScope(models.ScopeAccessWrite); err != nil {
+		return nil, 0, err
+	}
+	var out *MemberAccess
+	changed := 0
+	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
+		member, err := database.ManagedPersonTx(tx, tx.CompanyID(), memberID, tc.LineageID())
+		if err != nil {
+			return notFoundOrInternal(err)
+		}
+		if changed, err = change(tx, tx.CompanyID(), member.ID, *integrationGrant(tc)); err != nil {
+			return ErrInternal(err)
+		}
+		if changed > 0 {
+			if _, _, _, err := database.ReconcilePersonRosterTx(tx, tx.CompanyID(), member.ID); err != nil {
+				return ErrInternal(err)
+			}
+		}
+		rules, err := database.ListPersonPermissionsTx(tx, tx.CompanyID(), memberID)
+		if err != nil {
+			return ErrInternal(err)
+		}
+		own, err := database.IntegrationRuleIDsTx(tx, tx.CompanyID(), member.ID, tc.LineageID())
+		if err != nil {
+			return ErrInternal(err)
+		}
+		now := time.Now()
+		out = &MemberAccess{PersonPublicID: member.PublicID, MemberID: member.MemberID, Active: member.Active, Rules: []AccessRule{}}
+		for i := range rules {
+			if own[rules[i].ID] {
+				out.Rules = append(out.Rules, publicRule(&rules[i], now))
+			}
+		}
+		return nil
+	})
+	return out, changed, err
 }

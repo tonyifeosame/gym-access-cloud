@@ -95,6 +95,7 @@ func ConsoleGrantPermission(c *gin.Context) {
 			"schedule":    permission.ScheduleName,
 		})
 
+	reconcileRosterFor(c, companyID, permission.PersonID)
 	c.JSON(http.StatusCreated, permission)
 }
 
@@ -135,6 +136,7 @@ func ConsoleRevokePermission(c *gin.Context) {
 			"terminal": permission.DeviceSerial,
 		})
 
+	reconcileRosterFor(c, companyID, permission.PersonID)
 	c.JSON(http.StatusOK, gin.H{"revoked": true, "permission_id": permission.ID})
 }
 
@@ -314,4 +316,18 @@ func ConsoleEvaluateAccess(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, decision)
+}
+
+// reconcileRosterFor brings the company's terminals up to date for one person
+// after a committed permission change, instead of at the next scheduled sweep.
+// A failure is logged, not returned: the change is already committed and the
+// sweep still converges.
+func reconcileRosterFor(c *gin.Context, companyID int64, personPublicID string) {
+	personID, err := database.PersonIDByPublicID(companyID, personPublicID)
+	if err == nil {
+		_, _, _, err = database.ReconcilePersonRoster(companyID, personID)
+	}
+	if err != nil {
+		logError(c, "reconcile roster after permission change", err)
+	}
 }
