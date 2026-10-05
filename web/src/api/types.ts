@@ -1797,6 +1797,8 @@ export type APICredentialScope =
   | 'terminals:read'
   | 'events:read'
   | 'access:read'
+  | 'access:write'
+  | 'enrollments:write'
   | 'webhooks:manage'
 
 /**
