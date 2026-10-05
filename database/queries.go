@@ -189,6 +189,18 @@ func CreateMember(companyID int64, member *models.Member) error {
 // insert, the default access grant and the sync fan-out -- so the two paths
 // cannot drift.
 func CreateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
+	return createMemberTx(tx, companyID, member, 0, nil)
+}
+
+// CreateManagedMemberTx creates a person on behalf of an integration: the
+// lineage is recorded as its provenance, and when grant is non-nil the
+// integration's access is written before the roster fan-out, so the person
+// reaches the terminals in the same transaction.
+func CreateManagedMemberTx(tx *sql.Tx, companyID int64, member *models.Member, lineageID int64, grant *IntegrationGrant) error {
+	return createMemberTx(tx, companyID, member, lineageID, grant)
+}
+
+func createMemberTx(tx *sql.Tx, companyID int64, member *models.Member, lineageID int64, grant *IntegrationGrant) error {
 	// FW-09, enforced at the store rather than only at the two handlers above
 	// it. Both call this, and so would a third; a person whose id no terminal
 	// can hold must not be creatable through any of them, because the failure
@@ -198,12 +210,12 @@ func CreateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 		return err
 	}
 
-	query := `INSERT INTO people (company_id, external_id, full_name, membership_type, active, fingerprint_template)
-	          VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
+	query := `INSERT INTO people (company_id, external_id, full_name, membership_type, active, fingerprint_template, managed_by_lineage_id)
+	          VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0)::bigint)
 	          RETURNING id, public_id, created_at, updated_at`
 
 	err := tx.QueryRow(query, companyID, member.MemberID, member.FullName, member.MembershipType,
-		member.Active, member.FingerprintTemplate).
+		member.Active, member.FingerprintTemplate, lineageID).
 		Scan(&member.ID, &member.PublicID, &member.CreatedAt, &member.UpdatedAt)
 	if err != nil {
 		return err
@@ -218,6 +230,11 @@ func CreateMemberTx(tx *sql.Tx, companyID int64, member *models.Member) error {
 	// show access they have and the door would refuse them.
 	if err := grantDefaultPersonAccessTx(tx, companyID, member.ID); err != nil {
 		return err
+	}
+	if grant != nil {
+		if _, err := GrantIntegrationAccessTx(tx, companyID, member.ID, *grant); err != nil {
+			return err
+		}
 	}
 
 	return enqueuePersonChangeTx(tx, companyID, models.SyncJobCreate, member, false)

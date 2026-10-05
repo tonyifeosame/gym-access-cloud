@@ -65,6 +65,11 @@ const (
 	// chosen terminal stops checking fingers at its door until the enrolment
 	// completes, is cancelled, or its window closes.
 	ScopeEnrollmentsWrite = "enrollments:write"
+
+	// ScopeAccessWrite lets an integration give the members IT CREATED the
+	// standard door access its credential covers, and take that access away.
+	// Never other people's, never other rules. ADMIN to issue: it is a door.
+	ScopeAccessWrite = "access:write"
 )
 
 // ScopeSpec describes one scope.
@@ -154,6 +159,13 @@ var Scopes = map[string]ScopeSpec{
 		Write:            true,
 		SiteRestrictable: false,
 		Description:      "Register and manage endpoints that receive your events.",
+	},
+	ScopeAccessWrite: {
+		Name:             ScopeAccessWrite,
+		MinRole:          RoleAdmin,
+		Write:            true,
+		SiteRestrictable: true,
+		Description:      "Give the members this integration creates door access at your sites (or the sites this key is limited to), and remove that access. It cannot touch anyone else or any rule you set.",
 	},
 	ScopeEnrollmentsWrite: {
 		Name:             ScopeEnrollmentsWrite,

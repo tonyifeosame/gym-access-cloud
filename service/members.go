@@ -182,8 +182,14 @@ func (s *MemberService) Create(ctx context.Context, tc *TenantContext, in Member
 		MembershipType: membershipType,
 		Active:         in.Active == nil || *in.Active,
 	}
+	// Provenance always: this integration created the person. Access only with
+	// access:write, and only within the credential's sites.
+	var grant *database.IntegrationGrant
+	if tc.HasScope(models.ScopeAccessWrite) {
+		grant = integrationGrant(tc)
+	}
 	err := database.WithTenant(ctx, tc.CompanyID(), s.timeout, func(tx *database.ScopedTx) error {
-		if err := database.CreateMemberTx(tx.Tx, tx.CompanyID(), &member); err != nil {
+		if err := database.CreateManagedMemberTx(tx.Tx, tx.CompanyID(), &member, tc.LineageID(), grant); err != nil {
 			return writeFailure(err)
 		}
 		return nil
@@ -298,7 +304,7 @@ func validateMemberInput(in MemberInput, creating bool) error {
 // notFoundOrInternal is the lookup rule in one place: a missing row -- in
 // this tenant or any other -- is not-found; anything else is a server fault.
 func notFoundOrInternal(err error) error {
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, database.ErrNotManaged) {
 		return ErrNotFound()
 	}
 	return ErrInternal(err)

@@ -386,7 +386,10 @@ tags:
     description: |
       A member's access rules and whether each is in force now. **Scope
       `access:read`.** Rules, not a verdict: admission is decided at a terminal
-      at the moment of presentation — read the outcome in *Events*.
+      at the moment of presentation — read the outcome in *Events*. With
+      **`access:write`** (Admin-issued) an integration can give the members it
+      created the standard access its key covers, and remove it again — never
+      anyone else's, never a rule an operator set.
   - name: Sites
     description: |
       Your sites — where terminals stand. **Scope `sites:read`.** A key issued for
@@ -1770,6 +1773,95 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    put:
+      tags: [Access]
+      operationId: grantMemberAccess
+      summary: Give a member this integration's access
+      description: |
+        Requires scope `access:write`, which only an Admin can issue. Gives a
+        member **this integration created** the standard access the key covers:
+        one company-wide `ALLOW`, or one site `ALLOW` per site of a
+        site-restricted key. No request body: the rule comes from the key, not
+        the request. Idempotent — already in place changes nothing — and the
+        member reaches the terminals in the same request. A member the
+        integration did not create (another integration's, one added in the
+        console, or another company's) is `404 resource_not_found`. Whether the
+        member may enter still depends on `active`; an operator `DENY` still
+        outweighs this rule. Answers with this integration's own rules only.
+      security:
+        - IntegrationCredential: []
+      x-scope: access:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      responses:
+        "200":
+          description: The member and the rules this integration manages for them.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberAccess"
+              example:
+                member_id: MEM042
+                active: true
+                rules:
+                  - id: a30363e0-f216-4b47-83f9-b45bd74ef19f
+                    scope: COMPANY
+                    effect: ALLOW
+                    standing: IN_FORCE
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    delete:
+      tags: [Access]
+      operationId: removeMemberAccess
+      summary: Remove this integration's access from a member
+      description: |
+        Requires scope `access:write`. Removes only the rules **this
+        integration** wrote for a member it created, within the key's sites.
+        Rules an operator set — including an `ALLOW` identical to the
+        integration's — are never removed. Terminals are updated in the same
+        request. Revoking the key itself removes nothing.
+      security:
+        - IntegrationCredential: []
+      x-scope: access:write
+      parameters:
+        - $ref: "#/components/parameters/idempotencyKey"
+      responses:
+        "200":
+          description: The member and the rules this integration still manages (none).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            RateLimit-Remaining: { $ref: "#/components/headers/RateLimit-Remaining" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberAccess"
+              example:
+                member_id: MEM042
+                active: true
+                rules: []
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: "`idempotency_key_reuse` or `idempotency_in_progress`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
 
