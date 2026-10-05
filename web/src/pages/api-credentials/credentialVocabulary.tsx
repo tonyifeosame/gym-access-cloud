@@ -5,7 +5,7 @@ import { Badge, type BadgeTone } from '../../components/Badge'
  * The console's words for an integration credential.
  *
  * ONE PLACE, because the list, the detail page and the dialogs all describe the
- * same four states and the same seven scopes, and a reader moving between them
+ * same four states and the same nine scopes, and a reader moving between them
  * must not meet a different name for the same thing on each screen.
  */
 
@@ -59,10 +59,9 @@ export interface ScopeDefinition {
   /**
    * WHETHER THE PUBLIC API HAS A ROUTE FOR IT TODAY. The server registry lists
    * every scope it can express and will issue a key carrying any of them, but
-   * only members:read and sites:read have endpoints in this version. A key
-   * issued with the others answers 403 or 404 to everything, which is a
-   * credential that cannot do anything -- so the issue form does not offer
-   * them, and says why.
+   * webhooks:manage has no endpoint in this version. A key issued with it alone
+   * answers 404 to everything, which is a credential that cannot do anything --
+   * so the issue form does not offer it, and says why.
    */
   available: boolean
 }
@@ -75,34 +74,48 @@ export const SCOPES: ScopeDefinition[] = [
     available: true,
   },
   {
+    scope: 'members:write',
+    label: 'Change members',
+    description: 'Add people, and change or remove the people this integration added.',
+    available: true,
+  },
+  {
     scope: 'sites:read',
     label: 'Read sites',
     description: 'Read your sites.',
     available: true,
   },
   {
-    scope: 'members:write',
-    label: 'Change members',
-    description: 'Add, change and remove people on your roster.',
-    available: false,
-  },
-  {
     scope: 'terminals:read',
     label: 'Read terminals',
     description: 'Read your terminals and whether they are online.',
-    available: false,
+    available: true,
   },
   {
     scope: 'events:read',
     label: 'Read events',
     description: 'Read the record of who was admitted and refused.',
-    available: false,
+    available: true,
   },
   {
     scope: 'access:read',
     label: 'Read access standing',
     description: "Read a person's access standing and where it applies.",
-    available: false,
+    available: true,
+  },
+  {
+    scope: 'enrollments:write',
+    label: 'Enrol fingerprints',
+    description:
+      'Start and cancel fingerprint enrolment at your terminals. The chosen terminal pauses door checks until the finger is captured.',
+    available: true,
+  },
+  {
+    scope: 'access:write',
+    label: 'Give door access',
+    description:
+      'Give the members this integration creates door access at your sites (or the sites this key is limited to), and remove that access. It cannot touch anyone else or any rule you set.',
+    available: true,
   },
   {
     scope: 'webhooks:manage',

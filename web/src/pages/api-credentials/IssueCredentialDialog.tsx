@@ -32,8 +32,8 @@ interface Values extends Record<string, unknown> {
  * successful action. The same shape as creating an operator by invitation.
  *
  * ONLY SCOPES WITH LIVE ENDPOINTS ARE OFFERED. The server will issue a key with
- * any scope in its registry, including five that no public route honours yet;
- * such a key authenticates and then gets 403 or 404 for everything. Offering
+ * any scope in its registry, including webhooks:manage, which no public route
+ * honours yet; such a key authenticates and then gets 404 for everything. Offering
  * those would let an integrator be issued a credential that cannot do anything
  * and go looking for the fault in their own code. They are listed, greyed, so
  * the roadmap is visible and nobody asks whether the console is hiding them.
@@ -146,7 +146,7 @@ export function IssueCredentialDialog({ open, onClose }: { open: boolean; onClos
 
         <CheckboxGroup
           legend="What it may do"
-          hint="Read-only scopes. A credential cannot issue or manage other credentials; that stays with administrators here."
+          hint="Write scopes change your roster and terminals: an integration changes only the members it created, and enrolling pauses the chosen door. A credential cannot issue or manage other credentials; that stays with administrators here."
           options={AVAILABLE_SCOPES.map((definition) => ({
             value: definition.scope,
             label: definition.label,

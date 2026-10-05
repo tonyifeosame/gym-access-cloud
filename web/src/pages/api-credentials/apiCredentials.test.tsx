@@ -325,14 +325,59 @@ describe('issuing a credential', () => {
     await user.click(await screen.findByRole('button', { name: 'Issue credential' }))
     const dialog = screen.getByRole('dialog')
 
-    expect(within(dialog).getByLabelText(/^Read members/)).toBeInTheDocument()
-    expect(within(dialog).getByLabelText(/^Read sites/)).toBeInTheDocument()
-    // Not offered as controls...
-    expect(within(dialog).queryByLabelText(/^Change members/)).not.toBeInTheDocument()
+    for (const label of [
+      /^Read members/,
+      /^Change members/,
+      /^Read sites/,
+      /^Read terminals/,
+      /^Read events/,
+      /^Read access standing/,
+      /^Enrol fingerprints/,
+      /^Give door access/,
+    ]) {
+      expect(within(dialog).getByLabelText(label)).toBeInTheDocument()
+    }
+    // Not offered as a control...
     expect(within(dialog).queryByLabelText(/^Manage webhooks/)).not.toBeInTheDocument()
     // ...but named, under a heading that says why.
     expect(within(dialog).getByRole('heading', { name: 'Not available yet' })).toBeInTheDocument()
     expect(within(dialog).getByText('Manage webhooks')).toBeInTheDocument()
+  })
+
+  it('issues a gym-system credential with every scope remote enrolment needs', async () => {
+    const user = userEvent.setup()
+    signIn()
+    renderCredentials()
+
+    await user.click(await screen.findByRole('button', { name: 'Issue credential' }))
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText(/Name/), 'Gym system')
+    for (const label of [
+      /^Read members/,
+      /^Change members/,
+      /^Read events/,
+      /^Read sites/,
+      /^Read terminals/,
+      /^Enrol fingerprints/,
+      /^Give door access/,
+    ]) {
+      await user.click(within(dialog).getByLabelText(label))
+    }
+    await user.click(within(dialog).getByLabelText(SITE_A.site_name))
+    await user.click(within(dialog).getByRole('button', { name: 'Issue credential' }))
+    await screen.findByLabelText('Secret')
+
+    const issued = state.apiCredentials.find((c) => c.name === 'Gym system')
+    expect([...(issued?.scopes ?? [])].sort()).toEqual([
+      'access:write',
+      'enrollments:write',
+      'events:read',
+      'members:read',
+      'members:write',
+      'sites:read',
+      'terminals:read',
+    ])
+    expect(issued?.sites.map((s) => s.site_name)).toEqual([SITE_A.site_name])
   })
 
   it('requires a name and at least one scope, and warns that no sites means every site', async () => {

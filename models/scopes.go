@@ -123,7 +123,7 @@ var Scopes = map[string]ScopeSpec{
 		MinRole:          RoleManager,
 		Write:            true,
 		SiteRestrictable: false,
-		Description:      "Add, change and remove people on your roster.",
+		Description:      "Add people, and change or remove the people this integration added.",
 	},
 	ScopeSitesRead: {
 		Name:             ScopeSitesRead,
