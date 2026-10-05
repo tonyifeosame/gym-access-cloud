@@ -814,6 +814,7 @@ func NewRouter() *gin.Engine {
 		{
 			members.GET("", handlers.PublicListMembers)
 			members.GET("/:member_id", handlers.PublicGetMember)
+			members.GET("/:member_id/enrollment", handlers.PublicGetMemberEnrollment)
 		}
 		memberWrites := publicAPI.Group("/members", middleware.RequireScope(models.ScopeMembersWrite))
 		{
@@ -833,6 +834,18 @@ func NewRouter() *gin.Engine {
 		events := publicAPI.Group("/events", middleware.RequireScope(models.ScopeEventsRead))
 		{
 			events.GET("", handlers.PublicListEvents)
+		}
+		terminals := publicAPI.Group("/terminals", middleware.RequireScope(models.ScopeTerminalsRead))
+		{
+			terminals.GET("", handlers.PublicListTerminals)
+		}
+		// Starting and cancelling enrolment command a terminal -- it stops
+		// checking fingers at its door until the enrolment ends -- so both carry
+		// their own scope rather than members:write.
+		enrollmentWrites := publicAPI.Group("", middleware.RequireScope(models.ScopeEnrollmentsWrite))
+		{
+			enrollmentWrites.POST("/terminals/:serial/enrollments", handlers.PublicStartEnrollment)
+			enrollmentWrites.DELETE("/members/:member_id/enrollment", handlers.PublicCancelMemberEnrollment)
 		}
 	}
 

@@ -42,10 +42,11 @@ import (
 // router constructed without ConfigurePublicAPI (every test does this) still
 // serves -- with an ephemeral cursor key that is fine for a single process.
 type publicServices struct {
-	members *service.MemberService
-	sites   *service.SiteService
-	access  *service.AccessService
-	events  *service.EventService
+	members     *service.MemberService
+	sites       *service.SiteService
+	access      *service.AccessService
+	events      *service.EventService
+	enrollments *service.EnrollmentService
 }
 
 var (
@@ -67,10 +68,11 @@ func ConfigurePublicAPI(cursorKey []byte) error {
 	publicMu.Lock()
 	defer publicMu.Unlock()
 	public = &publicServices{
-		members: service.NewMemberService(signer),
-		sites:   service.NewSiteService(),
-		access:  service.NewAccessService(),
-		events:  service.NewEventService(signer),
+		members:     service.NewMemberService(signer),
+		sites:       service.NewSiteService(),
+		access:      service.NewAccessService(),
+		events:      service.NewEventService(signer),
+		enrollments: service.NewEnrollmentService(),
 	}
 	return nil
 }

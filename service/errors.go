@@ -175,6 +175,17 @@ func ErrCredentialWrongEnvironment() *Error {
 	return newError(models.CodeCredentialWrongEnvironment, "", "", nil)
 }
 
+// ErrTerminalNotEnrollable: the terminal exists and is visible, but cannot run an enrolment.
+func ErrTerminalNotEnrollable() *Error {
+	return newError(models.CodeTerminalNotEnrollable, "", "", nil)
+}
+
+// ErrEnrollmentOutOfReach: the member's live enrolment is at a terminal outside
+// the credential's sites, so starting another would cancel it. Nothing changed.
+func ErrEnrollmentOutOfReach() *Error {
+	return newError(models.CodeEnrollmentOutOfReach, "", "", nil)
+}
+
 // ErrInternal wraps a failure the caller cannot act on. The cause is for the
 // log line; the response carries the registry's sentence and the request id.
 func ErrInternal(cause error) *Error {

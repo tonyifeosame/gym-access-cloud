@@ -92,11 +92,13 @@ const (
 	CodeResourceNotFound = "resource_not_found"
 
 	// conflict_error -- 409
-	CodeMemberIDExists       = "member_id_already_exists"
-	CodeIdempotencyKeyReuse  = "idempotency_key_reuse"
-	CodeIdempotencyInProgres = "idempotency_in_progress"
-	CodeRosterOverCapacity   = "roster_exceeds_terminal_capacity"
-	CodeWebhookLimitReached  = "webhook_limit_reached"
+	CodeMemberIDExists        = "member_id_already_exists"
+	CodeIdempotencyKeyReuse   = "idempotency_key_reuse"
+	CodeIdempotencyInProgres  = "idempotency_in_progress"
+	CodeRosterOverCapacity    = "roster_exceeds_terminal_capacity"
+	CodeTerminalNotEnrollable = "terminal_not_enrollable"
+	CodeEnrollmentOutOfReach  = "enrollment_in_progress_elsewhere"
+	CodeWebhookLimitReached   = "webhook_limit_reached"
 
 	// gone_error -- 410
 	CodeCursorExpired = "cursor_expired"
@@ -179,6 +181,10 @@ var APIErrors = map[string]APIErrorSpec{
 		"A request with that Idempotency-Key is still in progress."},
 	CodeRosterOverCapacity: {CodeRosterOverCapacity, ErrorTypeConflict, http.StatusConflict,
 		"A terminal cannot hold the people this change would give it."},
+	CodeTerminalNotEnrollable: {CodeTerminalNotEnrollable, ErrorTypeConflict, http.StatusConflict,
+		"That terminal cannot run an enrolment: it is disabled, retired, or has never been provisioned with a credential of its own."},
+	CodeEnrollmentOutOfReach: {CodeEnrollmentOutOfReach, ErrorTypeConflict, http.StatusConflict,
+		"This member already has an enrolment in progress at a terminal this credential cannot reach. It was left untouched."},
 	CodeWebhookLimitReached: {CodeWebhookLimitReached, ErrorTypeConflict, http.StatusConflict,
 		"This account already has the maximum number of webhook endpoints."},
 

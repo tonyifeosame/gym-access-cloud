@@ -3794,7 +3794,8 @@ requires; a credential without it is refused **before any lookup**.
 | `members:read` | reading members |
 | `members:write` | creating, updating and deleting members. **Implies `members:read`** — the implied scope is stored on the credential at issue, so a credential's scope list is exactly what it can do |
 | `sites:read` | reading sites |
-| `terminals:read` | reading terminals — **no route in this version** |
+| `terminals:read` | listing terminals |
+| `enrollments:write` | starting and cancelling fingerprint enrolment at a terminal. **Does not imply `members:read`**: reading an enrolment's status needs that scope too. Separate from `members:write` because it commands hardware — the chosen terminal stops checking fingers at its door until the enrolment ends |
 | `events:read` | reading the activity trail — **no route in this version** |
 | `access:read` | reading access logs — **no route in this version** |
 | `webhooks:manage` | managing webhook endpoints — **no route in this version** |
@@ -3877,7 +3878,7 @@ database error.
 | `permission_error` | `403` | `insufficient_scope`, `site_not_permitted`, `company_inactive` (reserved) |
 | `invalid_request_error` | `400` | `unknown_parameter`, `unknown_field`, `missing_field`, `invalid_field`, `invalid_timestamp`, `cursor_invalid`, `sort_not_supported`, `tenant_identity_not_permitted`, `member_id_unusable`, `idempotency_key_invalid`, `body_too_large` |
 | `not_found_error` | `404` | `resource_not_found` |
-| `conflict_error` | `409` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `idempotency_key_reuse`, `idempotency_in_progress`, `webhook_limit_reached` |
+| `conflict_error` | `409` | `member_id_already_exists`, `roster_exceeds_terminal_capacity`, `terminal_not_enrollable`, `enrollment_in_progress_elsewhere`, `idempotency_key_reuse`, `idempotency_in_progress`, `webhook_limit_reached` |
 | `gone_error` | `410` | `cursor_expired` |
 | `rate_limit_error` | `429` | `rate_limit_exceeded`, with `Retry-After` |
 | `api_error` | `500` / `503` | `internal_error` / `service_unavailable` (`503` carries `Retry-After`) |
@@ -4733,6 +4734,154 @@ curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
 ```
 → `400`
 
+### Terminals
+
+**Auth: integration credential.**
+
+```json
+{
+  "serial": "AT-000A",
+  "name": "Front door",
+  "site_id": "5120e7c4-…",
+  "site_name": "Site A",
+  "status": "ONLINE",
+  "last_seen_at": "2026-09-30T08:10:21Z",
+  "enrollable": true
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `serial` | string | the identifier; the path parameter of the enrolment start |
+| `name` | string | `""` when the terminal has none |
+| `site_id` | string (UUID) | the site's public identifier |
+| `site_name` | string | |
+| `status` | string | the terminal's lifecycle status, as the console shows it |
+| `last_seen_at` | timestamp \| `null` | last heartbeat, else last contact; `null` if never seen |
+| `enrollable` | bool | whether `POST …/enrollments` would accept this terminal: active, not `DISABLED`, and holding a credential of its own. The same predicate the start enforces, so the list never offers a terminal the start then refuses |
+
+**These seven fields are the whole object.** No internal id and nothing that is
+a credential.
+
+#### `GET /api/public/v1/terminals`
+
+Credential scope `terminals:read`. Not paginated, like sites: `{ "data": [ … ] }`,
+every live terminal the credential reaches, ordered by site name then serial.
+A site-restricted credential sees only the terminals at its sites. Takes no
+query parameters.
+
+### Enrolment
+
+Remote fingerprint enrolment: an integration asks **one named terminal** to
+capture a finger for **one member**. It is the console's enrolment
+([section 17.7](#177-enroll_fingerprint--operator-driven-enrolment)) — one state
+machine, one `ENROLL_FINGERPRINT` job, the terminal and its protocol untouched —
+driven by a credential instead of an operator. The template never leaves the
+terminal; nothing in this object is biometric.
+
+**Starting an enrolment takes a door out of service for its window.** A
+terminal waiting to capture a finger is not checking fingers at its door. The
+window is `expires_in_seconds` (default 300, 30–3600).
+
+```json
+{
+  "id": "8d0c…",
+  "member_id": "M-1001",
+  "member": "6f1e…",
+  "status": "PENDING",
+  "terminal_serial": "AT-000A",
+  "site_id": "5120e7c4-…",
+  "created_at": "2026-09-30T08:10:22Z",
+  "expires_at": "2026-09-30T08:15:22Z",
+  "started_at": null,
+  "completed_at": null
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `id` | string | the enrolment's identifier |
+| `member_id` | string | the member's own identifier |
+| `member` | string (UUID) | the member object's `id` |
+| `status` | string | see below |
+| `terminal_serial` | string | the terminal asked to capture |
+| `site_id` | string (UUID) | the terminal's site; omitted only if that is no longer known |
+| `error` | string | present on `FAILED`/`CANCELLED`: the terminal's own words, or why it was cancelled |
+| `created_at` | timestamp | |
+| `expires_at` | timestamp | when the window closes |
+| `started_at` | timestamp \| `null` | when the terminal picked the job up |
+| `completed_at` | timestamp \| `null` | when it reached a final status, whichever one |
+
+| `status` | Meaning |
+|---|---|
+| `PENDING` | queued; the terminal has not picked it up |
+| `IN_PROGRESS` | the terminal is showing the prompt |
+| `COMPLETED` | a finger was captured and bound to the member |
+| `FAILED` | the terminal reported a failure (`error` says what). **Not retried automatically** — start again |
+| `EXPIRED` | the window closed with no result; the job is withdrawn |
+| `CANCELLED` | cancelled through this API or the console, or superseded by a newer start |
+
+**One live enrolment per member.** Starting again — at the same terminal or
+another — supersedes the live one (`CANCELLED`) and withdraws its job, so the
+old terminal can no longer complete it.
+
+**A site-restricted credential never supersedes outside its sites.** If the
+member's live enrolment is at a terminal outside the credential's sites (or
+whose site is no longer known), the start is refused with
+`409 enrollment_in_progress_elsewhere` and **nothing changes**: the other
+enrolment stays live, its job stays deliverable, no new enrolment or job is
+created, and nothing is audited. The response does not name the other terminal
+or site. The check runs in the same transaction as the supersede, under the
+member's row lock. A window that has already lapsed is not live: it is closed
+as `EXPIRED` first and does not block. An unrestricted credential (and the
+console) supersedes across sites as before.
+
+**Site restriction.** A terminal outside a site-restricted credential's sites
+is **`404 resource_not_found`**, as is an enrolment whose terminal is outside
+them — the same answer as a terminal or enrolment that does not exist.
+
+**Idempotency.** Both writes honour `Idempotency-Key` as described under
+[Writes](#writes--post-patch-delete). Send one on the start: a keyless retry of a
+start that did succeed supersedes it and re-arms the reader with a new job. A
+keyed retry of a cancel replays its `200` where a keyless one would be `404`.
+
+#### `POST /api/public/v1/terminals/{serial}/enrollments`
+
+Credential scope `enrollments:write`.
+
+```json
+{ "member_id": "M-1001", "expires_in_seconds": 120 }
+```
+
+→ `201` with the enrolment, `status: "PENDING"`. Audited as the integration
+(`ENROLMENT_STARTED`).
+
+| Refusal | Status | `code` |
+|---|---|---|
+| `member_id` absent | `400` | `missing_field` |
+| `expires_in_seconds` outside 30–3600 or not an integer | `400` | `invalid_field` |
+| Any other body field | `400` | `unknown_field` |
+| No such member in the company | `404` | `resource_not_found` |
+| No such terminal in the company, or outside the credential's sites | `404` | `resource_not_found` |
+| The terminal is disabled, retired, or holds no credential of its own (never provisioned, or revoked) | `409` | `terminal_not_enrollable` |
+| Site-restricted credential; the member's live enrolment is at a terminal outside its sites. Nothing is changed | `409` | `enrollment_in_progress_elsewhere` |
+
+#### `GET /api/public/v1/members/{member_id}/enrollment`
+
+Credential scope `members:read`. The member's **most recent** enrolment, live or
+finished, so a failure stays readable. A window that has run out reads as
+`EXPIRED` immediately. `404 resource_not_found` when the member does not exist
+or has never had an enrolment the credential can see. Poll this for the
+outcome; there are no enrolment webhooks in this version.
+
+#### `DELETE /api/public/v1/members/{member_id}/enrollment`
+
+Credential scope `enrollments:write`. Cancels the member's live enrolment and
+withdraws its job; the terminal returns to checking fingers. → `200` with the
+enrolment, `status: "CANCELLED"`. Audited as `ENROLMENT_CANCELLED`.
+`404 resource_not_found` when nothing is live — including an enrolment that
+already `COMPLETED`, which cancelling never undoes.
+
 ### Endpoints in this version
 
 | Method | Path | Credential scope |
@@ -4746,12 +4895,18 @@ curl "http://localhost:8080/api/public/v1/events?from=yesterday" \
 | `GET` | `/api/public/v1/sites` | `sites:read` |
 | `GET` | `/api/public/v1/sites/{site_id}` | `sites:read` |
 | `GET` | `/api/public/v1/events` | `events:read` |
+| `GET` | `/api/public/v1/terminals` | `terminals:read` |
+| `POST` | `/api/public/v1/terminals/{serial}/enrollments` | `enrollments:write` |
+| `GET` | `/api/public/v1/members/{member_id}/enrollment` | `members:read` |
+| `DELETE` | `/api/public/v1/members/{member_id}/enrollment` | `enrollments:write` |
 
 `members:write` implies `members:read`; a credential issued with the former
-carries both. Terminals and webhooks have credential scopes but no contract
-yet; a route for either is added to this section before it is served, never
-after. There is no route that unlocks a door, commands a terminal, or touches
-biometric material, and none is planned for this tree.
+carries both. `enrollments:write` implies nothing. Webhooks have a credential
+scope but no contract yet; a route is added to this section before it is
+served, never after. The only route that commands a terminal is the enrolment
+start, and it can do one thing: ask the chosen terminal to capture a finger.
+There is no route that unlocks a door or returns biometric material, and none
+is planned for this tree.
 
 ---
 
