@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"access-terminal-cloud-api/database"
 	"access-terminal-cloud-api/models"
@@ -16,6 +17,7 @@ import (
 type retireEnrolmentFixture struct {
 	*credentialViewFixture
 	otherDeviceID int64
+	otherKey      string
 }
 
 const (
@@ -26,8 +28,8 @@ const (
 func newRetireEnrolmentFixture(t *testing.T) *retireEnrolmentFixture {
 	t.Helper()
 	f := newCredentialViewFixture(t)
-	f.env.registerDevice(f.env.siteAKey, otherSerial)
-	return &retireEnrolmentFixture{f, deviceIDBySerial(t, otherSerial)}
+	otherKey := f.env.registerDevice(f.env.siteAKey, otherSerial)
+	return &retireEnrolmentFixture{f, deviceIDBySerial(t, otherSerial), otherKey}
 }
 
 // enrolOn seeds a person with an ACTIVE credential and the matching legacy locator,
@@ -234,6 +236,9 @@ func TestRetireKeepsADeliverableCopyAndClosesAnUndeliverableOne(t *testing.T) {
 	if got := credentialStatus(t, sealed); got != models.CredentialActive {
 		t.Errorf("deliverable copy: credential = %s, want ACTIVE", got)
 	}
+	if !f.enrolled(t, "P-SEALED") || !f.detailEnrolled(t, "P-SEALED") {
+		t.Error("deliverable copy: must read Enrolled on the list and the person page")
+	}
 	if got := credentialStatus(t, bare); got != models.CredentialRevoked {
 		t.Errorf("undeliverable copy: credential = %s, want REVOKED", got)
 	}
@@ -257,6 +262,155 @@ func TestRetireTrustsAnEnrollingTerminalThatStillLives(t *testing.T) {
 
 	if got := credentialStatus(t, credential); got != models.CredentialActive {
 		t.Errorf("credential = %s, want ACTIVE", got)
+	}
+	if !f.enrolled(t, "P-SRC") || !f.detailEnrolled(t, "P-SRC") {
+		t.Error("must read Enrolled on the list and the person page")
+	}
+}
+
+// A failed import is retried, so it is not the end of that copy.
+func TestRetireKeepsACopyStillBeingRetried(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	_, credential := f.enrolOn(t, "P-RETRY", f.deviceID, retireSerial, 1)
+	seedPlacement(t, credential, f.otherDeviceID, models.PlacementFailed, 0)
+	mustExec(t, `UPDATE credentials
+	                SET sealed_material = '\xdeadbeef'::bytea, sealed_key_id = 'ck_test',
+	                    sealed_algorithm = 'AES-256-GCM'
+	              WHERE public_id = $1::uuid`, credential)
+
+	f.retire(t)
+
+	if got := credentialStatus(t, credential); got != models.CredentialActive {
+		t.Errorf("credential = %s, want ACTIVE", got)
+	}
+}
+
+// A backfilled credential names its terminal only in the identifier, so that
+// terminal still holds the finger even with no placement row.
+func TestRetireKeepsABackfilledCredentialNamingALiveTerminal(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	personID := seedPerson(t, f.companyID, "P-BACKLIVE", "Backfilled")
+	var credential string
+	mustScan(t, `INSERT INTO credentials (company_id, person_id, credential_type, identifier, status)
+	             VALUES (`+itoa(f.companyID)+`, `+itoa(personID)+`, 'FINGERPRINT',
+	                     'legacy:terminal:`+otherSerial+`:slot:5', 'ACTIVE')
+	             RETURNING public_id`, &credential)
+	seedPlacement(t, credential, f.deviceID, models.PlacementPlaced, 1)
+
+	f.retire(t)
+
+	if got := credentialStatus(t, credential); got != models.CredentialActive {
+		t.Errorf("credential = %s, want ACTIVE", got)
+	}
+}
+
+// THE RACE. Each transaction has soft-deleted its own terminal, uncommitted, before
+// reaching the enrolment step. Holding the lock until both are waiting forces that
+// interleaving. Without the lock they never wait, and each would keep the credential
+// for the sake of the other: Enrolled for ever on two retired terminals.
+func TestRetiringBothTerminalsAtOnceEndsTheEnrolment(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	personID, credential := f.enrolOn(t, "P-BOTHGONE", f.deviceID, retireSerial, 1)
+	seedPlacement(t, credential, f.otherDeviceID, models.PlacementPlaced, 2)
+
+	hold, err := database.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Rollback()
+	if _, err := hold.Exec(`SELECT pg_advisory_xact_lock(31, $1::int)`, f.companyID); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		reset int
+	)
+	for _, serial := range []string{retireSerial, otherSerial} {
+		wg.Add(1)
+		go func(serial string) {
+			defer wg.Done()
+			result, err := database.RetireTerminal(f.companyID, serial, "race", 0)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Errorf("retire %s: %v", serial, err)
+				return
+			}
+			reset += result.EnrolmentsReset
+		}(serial)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for queryInt(t, `SELECT count(*) FROM pg_locks
+	                  WHERE locktype = 'advisory' AND NOT granted`) != 2 {
+		if time.Now().After(deadline) {
+			hold.Rollback()
+			wg.Wait()
+			t.Fatal("the two retirements never waited on the lock")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := hold.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	if got := credentialStatus(t, credential); got != models.CredentialRevoked {
+		t.Errorf("credential = %s, want REVOKED", got)
+	}
+	if reset != 1 {
+		t.Errorf("EnrolmentsReset across both = %d, want 1", reset)
+	}
+	if f.enrolled(t, "P-BOTHGONE") {
+		t.Error("person still reads Enrolled with both terminals retired")
+	}
+	if got := queryString(t, `SELECT COALESCE(fingerprint_template, '') FROM people WHERE id = $1`,
+		personID); got != "" {
+		t.Errorf("locator = %q, want empty", got)
+	}
+}
+
+// A revoked credential cannot acquire a placement, or the person would have a real
+// finger on a door and read Not enrolled.
+func TestARevokedCredentialCannotBePlacedByID(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	_, credential := f.enrolOn(t, "P-REVOKED", f.deviceID, retireSerial, 1)
+	f.retire(t)
+
+	res := f.env.do("POST", "/api/v1/devices/credentials/placement", map[string]any{
+		"credential_id": credential,
+		"member_id":     "P-REVOKED",
+		"slot":          3,
+		"state":         models.PlacementPlaced,
+	}, deviceAuth(f.otherKey))
+	if res.Code != http.StatusNotFound {
+		t.Errorf("placing a revoked credential = %d (%s), want 404", res.Code, res.Raw)
+	}
+}
+
+// But a terminal still has to be able to confirm it erased one.
+func TestARevokedCredentialCanStillBeConfirmedRemoved(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	_, credential := f.enrolOn(t, "P-ERASED", f.deviceID, retireSerial, 1)
+	seedPlacement(t, credential, f.otherDeviceID, models.PlacementRemoving, 0)
+	f.retire(t)
+	if got := credentialStatus(t, credential); got != models.CredentialRevoked {
+		t.Fatalf("credential = %s, want REVOKED", got)
+	}
+
+	res := f.env.do("POST", "/api/v1/devices/credentials/placement", map[string]any{
+		"credential_id": credential,
+		"member_id":     "P-ERASED",
+		"state":         models.PlacementRemoved,
+	}, deviceAuth(f.otherKey))
+	if res.Code != http.StatusOK {
+		t.Fatalf("confirming removal = %d (%s), want 200", res.Code, res.Raw)
+	}
+	if got := queryString(t, `SELECT state FROM credential_placements WHERE device_id = $1`,
+		f.otherDeviceID); got != models.PlacementRemoved {
+		t.Errorf("placement = %s, want REMOVED", got)
 	}
 }
 
@@ -352,12 +506,20 @@ func TestRetireOnlyTouchesItsOwnCompany(t *testing.T) {
 	// Same text as this company's terminal: serials are not unique across history.
 	mustExec(t, `UPDATE people SET fingerprint_template = $1 WHERE id = $2`,
 		"terminal:"+retireSerial+":slot:1", personID)
+	var credential string
+	mustScan(t, `INSERT INTO credentials (company_id, person_id, credential_type, identifier, status)
+	             VALUES (`+itoa(otherCompany)+`, `+itoa(personID)+`, 'FINGERPRINT',
+	                     'legacy:terminal:`+retireSerial+`:slot:1', 'ACTIVE')
+	             RETURNING public_id`, &credential)
 
 	f.retire(t)
 
 	if got := queryString(t, `SELECT fingerprint_template FROM people WHERE id = $1`,
 		personID); got != "terminal:"+retireSerial+":slot:1" {
 		t.Errorf("another company's person was changed: %q", got)
+	}
+	if got := credentialStatus(t, credential); got != models.CredentialActive {
+		t.Errorf("another company's credential = %s, want ACTIVE", got)
 	}
 }
 
@@ -530,16 +692,92 @@ func TestRetireSiteResetsEnrolmentsOfItsTerminals(t *testing.T) {
 	}
 }
 
+// One credential on two terminals at the same site: neither survives.
+func TestRetireSiteEndsAnEnrolmentHeldOnlyAtThatSite(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	_, credential := f.enrolOn(t, "P-SAMESITE", f.deviceID, retireSerial, 1)
+	seedPlacement(t, credential, f.otherDeviceID, models.PlacementPlaced, 2)
+
+	var siteID int64
+	mustScan(t, `SELECT site_id FROM devices WHERE id = `+itoa(f.deviceID), &siteID)
+
+	if _, err := database.RetireSite(f.companyID, siteID); err != nil {
+		t.Fatalf("RetireSite: %v", err)
+	}
+	if got := credentialStatus(t, credential); got != models.CredentialRevoked {
+		t.Errorf("credential = %s, want REVOKED", got)
+	}
+}
+
+func TestRepeatedRetireSiteChangesNothing(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	f.enrolOn(t, "P-SITEREP", f.deviceID, retireSerial, 1)
+
+	var siteID int64
+	mustScan(t, `SELECT site_id FROM devices WHERE id = `+itoa(f.deviceID), &siteID)
+	if _, err := database.RetireSite(f.companyID, siteID); err != nil {
+		t.Fatalf("RetireSite: %v", err)
+	}
+	before := queryString(t, `SELECT revoked_at::text FROM credentials WHERE revoked_at IS NOT NULL`)
+
+	if _, err := database.RetireSite(f.companyID, siteID); !errors.Is(err, models.ErrSiteNotFound) {
+		t.Fatalf("repeat: err = %v, want ErrSiteNotFound", err)
+	}
+	if got := queryString(t, `SELECT revoked_at::text FROM credentials WHERE revoked_at IS NOT NULL`); got != before {
+		t.Errorf("revoked_at moved on a repeat: %s -> %s", before, got)
+	}
+}
+
+func TestFailedRetireSiteRollsEverythingBack(t *testing.T) {
+	f := newRetireEnrolmentFixture(t)
+	_, credential := f.enrolOn(t, "P-SITEROLL", f.deviceID, retireSerial, 1)
+
+	var siteID int64
+	mustScan(t, `SELECT site_id FROM devices WHERE id = `+itoa(f.deviceID), &siteID)
+	failUpdatesOn(t, "credentials")
+
+	if _, err := database.RetireSite(f.companyID, siteID); err == nil {
+		t.Fatal("retirement should have failed")
+	}
+	if got := queryInt(t, `SELECT count(*) FROM sites WHERE id = `+itoa(siteID)+` AND deleted_at IS NULL`); got != 1 {
+		t.Error("the site must remain live")
+	}
+	if got := queryInt(t, `SELECT count(*) FROM devices WHERE id = `+itoa(f.deviceID)+` AND deleted_at IS NULL`); got != 1 {
+		t.Error("the terminal must remain live")
+	}
+	if got := credentialStatus(t, credential); got != models.CredentialActive {
+		t.Errorf("credential = %s, want ACTIVE", got)
+	}
+}
+
 // Re-enrolling after a retirement has to work, or the reset would strand people.
+// Through the real placement endpoint, without naming a credential, as the firmware
+// reports it.
 func TestAPersonCanEnrolAgainAfterRetirement(t *testing.T) {
 	f := newRetireEnrolmentFixture(t)
-	personID, _ := f.enrolOn(t, "P-AGAIN", f.deviceID, retireSerial, 1)
+	personID, revoked := f.enrolOn(t, "P-AGAIN", f.deviceID, retireSerial, 1)
 	f.retire(t)
+	if f.enrolled(t, "P-AGAIN") {
+		t.Fatal("should read Not enrolled after retirement")
+	}
 
-	credential := seedFingerprintCredential(t, f.companyID, personID, f.otherDeviceID, models.CredentialActive)
-	seedPlacement(t, credential, f.otherDeviceID, models.PlacementPlaced, 7)
+	res := f.env.do("POST", "/api/v1/devices/credentials/placement", map[string]any{
+		"member_id": "P-AGAIN",
+		"slot":      7,
+		"state":     models.PlacementPlaced,
+	}, deviceAuth(f.otherKey))
+	if res.Code != http.StatusOK {
+		t.Fatalf("placement = %d (%s)", res.Code, res.Raw)
+	}
 
-	if !f.enrolled(t, "P-AGAIN") {
-		t.Error("a fresh enrolment should read Enrolled")
+	if !f.enrolled(t, "P-AGAIN") || !f.detailEnrolled(t, "P-AGAIN") {
+		t.Error("a fresh enrolment should read Enrolled everywhere")
+	}
+	if got := credentialStatus(t, revoked); got != models.CredentialRevoked {
+		t.Errorf("old credential = %s, want it left REVOKED", got)
+	}
+	if got := queryInt(t, `SELECT count(*) FROM credentials
+	      WHERE person_id = `+itoa(personID)+` AND status IN ('PENDING', 'ACTIVE')`); got != 1 {
+		t.Errorf("live credentials = %d, want 1", got)
 	}
 }

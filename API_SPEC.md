@@ -2072,7 +2072,8 @@ people read as not enrolled (`biometric_enrolled: false`), and `enrolments_reset
 in the response counts them. Anyone still enrolled on a terminal that is not
 retired, including a disabled one, keeps their enrolment. People, access history
 and attendance are not changed. Repeating the request returns `404`, because the
-terminal is already gone, and changes nothing.
+terminal is already gone, and changes nothing. Terminal release is a separate
+operation and does not reset enrolment.
 
 **`recovery` is an instruction, not a description**, and a client is expected to
 show it verbatim. The order in it is required and neither step can be skipped:

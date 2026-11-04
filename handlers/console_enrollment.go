@@ -137,9 +137,22 @@ func ConsoleGetPersonEnrollment(c *gin.Context) {
 		return
 	}
 
+	// The same rule as the People list. The legacy column alone would call somebody
+	// enrolled only through a credential Not enrolled on their own page.
+	enrolment, err := database.PersonEnrolmentFor(companyID, externalID)
+	if errors.Is(err, models.ErrPersonNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Person not found"})
+		return
+	}
+	if err != nil {
+		logError(c, "console read person enrolment", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read the enrolment"})
+		return
+	}
+
 	response := models.ConsoleEnrollmentResponse{
 		ExternalID:        member.MemberID,
-		BiometricEnrolled: member.FingerprintTemplate != "",
+		BiometricEnrolled: enrolment.Enrolled(),
 	}
 
 	enrollment, err := database.LatestEnrollmentForPerson(companyID, externalID)

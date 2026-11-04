@@ -17,11 +17,12 @@ import (
 // WHAT COUNTS AS STILL ENROLLED ELSEWHERE, on a terminal that is not retired:
 //
 //   - a PLACED placement of the credential;
-//   - a PENDING placement of a credential whose sealed material the platform
-//     holds, because that copy is on its way and needs nothing from the retired
-//     unit;
-//   - the credential's enrolling terminal, with no placement saying the finger
-//     has left it. The result and placement writes are not atomic
+//   - a PENDING or FAILED placement of a credential whose sealed material the
+//     platform holds, because that copy is on its way or being retried and needs
+//     nothing from the retired unit;
+//   - the terminal the credential says it was enrolled on, by enrolled_device_id
+//     or a backfilled legacy identifier, with no placement saying the finger has
+//     left it. The result and placement writes are not atomic
 //     (handlers/enrollment.go), so a real enrolment can have no placement row.
 //
 // A DISABLED terminal counts. Disabling is reversible and the template is still
@@ -33,8 +34,19 @@ import (
 //
 // IT RUNS IN THE RETIRING TRANSACTION, so a failure here also leaves the terminal
 // unretired. It must run after the devices have been soft-deleted.
+//
+// RETIREMENTS IN ONE COMPANY ARE SERIALISED HERE. Two transactions retiring the two
+// terminals that hold one credential cannot see each other's uncommitted delete,
+// so without the lock each would keep the credential for the sake of the other,
+// and nothing could ever correct it: neither terminal can be retired again. The
+// statements below take a fresh snapshot after the lock, so the second sees the
+// first's commit.
 
 const retiredEnrolmentReason = "terminal retired"
+
+// retireEnrolmentLockClass is the first key of the advisory lock. 30 is API
+// credential issuance (api_credentials.go).
+const retireEnrolmentLockClass = 31
 
 // resetEnrolmentsForRetiredTerminalsTx returns how many people became Not enrolled.
 func resetEnrolmentsForRetiredTerminalsTx(tx *sql.Tx, companyID int64,
@@ -44,6 +56,11 @@ func resetEnrolmentsForRetiredTerminalsTx(tx *sql.Tx, companyID int64,
 		return 0, nil
 	}
 	retired := pq.Array(deviceIDs)
+
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1, $2::int)`,
+		retireEnrolmentLockClass, companyID); err != nil {
+		return 0, fmt.Errorf("serialising retirement: %w", err)
+	}
 
 	// REVOKED rather than deleted, so the credentials endpoint and event history
 	// can still explain what this person held. A bare PENDING row has nothing to
@@ -75,12 +92,16 @@ func resetEnrolmentsForRetiredTerminalsTx(tx *sql.Tx, companyID int64,
 		             WHERE pl.credential_id = c.id
 		               AND d.deleted_at IS NULL AND s.deleted_at IS NULL
 		               AND (pl.state = 'PLACED'
-		                    OR (pl.state = 'PENDING' AND c.sealed_material IS NOT NULL))
+		                    OR (pl.state IN ('PENDING', 'FAILED')
+		                        AND c.sealed_material IS NOT NULL))
 		       )
 		       AND NOT EXISTS (
 		            SELECT 1 FROM devices d
 		              JOIN sites s ON s.id = d.site_id
-		             WHERE d.id = c.enrolled_device_id
+		             WHERE (d.id = c.enrolled_device_id
+		                    OR (s.company_id = $1
+		                        AND starts_with(c.identifier,
+		                                'legacy:terminal:' || d.serial_number || ':')))
 		               AND d.deleted_at IS NULL AND s.deleted_at IS NULL
 		               AND NOT EXISTS (
 		                    SELECT 1 FROM credential_placements pl
@@ -136,9 +157,8 @@ func resetEnrolmentsForRetiredTerminalsTx(tx *sql.Tx, companyID int64,
 	}
 
 	// The legacy column names one terminal. If it names a retired one, point it at
-	// a terminal that still holds the finger, or clear it. Repointing matters: the
-	// person detail page reads this column alone, so clearing it for somebody
-	// enrolled elsewhere would show them as Not enrolled on that page.
+	// a terminal that still holds the finger, or clear it. Repointing matters to
+	// the site-key member API, which reads this column alone.
 	rows, err = tx.Query(`
 		UPDATE people p
 		   SET fingerprint_template = (

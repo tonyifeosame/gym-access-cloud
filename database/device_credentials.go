@@ -472,8 +472,12 @@ func resolveOrCreateCredentialTx(tx *sql.Tx, companyID, personID, deviceID int64
 		err := tx.QueryRow(`
 			SELECT id FROM credentials
 			 WHERE public_id = $1::uuid AND company_id = $2 AND person_id = $3
-			   AND deleted_at IS NULL`,
-			report.CredentialID, companyID, personID).Scan(&id)
+			   AND deleted_at IS NULL
+			   AND (status <> 'REVOKED' OR $4)`,
+			// A revoked credential cannot acquire a placement. REMOVED still has to
+			// land: that is a terminal confirming it has erased the finger.
+			report.CredentialID, companyID, personID,
+			report.State == models.PlacementRemoved).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Present but not this person's, or not this tenant's. Reported as
 			// not found: a terminal learns nothing about whose it is.
