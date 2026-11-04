@@ -165,7 +165,8 @@ func ConsoleRetireTerminal(c *gin.Context) {
 	}
 
 	recordAudit(c, auditTerminalRetired, auditTargetTerminal, "", serial, gin.H{
-		"reason": req.Reason,
+		"reason":           req.Reason,
+		"enrolments_reset": result.EnrolmentsReset,
 	})
 
 	// 200 with a body rather than 204: the cancelled-work count is the fact an
@@ -175,6 +176,7 @@ func ConsoleRetireTerminal(c *gin.Context) {
 		Retired:              true,
 		CredentialCleared:    true,
 		PendingJobsCancelled: result.PendingJobsCancelled,
+		EnrolmentsReset:      result.EnrolmentsReset,
 	})
 }
 

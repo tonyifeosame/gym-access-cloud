@@ -232,6 +232,7 @@ export function RetireTerminalDialog({
       consequence={
         <>
           The terminal is removed from your fleet and its credential destroyed.
+          People enrolled only on this terminal become <strong>Not enrolled</strong>.
           This <strong>cannot be undone</strong> from the console.
         </>
       }

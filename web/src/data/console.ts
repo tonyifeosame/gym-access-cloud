@@ -267,6 +267,8 @@ export function useRetireSite(): UseMutationResult<RetireSiteResponse, Error, st
       queryClient.removeQueries({ queryKey: keys.sites.settings(siteId) })
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
+      // Retiring its terminals can end people's fingerprint enrolments.
+      void queryClient.invalidateQueries({ queryKey: keys.people.all })
       void queryClient.invalidateQueries({ queryKey: SESSION_KEY })
       recordedInAudit(queryClient)
     },
@@ -517,6 +519,8 @@ export function useRetireTerminal(
       queryClient.removeQueries({ queryKey: keys.terminals.detail(serial) })
       void queryClient.invalidateQueries({ queryKey: keys.terminals.all })
       void queryClient.invalidateQueries({ queryKey: keys.sites.all })
+      // Retiring it can end people's fingerprint enrolments.
+      void queryClient.invalidateQueries({ queryKey: keys.people.all })
       recordedInAudit(queryClient)
     },
   })

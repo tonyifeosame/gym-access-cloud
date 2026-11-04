@@ -294,6 +294,8 @@ export interface RotateSiteKeyResponse {
 export interface RetireSiteResponse {
   retired: boolean
   terminals_retired: number
+  /** People who became Not enrolled because these terminals held their only enrolment. */
+  enrolments_reset: number
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +899,8 @@ export interface TerminalRetiredResponse {
   retired: boolean
   credential_cleared: boolean
   pending_jobs_cancelled: number
+  /** People who became Not enrolled because this terminal held their only enrolment. */
+  enrolments_reset: number
 }
 
 /**

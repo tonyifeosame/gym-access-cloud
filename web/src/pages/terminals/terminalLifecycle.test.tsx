@@ -1,10 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter, RouterProvider } from 'react-router-dom'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setCsrfToken } from '../../api/csrf'
 import type { Role } from '../../api/types'
+import { keys } from '../../data/keys'
 import { makeSession, makeSite, makeTerminal, SITE_A, SITE_B } from '../../test/fixtures'
 import { makeTestQueryClient, renderWithSession } from '../../test/render'
 import { failNext, resetServerState, resetTerminalModes, seed, state } from '../../test/server'
@@ -264,6 +265,36 @@ describe('retiring a terminal', () => {
     // lingering as a row that 404s when opened.
     await screen.findByRole('heading', { name: /terminals/i })
     await waitFor(() => expect(screen.queryByText('AT-0001')).not.toBeInTheDocument())
+  })
+
+  it('warns that people enrolled only here become Not enrolled', async () => {
+    signIn()
+    renderTerminal()
+    await openLifecycle(/^retire$/i)
+
+    expect(dialog()).toHaveTextContent(/enrolled only on this terminal become Not enrolled/i)
+  })
+
+  it('refreshes people, because retiring can change who is enrolled', async () => {
+    signIn()
+    const queryClient = makeTestQueryClient()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    const router = createMemoryRouter(
+      [
+        { path: '/terminals', element: <TerminalsListPage /> },
+        { path: '/terminals/:serial', element: <TerminalDetailPage /> },
+      ],
+      { initialEntries: ['/terminals/AT-0001'] },
+    )
+    renderWithSession(<RouterProvider router={router} />, queryClient)
+    const user = await openLifecycle(/^retire$/i)
+
+    await user.type(within(dialog()).getByLabelText(/type .* to confirm/i), 'AT-0001')
+    await user.click(within(dialog()).getByRole('button', { name: /retire terminal/i }))
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: keys.people.all }),
+    )
   })
 })
 

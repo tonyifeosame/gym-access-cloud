@@ -55,6 +55,10 @@ type TerminalLifecycleResult struct {
 	// believing those changes had been delivered.
 	PendingJobsCancelled int64
 
+	// EnrolmentsReset is how many people became Not enrolled because this terminal
+	// held their only fingerprint enrolment. Retirement only.
+	EnrolmentsReset int
+
 	// RosterResynced reports that a full-sync snapshot was queued in the same
 	// transaction, which is what makes a relocation take effect at the door
 	// rather than at the next reconciler pass.
@@ -250,10 +254,15 @@ func RetireTerminal(companyID int64, serial, reason string,
 		       active = FALSE,
 		       disabled_by = NULLIF($3, 0)::bigint,
 		       updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
+		 WHERE id = $1 AND deleted_at IS NULL
 		RETURNING serial_number, status, active`,
 		deviceID, reason, actorUserID).
 		Scan(&result.SerialNumber, &result.Status, &result.Active)
+	// Lost a race with another retire of the same terminal. That request did the
+	// work; this one answers exactly as a later repeat would.
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, models.ErrDeviceNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -277,12 +286,18 @@ func RetireTerminal(companyID int64, serial, reason string,
 		return nil, fmt.Errorf("clearing placements for retired terminal: %w", err)
 	}
 
+	enrolmentsReset, err := resetEnrolmentsForRetiredTerminalsTx(tx, companyID, []int64{deviceID})
+	if err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
 	result.CredentialCleared = true
 	result.PendingJobsCancelled = cancelled
+	result.EnrolmentsReset = enrolmentsReset
 	return &result, nil
 }
 

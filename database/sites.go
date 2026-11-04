@@ -218,6 +218,10 @@ type RetirementResult struct {
 	// discover it.
 	TerminalsRetired int
 
+	// EnrolmentsReset is how many people became Not enrolled because those
+	// terminals held their only fingerprint enrolment.
+	EnrolmentsReset int
+
 	// SitePublicID and SiteName identify what was retired, for the audit record.
 	//
 	// Returned from the retiring UPDATE rather than read back afterwards: the row
@@ -276,17 +280,33 @@ func RetireSite(companyID, siteID int64) (*RetirementResult, error) {
 		return nil, err
 	}
 
-	result, err := tx.Exec(`
+	rows, err := tx.Query(`
 		UPDATE devices
 		   SET deleted_at = CURRENT_TIMESTAMP,
 		       active = FALSE,
 		       status = 'DISABLED',
 		       updated_at = CURRENT_TIMESTAMP
-		 WHERE site_id = $1 AND deleted_at IS NULL`, siteID)
+		 WHERE site_id = $1 AND deleted_at IS NULL
+		RETURNING id`, siteID)
 	if err != nil {
 		return nil, err
 	}
-	terminals, err := result.RowsAffected()
+	var terminals []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		terminals = append(terminals, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	enrolmentsReset, err := resetEnrolmentsForRetiredTerminalsTx(tx, companyID, terminals)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +315,8 @@ func RetireSite(companyID, siteID int64) (*RetirementResult, error) {
 		return nil, err
 	}
 	return &RetirementResult{
-		TerminalsRetired: int(terminals),
+		TerminalsRetired: len(terminals),
+		EnrolmentsReset:  enrolmentsReset,
 		SitePublicID:     publicID,
 		SiteName:         retiredName,
 	}, nil

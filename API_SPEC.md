@@ -2065,6 +2065,16 @@ is cancelled. The response carries the terminal detail plus:
 }
 ```
 
+`DELETE /console/terminals/{serial}` (ADMIN) retires a terminal, and
+`DELETE /console/sites/{site_id}` retires every terminal at a site. Fingerprint
+enrolments held only on a retired terminal end in the same transaction: those
+people read as not enrolled (`biometric_enrolled: false`), and `enrolments_reset`
+in the response counts them. Anyone still enrolled on a terminal that is not
+retired, including a disabled one, keeps their enrolment. People, access history
+and attendance are not changed. Repeating the request returns `404`, because the
+terminal is already gone, and changes nothing. Terminal release is a separate
+operation and does not reset enrolment.
+
 **`recovery` is an instruction, not a description**, and a client is expected to
 show it verbatim. The order in it is required and neither step can be skipped:
 
@@ -2379,11 +2389,10 @@ is computed from the live-credential rule rather than from the length of this
 array, so a person whose only credential is revoked reads as `NONE` while that
 row stays visible.
 
-**No route currently revokes a credential.** The response contract above is what
-this endpoint returns *if* a credential is ever in that state; nothing on the
-platform puts one there today, and withdrawal is done through the roster instead
-— removing a person's access or deactivating them takes them off it, and the
-terminal erases the template. See `docs/biometric-replication.md` §7.
+**No route revokes a single credential.** A credential reaches that state only
+when the last terminal holding it is retired. Otherwise withdrawal is done through
+the roster — removing a person's access or deactivating them takes them off it,
+and the terminal erases the template. See `docs/biometric-replication.md` §7.
 
 **Read `enrolment_source`, not `credentials.length`, to decide whether somebody
 is enrolled.** `LEGACY_ONLY` is exactly the case where the array is **empty** and
