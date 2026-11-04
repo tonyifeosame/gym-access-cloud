@@ -88,6 +88,9 @@ type ConsoleTerminalRetiredResponse struct {
 	Retired              bool   `json:"retired"`
 	CredentialCleared    bool   `json:"credential_cleared"`
 	PendingJobsCancelled int64  `json:"pending_jobs_cancelled"`
+	// EnrolmentsReset is how many people became Not enrolled because this terminal
+	// held their only fingerprint enrolment.
+	EnrolmentsReset int `json:"enrolments_reset"`
 }
 
 // ConsoleTerminalHealth is the operational state the console shows beside the

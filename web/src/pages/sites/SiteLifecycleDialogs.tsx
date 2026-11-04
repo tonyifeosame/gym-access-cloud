@@ -113,7 +113,8 @@ export function RetireSiteDialog({
             {terminals} terminal{terminals === 1 ? '' : 's'}
           </strong>{' '}
           installed at it. Every one of them stops letting anybody in immediately,
-          and this cannot be undone from the console.
+          people enrolled only on them become Not enrolled, and this cannot be undone
+          from the console.
         </>
       }
       detail={

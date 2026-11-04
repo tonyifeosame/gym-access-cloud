@@ -376,6 +376,7 @@ type ConsoleSiteRotatedResponse struct {
 type ConsoleSiteRetiredResponse struct {
 	Retired          bool `json:"retired"`
 	TerminalsRetired int  `json:"terminals_retired"`
+	EnrolmentsReset  int  `json:"enrolments_reset"`
 }
 
 // ---------------------------------------------------------------------------

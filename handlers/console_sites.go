@@ -217,13 +217,17 @@ func ConsoleRetireSite(c *gin.Context) {
 	// doors stopped working when this site was retired" is the question somebody
 	// asks afterwards, and the response is gone by then.
 	recordAudit(c, auditSiteRetired, auditTargetSite, result.SitePublicID,
-		result.SiteName, gin.H{"terminals_retired": result.TerminalsRetired})
+		result.SiteName, gin.H{
+			"terminals_retired": result.TerminalsRetired,
+			"enrolments_reset":  result.EnrolmentsReset,
+		})
 
 	// 200 with a body rather than 204: the terminal count is the whole point,
 	// and an empty response would discard the one fact the operator needs.
 	c.JSON(http.StatusOK, models.ConsoleSiteRetiredResponse{
 		Retired:          true,
 		TerminalsRetired: result.TerminalsRetired,
+		EnrolmentsReset:  result.EnrolmentsReset,
 	})
 }
 

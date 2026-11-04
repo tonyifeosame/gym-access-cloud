@@ -292,15 +292,22 @@ re-running fan-out is idempotent.
 Withdrawal works today **through the roster, not through the credential**. Take
 a person's access away or deactivate them and they leave the roster; the
 `FULL_SYNC` reconcile removes them and the firmware erases the template from the
-sensor. That path exists, is used by terminal relocation and retirement, and
+sensor. That path exists, is used by terminal relocation, and
 `database/terminals.go` writes the `PLACED -> REMOVING` transition it depends on.
 
-**Credential-level revocation does NOT exist**, and an earlier draft of this
-section said it did. `credentials.status = REVOKED` would drive live placements
-to `REMOVING`, but nothing on the platform ever sets that status: there is no
-route, no handler and no statement that writes it, and the only write to
-`credentials.status` anywhere is `PENDING -> ACTIVE`. `models.CredentialRevokeRequest`
-is declared and unused.
+**Retirement ends enrolments that lived only on the retired terminal.**
+`database/terminal_enrolment.go` sets those credentials to `REVOKED` (reason
+`terminal retired`) and clears or repoints the legacy locator, in the retiring
+transaction. A credential still placed on, or owed with sealed material to, a
+terminal that is not retired is untouched. The retired unit receives nothing, so
+this changes the platform's record and not its sensor, and **sealed material on a
+revoked credential is kept** until an erasure path exists.
+
+**Operator-driven credential revocation does NOT exist.** There is no route or
+handler for it, and retirement is the only code that sets
+`credentials.status = REVOKED`. It does not drive placements on other terminals to
+`REMOVING`, because it only revokes credentials with no valid copy on one.
+`models.CredentialRevokeRequest` is declared and unused.
 
 The consequence is in §11: material cannot be replaced once stored, so
 re-enrolment has no path. Nothing is broken today because no firmware uploads
